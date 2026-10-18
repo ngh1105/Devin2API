@@ -19,6 +19,9 @@ const (
 
 	// Scope is requested at the authorization request.
 	Scope = "openid profile email offline_access"
+
+	// ClientID is the OAuth 2.0 client identifier registered with Auth0.
+	ClientID = "devin-client-id"
 )
 
 // BaseURL for the Auth0 tenant — built from AuthDomain when not overridden.
