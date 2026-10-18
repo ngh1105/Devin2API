@@ -88,6 +88,29 @@ func TestWebRoutesSpa(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("GET /web/accounts.html status: got %d, want %d", rec.Code, http.StatusNotFound)
 	}
+
+	// 7) GET /web/tokens.html → 404 (old file removed).
+	req = httptest.NewRequest(http.MethodGet, "/web/tokens.html", nil)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET /web/tokens.html status: got %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+// TestWebPathTraversalGuard exercises the unexported webFileServer directly
+// to verify it rejects ".." in the embedded FS path with 404.
+func TestWebPathTraversalGuard(t *testing.T) {
+	for _, p := range []string{"/web/x/../../go.mod", "/web/../../web/index.html", "/web/foo%2F..%2Fbar"} {
+		req, _ := http.NewRequest(http.MethodGet, p, nil)
+		rec := httptest.NewRecorder()
+		webFileServer(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s webFileServer: got %d, want %d (path traversal must be rejected)", p, rec.Code, http.StatusNotFound)
+		}
+	}
 }
 
 // TestAdminAPIWorks verifies admin API is still operational alongside web panel.

@@ -177,6 +177,11 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 // webFileServer serves embedded web assets from index.html through styles.css.
 func webFileServer(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/web/")
+	// Guard against path traversal before reading from the embedded FS.
+	if strings.Contains(path, "..") || path != strings.TrimPrefix(path, "/") {
+		http.NotFound(w, r)
+		return
+	}
 	data, err := web.FS.ReadFile(path)
 	if err != nil || len(data) == 0 {
 		http.NotFound(w, r)

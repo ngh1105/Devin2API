@@ -101,9 +101,6 @@
           }
           tabIdx.className = "tab active";
           panels[tabIdx].className = "tab-panel active";
-          if (tabIdx === "accounts") loadAccounts();
-          else if (tabIdx === "tokens") loadTokens();
-          else if (tabIdx === "settings") loadSettings();
         };
       })(i);
     }
@@ -181,7 +178,6 @@
       tr.appendChild(tdSt);
 
       // Usage bar
-      tr.appendChild(document.createElement("template")).content;
       var tmp = document.createElement("template");
       tmp.innerHTML = usageBarHTML(a);
       tr.appendChild(tmp.content.firstChild);
@@ -453,7 +449,7 @@
       }).catch(function (e) { box.textContent = e.message; box.className = "new-token-box err"; });
       box.style.display = "";
     };
-    document.getElementById("tab-settings").onclick = function () { /* noop; set up in tabs */ };
+    document.getElementById("btn-refresh-all").onclick = refreshAllUsage;
     renderApiTab();
   }
 
