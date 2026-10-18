@@ -115,7 +115,7 @@ func (s *TokenStore) saveTokens() error {
 		return fmt.Errorf("marshal tokens: %w", err)
 	}
 	tmp := s.idxPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return fmt.Errorf("write tmp: %w", err)
 	}
 	if err := os.Rename(tmp, s.idxPath); err != nil {

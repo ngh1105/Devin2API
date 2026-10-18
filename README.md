@@ -2,7 +2,7 @@
 
 OpenAI-compatible reverse proxy API for Devin — built from scratch in Go.
 
-**Milestone 1:** OAuth login (Auth0 PKCE), account persistence as JSON, a web panel (accounts + tokens pages), and a token-gated `/v1` proxy stub. The chat completions endpoint currently returns **501 "upstream not implemented yet"** (as an SSE error event when `stream: true`). The next milestone is implementing the Devin upstream chat protocol (WebSocket) to make `/v1/chat/completions` functional.
+**Milestone 1:** OAuth login (Auth0 PKCE), account persistence as JSON, a web panel (accounts + tokens pages), and a token-gated `/v1` proxy stub. The chat completions endpoint currently returns **501 "upstream not implemented yet"** (as plain `data:` frames per the OpenAI stream protocol). The next milestone is implementing the Devin upstream chat protocol (WebSocket) to make `/v1/chat/completions` functional.
 
 ---
 
@@ -134,7 +134,7 @@ If the token store is **empty** (no tokens created), the proxy accepts requests 
 |--------------------------------------|----------|-------------------------------------------------------|
 | `GET /healthz`                       | GET      | Returns `{"status":"ok"}`.                            |
 | `GET /v1/models`                     | GET      | Returns the static model list (model id: `devin`).    |
-| `POST /v1/chat/completions`          | POST     | **501** — body contains `{"error":{"message":"upstream not implemented yet"}}`.<br>When `stream: true`, the error arrives as an SSE `event: error` frame. |
+| `POST /v1/chat/completions`          | POST     | **501** — body contains `{"error":{"message":"upstream not implemented yet","type":"devin2api_error"}}`.<br>When `stream: true`, the error arrives as SSE `data:` frames. |
 
 The `/v1/chat/completions` endpoint mirrors the OpenAI Chat Completions wire format (request shape accepted as-is), but delegates upstream calls to Devin's actual chat protocol — which has not been implemented yet. This is **the next milestone**.
 

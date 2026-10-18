@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -490,5 +492,59 @@ func TestAdminRefreshMissingAccount(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status: got %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+// TestAdminLoginFlowGeneratesID verifies that POST /admin/api/accounts with
+// email+password uses AccountFromLogin (which sets a non-empty id) and that
+// an <id>.json file is persisted on disk.
+func TestAdminLoginFlowGeneratesID(t *testing.T) {
+	fakeCfg := fakeAuthHandlerConfig{
+		redirectURI:   "https://app.devin.ai/post-auth",
+		skipAuthorize: false,
+	}
+	fakeSrv := fakeAuthHandler(t, fakeCfg)
+	defer fakeSrv.Close()
+
+	tmp := t.TempDir()
+	authC := auth.NewClient(auth.WithBaseURL(fakeSrv.URL), auth.WithHTTPClient(fakeSrv.Client()))
+	srv := makeTestServerWithAuth(t, tmp, authC)
+
+	body := `{"email":"user@test.com","password":"secret"}`
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status: got %d, want %d", rec.Code, http.StatusCreated)
+	}
+	var acc store.Account
+	if err := json.Unmarshal(rec.Body.Bytes(), &acc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if acc.ID == "" {
+		t.Error("expected account id to be non-empty (AccountFromLogin should generate it)")
+	}
+
+	// Verify the .json file exists on disk in the store directory.
+	expectedFile := filepath.Join(tmp, acc.ID+".json")
+	if _, err := os.Stat(expectedFile); os.IsNotExist(err) {
+		t.Errorf("expected account file %s to exist on disk", expectedFile)
+	}
+
+	// Also verify via GET listing that the account appears.
+	req2 := httptest.NewRequest(http.MethodGet, "/admin/api/accounts", nil)
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("list status: got %d, want %d", rec2.Code, http.StatusOK)
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(rec2.Body.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	if len(list) != 1 {
+		t.Errorf("expected 1 account in list, got %d", len(list))
 	}
 }

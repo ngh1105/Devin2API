@@ -15,6 +15,13 @@ import (
 	"github.com/ngh1105/Devin2API/internal/store"
 )
 
+func newAuthClient(cfg *config.Config) *auth.Client {
+	if cfg.BaseURL != "" {
+		return auth.NewClient(auth.WithBaseURL(cfg.BaseURL))
+	}
+	return auth.NewClient()
+}
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -76,12 +83,7 @@ func runLogin(ctx context.Context, stdout io.Writer, stdin io.Reader, cfg config
 	fmt.Fprintln(stdout, "") // newline after hidden input
 
 	// --- auth flow -----------------------------------------------------------
-	var c *auth.Client
-	if cfg.BaseURL != "" {
-		c = auth.NewClient(auth.WithBaseURL(cfg.BaseURL))
-	} else {
-		c = auth.NewClient()
-	}
+	c := newAuthClient(&cfg)
 	tokens, err := c.Login(ctx, email, password)
 	if err != nil {
 		return fmt.Errorf("login: %w", err)
@@ -125,7 +127,7 @@ func serve(cfg config.Config) {
 		os.Exit(1)
 	}
 
-	srv := server.New(cfg, accounts, tokens, nil)
+	srv := server.New(cfg, accounts, tokens, newAuthClient(&cfg))
 	fmt.Printf("Serving on %s, data at %s\n", cfg.Listen, cfg.DataDir)
 	if err := srv.Start(cfg.Listen); err != nil {
 		fmt.Fprintf(os.Stderr, "serve: %v\n", err)

@@ -189,29 +189,7 @@ func (s *Server) handleLoginFlow(w http.ResponseWriter, r *http.Request, rawBody
 		return
 	}
 
-	acct := &store.Account{
-		Schema:    1,
-		Email:     email,
-		Sub:       profile.Sub,
-		CreatedAt: time.Now(),
-		OAuth: store.OAuth{
-			ClientID:    auth.ClientID,
-			Domain:      auth.AuthDomain,
-			Audience:    auth.Audience,
-			RedirectURI: auth.RedirectURI,
-		},
-		Tokens: store.Tokens{
-			AccessToken:  tokens.AccessToken,
-			RefreshToken: tokens.RefreshToken,
-			IDToken:      tokens.IDToken,
-			ExpiresAt:    time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second).Unix(),
-			Scope:        tokens.Scope,
-		},
-		Profile: store.Profile{
-			Name:    profile.Name,
-			Picture: profile.Picture,
-		},
-	}
+	acct := store.AccountFromLogin(email, tokens, profile)
 
 	if err := s.accounts.Save(acct); err != nil {
 		writeErr(w, http.StatusInternalServerError, "unable to save account")
