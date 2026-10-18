@@ -1,6 +1,7 @@
 package server
 
 import (
+	"mime"
 	"net/http"
 	"strings"
 	"sync"
@@ -132,13 +133,26 @@ func (s *Server) Start(addr string) error {
 func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
+	// SPA entry — redirect bare paths to /web/ so fileserver can find index.html.
 	if path == "/" || path == "/v1" || path == "/admin" {
-		http.Redirect(w, r, "/web/accounts.html", http.StatusFound)
+		http.Redirect(w, r, "/web/", http.StatusFound)
 		return
 	}
 
 	if strings.HasPrefix(path, "/web/") {
-		http.StripPrefix("/web/", http.FileServer(http.FS(web.FS))).ServeHTTP(w, r)
+		if path == "/web/" {
+			data, err := web.FS.ReadFile("index.html")
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(data)
+			return
+		}
+		// Serve embedded static assets (app.js, styles.css).
+		webFileServer(w, r)
 		return
 	}
 
@@ -158,4 +172,37 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.NotFound(w, r)
+}
+
+// webFileServer serves embedded web assets from index.html through styles.css.
+func webFileServer(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/web/")
+	data, err := web.FS.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	var ct string
+	switch {
+	case strings.HasSuffix(path, ".html"):
+		ct = "text/html; charset=utf-8"
+	case strings.HasSuffix(path, ".css"):
+		ct = "text/css; charset=utf-8"
+	case strings.HasSuffix(path, ".js"):
+		ct = "application/javascript; charset=utf-8"
+	default:
+		ct = mime.TypeByExtension("." + pathExt(path))
+	}
+	w.Header().Set("Content-Type", ct)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func pathExt(p string) string {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '.' {
+			return p[i+1:]
+		}
+	}
+	return ""
 }
