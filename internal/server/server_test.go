@@ -195,6 +195,9 @@ func TestChatCompletionsStreamStub(t *testing.T) {
 	if !strings.Contains(body, "[DONE]") {
 		t.Errorf("body missing [DONE]: %q", body)
 	}
+	if !strings.Contains(body, "data: ") {
+		t.Errorf("body missing SSE data: prefix: %q", body)
+	}
 }
 
 func TestTokenListEmpty(t *testing.T) {

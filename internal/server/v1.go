@@ -94,10 +94,13 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		errResp := openai.Error{Error: openai.ErrorBody{Message: msg, Type: "devin2api_error"}}
-		enc := json.NewEncoder(w)
-		enc.Encode(errResp) // "data: {...}\n"
-		io.WriteString(w, "data: [DONE]\n\n")
-		w.(http.Flusher).Flush()
+		payload, _ := json.Marshal(errResp)
+		io.WriteString(w, "data: ")
+		w.Write(payload)
+		io.WriteString(w, "\n\ndata: [DONE]\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
 		return
 	}
 
