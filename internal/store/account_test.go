@@ -593,3 +593,110 @@ func TestImportUsageErrorField(t *testing.T) {
 		t.Errorf("usage_error = %q; want %q", a.UsageErr, "rate-limited")
 	}
 }
+
+// --- finding 2+3: new tests -------------------------------------------------
+
+// TestImportV2WithSessionTokenTopLevel: a record carrying both session_token and tokens
+// should be dispatched to v2 import (checks first), preserving usage etc.
+func TestImportV2WithSessionTokenTopLevel(t *testing.T) {
+	raw := `{
+		"schema": 2,
+		"id": "acc_vst",
+		"email": "vst@example.com",
+		"user_id": "usr_vst",
+		"plan": "pro",
+		"nickname": "VST",
+		"enabled": true,
+		"auth_kind": "oauth",
+		"session_token": "devin-session-token$eyJ.top.level",
+		"tokens": {"session_token": "devin-session-token$nested"},
+		"usage": {"plan":"pro","checked_at":1700000000}
+	}`
+	store := mustStore(t)
+	a, err := store.Import([]byte(raw))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	checks := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"schema", a.Schema, int64(2)},
+		{"id", a.ID, "acc_vst"},
+		{"user_id", a.UserID, "usr_vst"},
+		{"nickname", a.Nickname, "VST"},
+		{"session_token", a.Tokens.SessionToken, "devin-session-token$eyJ.top.level"}, // top-level wins in v2
+		{"usage_plan", a.Usage.Plan, "pro"},
+		{"usage_checked_at", a.Usage.CheckedAt, int64(1700000000)},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %#v; want %#v", c.name, c.got, c.want)
+		}
+	}
+}
+
+// TestMergeKeepsDisabledOnBareImport: account saved enabled:false, bare-token import
+// upserts → still enabled:false because bare imports don't set enabledExplicitlySet.
+func TestMergeKeepsDisabledOnBareImport(t *testing.T) {
+	existing := &Account{Schema: 2, ID: "acc_keep", Email: "keep@test.com", UserID: "usr_keep", Enabled: false, CreatedAt: time.Now()}
+	store := mustStore(t)
+	if err := store.Save(existing); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw := `{"user_id": "usr_keep", "access_token": "bare_tok"}`
+	imported, err := store.Import([]byte(raw))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if imported.ID != existing.ID {
+		t.Errorf("imported ID = %q; want %q (upsert)", imported.ID, existing.ID)
+	}
+	final, _ := store.Get(existing.ID)
+	if final.Enabled {
+		t.Error("enabled should stay false after bare-token import upsert")
+	}
+	// Bare import should NOT overwrite existing identity.
+	if final.UserName != "" {
+		t.Error("username should stay empty after bare-token import upsert")
+	}
+}
+
+// TestV1MigrationEnabledFalsePersists: v1 JSON that carries "enabled":false
+// should migrate to schema 2 with enabled=false preserved.
+const v1JSONWithEnabledFalse = `{
+  "schema": 1,
+  "id": "acc_v1enf",
+  "email": "v1enf@example.com",
+  "sub": "auth0|123",
+  "created_at": "2024-01-15T10:00:00Z",
+  "oauth": {"client_id":"cli_abc","domain":"acme.auth0.com","audience":"https://api.acme.io","redirect_uri":"https://app.acme.io/cb"},
+  "tokens": {"access_token":"ghp_bbb","refresh_token":"rt_ccc","id_token":"eyJb","expires_at":1737849600,"scope":"openid"},
+  "profile": {"name":"Base","picture":"https://img.cdn/b"},
+  "usage": null,
+  "enabled": false
+}`
+
+func TestV1MigrationEnabledFalsePersists(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "acc_v1enf.json"), []byte(v1JSONWithEnabledFalse), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewAccountStore(dir)
+	if err != nil {
+		t.Fatalf("NewAccountStore: %v", err)
+	}
+	a, err := store.Get("acc_v1enf")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if a.Enabled {
+		t.Error("enabled should have persisted as false from v1 migration when 'enabled' key present")
+	}
+	// Also verify session_token was migrated.
+	wantTok := "devin-session-token$ghp_bbb"
+	if a.Tokens.SessionToken != wantTok {
+		t.Errorf("session_token = %q; want %q", a.Tokens.SessionToken, wantTok)
+	}
+}

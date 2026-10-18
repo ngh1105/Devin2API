@@ -2,6 +2,7 @@
 package store
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -90,6 +91,9 @@ type Account struct {
 	Tokens    Tokens    `json:"tokens"`
 	Usage     *Usage    `json:"usage"`
 	UsageErr  string    `json:"usage_error,omitempty"`
+	// enabledExplicitlySet tracks whether Enabled was explicitly set in the
+	// import payload (used by mergeOnlyExplicitFields to preserve existing state).
+	enabledExplicitlySet bool `json:"-"`
 }
 
 // UnmarshalJSON handles v1→v2 migration during load.
@@ -112,9 +116,11 @@ func (a *Account) UnmarshalJSON(data []byte) error {
 	// Migrate v1 access_token → session_token.
 	a.Tokens.SessionToken = FormatSessionToken(v1.Tokens.AccessToken)
 
-	// Enabled defaults true; no omitempty shadow needed because
-	// legacy v1 JSON never carries the "enabled" key.
-	a.Enabled = true
+	// Enabled: defaults true unless the raw JSON explicitly carried an "enabled" key.
+	if !hasKey(data, "enabled") {
+		a.Enabled = true
+	}
+	// AuthKind: always set for migrated accounts.
 	a.AuthKind = "oauth"
 
 	return nil
@@ -228,35 +234,42 @@ func (s *AccountStore) Import(raw json.RawMessage) (*Account, error) {
 	switch {
 	case hasBareEmailPass(parsed):
 		return nil, &ImportError{"email/password found; run the login flow"}
-	case isCLIProxyAPIShape(parsed):
-		acct := importCLIProxyAPI(parsed)
-		return upsertByUserOrEmail(s, acct), nil
 	case isV2Schema(parsed):
 		acct, err := importSchemaV2(parsed)
 		if err != nil {
 			return nil, err
 		}
 		return upsertByUserOrEmail(s, acct), nil
+	case isCLIProxyAPIShape(parsed):
+		acct := importCLIProxyAPI(parsed)
+		return upsertByUserOrEmail(s, acct), nil
 	default:
-		// Bare token blob — keys must be subset of tokenBlobKeys.
-		if !isSubset(parsed, tokenBlobKeys) || len(parsed) == 0 {
+		// Bare token blob — must have at least one token key.
+		// Identity/known keys are tolerated; truly unknown keys cause an error.
+		hasTokenKey := false
+		for k := range parsed {
+			if tokenBlobKeys[k] {
+				hasTokenKey = true
+				break
+			}
+		}
+		if !hasTokenKey {
 			return nil, &ImportError{"unexpected fields: " + keysToReason(keysOf(parsed))}
+		}
+		// Reject blobs with entirely unrecognized top-level keys.
+		bareAcceptableKeys := map[string]bool{
+			"access_token": true, "refresh_token": true, "token": true,
+			"user_id": true, "email": true, "user_name": true,
+			"org_id": true, "api_key": true, "session_token": true,
+		}
+		for k := range parsed {
+			if !bareAcceptableKeys[k] {
+				return nil, &ImportError{"unexpected fields: " + keysToReason(keysOf(parsed))}
+			}
 		}
 		acct := importBareToken(parsed)
 		return upsertByUserOrEmail(s, acct), nil
 	}
-}
-
-// UpdateTokens sets the session_token field.
-func (s *AccountStore) UpdateTokens(id string, sessionToken string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	a, ok := s.accounts[id]
-	if !ok {
-		return os.ErrNotExist
-	}
-	a.Tokens.SessionToken = FormatSessionToken(sessionToken)
-	return nil
 }
 
 // AccountFromLogin builds an Account from a Devin CLI login event.
@@ -315,18 +328,6 @@ func FormatSessionToken(value string) string {
 var cliProxyDetectKeys = map[string]bool{
 	"api_key":       true,
 	"session_token": true,
-}
-
-var cliProxyAcceptKeys = map[string]bool{
-	"api_key":       true,
-	"session_token": true,
-	"user_name":     true,
-	"user_id":       true,
-	"org_id":        true,
-	"plan":          true,
-	"email":         true,
-	"auth_kind":     true,
-	"disabled":      true,
 }
 
 var v2SchemaKeys = map[string]bool{
@@ -406,7 +407,22 @@ func isCLIProxyAPIShape(m map[string]json.RawMessage) bool {
 }
 
 func isV2Schema(m map[string]json.RawMessage) bool {
-	return hasAnyKey(m, v2SchemaKeys)
+	// A record is considered v2 schema when it explicitly carries a "schema" key
+	// or an inline "tokens" object — the definitive markers.
+	_, hasSchema := m["schema"]
+	hasTokensObj := false
+	if raw, ok := m["tokens"]; ok {
+		var nested json.RawMessage
+		if err := json.Unmarshal(raw, &nested); err == nil && len(nested) > 0 && nested[0] == '{' {
+			hasTokensObj = true
+		}
+	}
+	return hasSchema || hasTokensObj
+}
+
+func hasKey(data []byte, key string) bool {
+	target := []byte(`"` + key + `":`)
+	return bytes.Contains(data, target)
 }
 
 func parseJSONRaw(raw json.RawMessage) (map[string]json.RawMessage, error) {
@@ -435,16 +451,30 @@ func importBareToken(m map[string]json.RawMessage) *Account {
 	} else if v, ok := m["token"]; ok {
 		json.Unmarshal(v, &val)
 	}
-	return &Account{
+	acct := &Account{
 		Schema:    2,
 		ID:        genHex("acc_", 8),
 		Tokens:    Tokens{SessionToken: FormatSessionToken(val)},
 		CreatedAt: time.Now(),
 	}
+	// Also accept optional identity fields for upsert matching.
+	if raw, ok := m["user_id"]; ok {
+		json.Unmarshal(raw, &acct.UserID)
+	}
+	if raw, ok := m["email"]; ok {
+		json.Unmarshal(raw, &acct.Email)
+	}
+	if raw, ok := m["user_name"]; ok {
+		json.Unmarshal(raw, &acct.UserName)
+	}
+	if raw, ok := m["org_id"]; ok {
+		json.Unmarshal(raw, &acct.OrgID)
+	}
+	return acct
 }
 
 func importSchemaV2(m map[string]json.RawMessage) (*Account, error) {
-	acct := &Account{Schema: 2, AuthKind: "oauth", Enabled: true, CreatedAt: time.Now()}
+	acct := &Account{Schema: 2, Enabled: true, CreatedAt: time.Now(), enabledExplicitlySet: true}
 
 	setField := func(key string, dst *string) {
 		if raw, ok := m[key]; ok {
@@ -473,6 +503,10 @@ func importSchemaV2(m map[string]json.RawMessage) (*Account, error) {
 	if raw, ok := tokData["session_token"]; ok {
 		json.Unmarshal(raw, &acct.Tokens.SessionToken)
 	}
+	// Top-level session_token overrides tokens.session_token.
+	if raw, ok := m["session_token"]; ok {
+		json.Unmarshal(raw, &acct.Tokens.SessionToken)
+	}
 
 	rawUsage := m["usage"]
 	if len(rawUsage) > 0 && string(rawUsage) != "null" {
@@ -489,7 +523,7 @@ func importSchemaV2(m map[string]json.RawMessage) (*Account, error) {
 }
 
 func importCLIProxyAPI(m map[string]json.RawMessage) *Account {
-	acct := &Account{Schema: 2, AuthKind: "oauth", Enabled: true, CreatedAt: time.Now()}
+	acct := &Account{Schema: 2, AuthKind: "oauth", Enabled: true, CreatedAt: time.Now(), enabledExplicitlySet: true}
 
 	if raw, ok := m["api_key"]; ok {
 		var val string
@@ -532,36 +566,62 @@ func importCLIProxyAPI(m map[string]json.RawMessage) *Account {
 func upsertByUserOrEmail(store *AccountStore, newAcct *Account) *Account {
 	if newAcct.UserID != "" {
 		if old := findIndex(store, func(a *Account) bool { return a.UserID == newAcct.UserID }); old != nil {
-			mergeIntoV2(old, newAcct)
+			mergeOnlyExplicitFields(old, newAcct)
 			return old
 		}
 	}
 	if newAcct.Email != "" {
 		if old := findIndex(store, func(a *Account) bool { return a.Email == newAcct.Email }); old != nil {
-			mergeIntoV2(old, newAcct)
+			mergeOnlyExplicitFields(old, newAcct)
 			return old
 		}
 	}
 	return newAcct
 }
 
-func mergeIntoV2(dst, src *Account) {
+func mergeOnlyExplicitFields(dst, src *Account) {
+	// Schema always takes source value.
 	dst.Schema = src.Schema
-	dst.Email = src.Email
-	dst.UserName = src.UserName
-	dst.UserID = src.UserID
-	dst.OrgID = src.OrgID
-	dst.Plan = src.Plan
-	dst.Nickname = src.Nickname
-	dst.Enabled = src.Enabled
-	dst.AuthKind = src.AuthKind
-	dst.CreatedAt = src.CreatedAt
-	// Only override session_token if the source actually has one.
+
+	// Token: only copy when the source actually carries one.
 	if src.Tokens.SessionToken != "" {
 		dst.Tokens.SessionToken = src.Tokens.SessionToken
 	}
-	dst.Usage = src.Usage
-	dst.UsageErr = src.UsageErr
+	// Identity fields: only overwrite when source has a non-empty value.
+	if src.Email != "" {
+		dst.Email = src.Email
+	}
+	if src.UserName != "" {
+		dst.UserName = src.UserName
+	}
+	if src.UserID != "" {
+		dst.UserID = src.UserID
+	}
+	if src.OrgID != "" {
+		dst.OrgID = src.OrgID
+	}
+	if src.Plan != "" {
+		dst.Plan = src.Plan
+	}
+	if src.Nickname != "" {
+		dst.Nickname = src.Nickname
+	}
+	// Enabled: only overwrite when the source explicitly carried an enabled value.
+	if src.enabledExplicitlySet {
+		dst.Enabled = src.Enabled
+	}
+	// AuthKind: only when explicitly set in source.
+	if src.AuthKind != "" {
+		dst.AuthKind = src.AuthKind
+	}
+	// Usage: only when the source carries one.
+	if src.Usage != nil {
+		dst.Usage = src.Usage
+	}
+	// UsageError: only when the source has one.
+	if src.UsageErr != "" {
+		dst.UsageErr = src.UsageErr
+	}
 }
 
 func findIndex(store *AccountStore, match func(*Account) bool) *Account {
