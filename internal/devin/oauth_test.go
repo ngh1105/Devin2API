@@ -3,12 +3,11 @@ package devin
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,6 +84,10 @@ func TestGeneratePKCEFormat(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Callback integration tests (hit the real LoginState callback handler)
+// ---------------------------------------------------------------------------
+
 func TestStartLoginCallbackHappyPath(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		state := r.URL.Query().Get("state")
@@ -123,57 +126,77 @@ func TestStartLoginCallbackHappyPath(t *testing.T) {
 	}
 }
 
+// TestStartLoginCallbackStateMismatch sends an HTTP GET to the real callback
+// endpoint with a wrong state param, verifies Wait surfaces the mismatch error.
 func TestStartLoginCallbackStateMismatch(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.URL.Query().Get("state")
+		redirect := r.URL.Query().Get("redirect_uri")
+		w.Header().Set("Location", redirect+"?code=bad&state=wrong-state")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer ts.Close()
+
+	s, err := StartLogin(ts.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
+	defer s.Stop()
 
-	go func() {
-		conn, _ := ln.Accept()
-		if conn == nil {
-			return
-		}
-		fmt.Fprintf(conn, "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:%d/callback?code=bad&state=wrong-state\r\n\r\n", port)
-		conn.Close()
-	}()
-	time.Sleep(50 * time.Millisecond)
-
-	s, err := StartLogin("")
-	if err != nil {
-		t.Skipf("start login failed: %v", err)
-	}
-
-	callbackDone := make(chan struct{})
-	var gotError string
-	mux := http.NewServeMux()
-	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		st := r.URL.Query().Get("state")
-		if st != s.State {
-			gotError = fmt.Sprintf("state mismatch: got %q, want %q", st, s.State)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		close(callbackDone)
-	})
-
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
-
-	resp, err := http.Get(ts.URL + "/callback?code=bad&state=wrong-state")
+	// Simulate browser redirect: hit the bound loopback callback with wrong state.
+	callbackURL := "http://127.0.0.1:" + strconv.Itoa(s.Port) +
+		"/callback?code=bad&state=wrong-state"
+	client := &http.Client{}
+	req, _ := http.NewRequest(http.MethodGet, callbackURL, nil)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 
-	select {
-	case <-callbackDone:
-		t.Log("handler completed without error — check state param parsing")
-	default:
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	if gotError == "" {
-		t.Fatal("expected error message for state mismatch")
+	_, err = s.Wait(ctx, time.Second)
+	if err == nil {
+		t.Fatal("expected error for state mismatch")
+	}
+	if !strings.Contains(err.Error(), "state mismatch") {
+		t.Errorf("error = %q; expected 'state mismatch'", err.Error())
+	}
+}
+
+// TestStartLoginCallbackMissingParams hits /callback without code/state,
+// verifying Wait returns a missing-params error.
+func TestStartLoginCallbackMissingParams(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "http://127.0.0.1:"+strconv.Itoa(0)+"/callback")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer ts.Close()
+
+	s, err := StartLogin(ts.URL)
+	if err != nil {
+		t.Skipf("start login failed: %v", err)
+	}
+	defer s.Stop()
+
+	// Directly hit the callback with no params.
+	cbURL := "http://127.0.0.1:" + strconv.Itoa(s.Port) + "/callback"
+	resp, err := http.DefaultClient.Get(cbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err = s.Wait(ctx, time.Second)
+	if err == nil {
+		t.Fatal("expected error for missing params")
+	}
+	if !strings.Contains(err.Error(), "missing code or state") {
+		t.Errorf("error = %q; expected 'missing code or state'", err.Error())
 	}
 }

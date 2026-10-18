@@ -19,14 +19,21 @@ import (
 var ErrTokenExpired = errors.New("token expired or revoked")
 
 // GenerateFingerprint produces a deterministic 732-hex-char device fingerprint
-// using a SHA-256 chain: seed → seed-0 → seed-1 → ... → seed-255 (256 inputs).
+// using the CLIProxyAPI method: sequentially compute sha256(seed+"-"+counter),
+// append the hex digest to an accumulator, and truncate to 732 chars.
 func GenerateFingerprint(seed string) string {
-	h := sha256.Sum256([]byte(seed))
-	for i := 0; i < 256; i++ {
-		in := append(h[:], byte(i))
-		h = sha256.Sum256(in)
+	var buf []byte
+	counter := 0
+	for len(buf) < 732 {
+		in := make([]byte, 0, len(seed)+len(fmt.Sprintf("%d", counter))+1)
+		in = append(in, seed...)
+		in = append(in, '-')
+		in = append(in, fmt.Sprintf("%d", counter)...)
+		h := sha256.Sum256(in)
+		buf = append(buf, hex.EncodeToString(h[:])...)
+		counter++
 	}
-	return hex.EncodeToString(h[:])
+	return string(buf[:732])
 }
 
 // BuildGetUserStatusRequest builds the protobuf bytes for the ConnectRPC
@@ -112,18 +119,20 @@ func parsePlanStatus(data []byte, u *store.Usage) {
 		}
 		switch sf {
 		case 1: // PlanInfo
-			parsePlanInfo(sval, u)
-		case 2: // plan_start (subfield 1 = varint sec)
+			pinfo := make([]byte, len(sval))
+			copy(pinfo, sval)
+			parsePlanInfo(pinfo, u)
+		case 2: // plan_start (seconds, varint)
 			u.PlanStart = time.Unix(int64(svarint), 0).UTC()
-		case 3: // plan_end (subfield 1 = varint sec)
+		case 3: // plan_end (seconds, varint)
 			u.PlanEnd = time.Unix(int64(svarint), 0).UTC()
-		case 14:
+		case 14: // daily_quota_remaining_percent
 			u.DailyRemainingPercent = int64(svarint)
-		case 15:
+		case 15: // weekly_quota_remaining_percent
 			u.WeeklyRemainingPercent = int64(svarint)
-		case 17:
+		case 17: // daily_quota_reset_at (seconds)
 			u.DailyResetAt = time.Unix(int64(svarint), 0).UTC()
-		case 18:
+		case 18: // weekly_quota_reset_at (seconds)
 			u.WeeklyResetAt = time.Unix(int64(svarint), 0).UTC()
 		}
 	}
@@ -139,8 +148,10 @@ func parsePlanInfo(data []byte, u *store.Usage) {
 		switch sf {
 		case 2:
 			u.Plan = string(sval)
-		case 33:
-			parseOrgInfo(sval, u)
+		case 33: // OrgInfo embedded in PlanInfo
+			orgInfo := make([]byte, len(sval))
+			copy(orgInfo, sval)
+			parseOrgInfo(orgInfo, u)
 		}
 	}
 }

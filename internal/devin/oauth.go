@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -96,33 +97,35 @@ func GeneratePKCE() (verifier, challenge string) {
 
 // ---------- login session -----------------------------------------------------
 
+// loginResult holds the outcome of one /callback invocation. Owned exclusively
+// by the callback-goroutine; delivered to Wait via a channel to avoid races.
+type loginResult struct {
+	code  string
+	error string // non-empty means failure
+}
+
 // LoginState tracks an in-progress CLI login flow.
 type LoginState struct {
-	LoginURL string // URL to open in browser
+	LoginURL string // URL to open in browser (base64url params are query-safe)
 	Port     int    // bound loopback port
 	State    string // OAuth state param (exported for tests)
 	Verifier string // PKCE code_verifier
-	code     chan string
-	errCh    chan error
+	resultCh chan loginResult
 	done     chan struct{}
-	result   Result
-}
-
-// Result holds the outcome of Wait after a successful /callback.
-type Result struct {
-	Code  string
-	Error string
+	shutOnce atomic.Bool // ensures Stop is idempotent
+	srv      *http.Server
+	ln       net.Listener
 }
 
 // StartLogin binds a 127.0.0.1 listener on an ephemeral port and returns a
 // LoginState with the authorization URL built. The user opens the URL in their
 // browser. When authentication completes, Devin redirects to the callback with
-// ?code=&state=. If appBaseOverride is non-empty it replaces appBaseURL in the
+// ?code=&state=. If appBaseOverride is non-empty it replaces AppBaseURL in the
 // authorization URL (useful for tests pointing at httptest.Server).
 func StartLogin(appBaseOverride string) (*LoginState, error) {
 	v, c := GeneratePKCE()
 
-	base := APIBaseURL
+	base := AppBaseURL
 	if appBaseOverride != "" {
 		base = appBaseOverride
 	}
@@ -135,7 +138,7 @@ func StartLogin(appBaseOverride string) (*LoginState, error) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	redirect := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
 
-	s := &LoginState{
+	state := &LoginState{
 		LoginURL: fmt.Sprintf(
 			"%s/auth/cli/continue?redirect_uri=%s&prompt=select_account&code_challenge=%s&code_challenge_method=S256&state=%s",
 			base,
@@ -145,10 +148,9 @@ func StartLogin(appBaseOverride string) (*LoginState, error) {
 		Port:     port,
 		State:    v, // use verifier itself as state (unique enough)
 		Verifier: v,
-		code:     make(chan string, 1),
-		errCh:    make(chan error, 1),
+		resultCh: make(chan loginResult, 1),
 		done:     make(chan struct{}),
-		result:   Result{},
+		ln:       ln, // store for idempotent shutdown
 	}
 
 	lastVerifier = v // test-only accessor
@@ -158,37 +160,40 @@ func StartLogin(appBaseOverride string) (*LoginState, error) {
 		mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 			code := r.URL.Query().Get("code")
 			st := r.URL.Query().Get("state")
-			if code == "" || st == "" {
-				w.WriteHeader(http.StatusBadRequest)
-				fmt.Fprint(w, "missing code or state")
-				s.errCh <- errors.New("missing code or state")
-				close(s.done)
-				return
+			var res loginResult
+			switch {
+			case code == "" || st == "":
+				res.error = "missing code or state"
+			case st != state.State:
+				res.error = fmt.Sprintf("state mismatch: got %q, want %q", st, state.State)
+			default:
+				res.code = code
 			}
-			if st != s.State {
+			if res.error != "" {
 				w.WriteHeader(http.StatusBadRequest)
-				fmt.Fprint(w, "state mismatch")
-				s.errCh <- fmt.Errorf("state mismatch: got %q, want %q", st, s.State)
-				close(s.done)
-				return
+				fmt.Fprint(w, res.error)
 			}
-			s.result.Code = code
-			s.code <- code
-			close(s.done)
+			state.resultCh <- res
+			close(state.done)
 		})
 
-		srv := &http.Server{Handler: mux}
-		_ = srv.Serve(ln)
+		state.srv = &http.Server{Handler: mux}
+		_ = state.srv.Serve(ln)
 	}()
 
-	return s, nil
+	return state, nil
 }
 
-// Stop shuts down the callback server without waiting for authentication.
+// Stop shuts down the callback HTTP server and releases the listener. Idempotent.
 func (l *LoginState) Stop() {
-	select {
-	case <-l.done:
-	default:
+	if l.shutOnce.Swap(true) {
+		return
+	}
+	l.ln.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if l.srv != nil {
+		_ = l.srv.Shutdown(ctx)
 	}
 }
 
@@ -200,17 +205,20 @@ func (l *LoginState) Wait(ctx context.Context, timeout time.Duration) (Result, e
 
 	select {
 	case <-ctx.Done():
-		l.result.Error = "context cancelled"
-		return l.result, fmt.Errorf("login: context cancelled: %w", ctx.Err())
+		return Result{}, fmt.Errorf("login: context cancelled: %w", ctx.Err())
 	case <-timer.C:
-		l.result.Error = "login timed out"
-		return l.result, errors.New("login timed out")
-	case <-l.done:
-		if l.result.Error != "" {
-			return l.result, errors.New(l.result.Error)
+		return Result{}, errors.New("login timed out")
+	case res := <-l.resultCh:
+		if res.error != "" {
+			return Result{}, errors.New(res.error)
 		}
-		return l.result, nil
+		return Result{Code: res.code}, nil
 	}
+}
+
+// Result holds the outcome of a successful Wait call.
+type Result struct {
+	Code string
 }
 
 // lastVerifier stores the PKCE verifier from the most recent StartLogin call.
