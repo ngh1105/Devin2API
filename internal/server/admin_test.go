@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +16,17 @@ import (
 	"github.com/ngh1105/Devin2API/internal/devin"
 	"github.com/ngh1105/Devin2API/internal/store"
 )
+
+// ---------------------------------------------------------------------------
+// Wire type constant for protobuf helpers
+// ---------------------------------------------------------------------------
+
+const wireBytesVal = 2 // same as devin.WireTypeBytes
+
+func pwTag(field int, w byte) []byte       { return devin.PwTag(field, int(w)) }
+func pwVarint(v uint64) []byte             { return devin.PwVarint(v) }
+func pwString(f int, s string) []byte      { return devin.PwString(f, s) }
+func pwFieldVarint(f int, v uint64) []byte { return devin.PwFieldVarint(f, v) }
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -28,18 +40,6 @@ var (
 		"org_id": "test_org_1",
 		"principal_type": "user",
 		"email": "test@example.com"
-	}`
-	fixtureUsageJSON = `{
-		"plan": "pro",
-		"user_name": "Test User",
-		"user_id": "test_usr_1",
-		"org_id": "test_org_1",
-		"org_name": "Test Org",
-		"daily_remaining_percent": 80,
-		"weekly_remaining_percent": 60,
-		"plan_start": 1700000000,
-		"plan_end": 1731609600,
-		"checked_at": 1700000000
 	}`
 )
 
@@ -66,12 +66,11 @@ func newTestServer(t *testing.T, apiBase, serverBase string) *Server {
 // Tests
 // ===================================================================
 
-// TestLoginStartReplaces verifies that calling login/start twice stops the first
-// LoginState. The second start returns a different login_url; cancelling resets
-// status to idle. Includes port-closure assertion via net.DialTimeout.
+// TestLoginStartReplaces verifies login/start cancellation, gen bump, and port-closure.
 func TestLoginStartReplaces(t *testing.T) {
 	srv := newTestServer(t, "", "")
 
+	// --- first start ---------------------------------------------------------
 	req1 := httptest.NewRequest(http.MethodPost, "/admin/api/login/start", nil)
 	rec1 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec1, req1)
@@ -95,13 +94,16 @@ func TestLoginStartReplaces(t *testing.T) {
 		t.Errorf("status after first start: got %q, want \"pending\"", stResp["status"])
 	}
 
-	// Second start replaces first
+	// Capture FIRST login's port BEFORE starting second (Fix finding #3).
+	firstPort := 0
+	if srv.loginMngr.current != nil {
+		firstPort = srv.loginMngr.current.Port
+	}
+
+	// --- second start replaces first -----------------------------------------
 	req2 := httptest.NewRequest(http.MethodPost, "/admin/api/login/start", nil)
 	rec2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("second start: got %d, want 200", rec2.Code)
-	}
 	var resp2 struct {
 		LoginURL string `json:"login_url"`
 	}
@@ -110,21 +112,17 @@ func TestLoginStartReplaces(t *testing.T) {
 		t.Fatal("expected non-empty login_url")
 	}
 
-	// --- Port closure assertion ------------------------------------------------
-	// Capture current active state (the second login). Stop the first's listener
-	// via Cancel() and verify the first's port is no longer open by dialing it.
-	cancelReq := httptest.NewRequest(http.MethodPost, "/admin/api/login/cancel", nil)
-	cancelRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(cancelRec, cancelReq)
+	// --- Port closure assertion: dial captured port via net.DialTimeout --------
+	if firstPort > 0 {
+		cancelReq := httptest.NewRequest(http.MethodPost, "/admin/api/login/cancel", nil)
+		cancelRec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(cancelRec, cancelReq)
 
-	// After cancel, the listener should have been stopped. Verify the old port
-	// is closed by attempting a TCP connection — it must fail.
-	if srv.loginMngr.current != nil && srv.loginMngr.current.Port > 0 {
-		addr := "127.0.0.1:" + strconv.Itoa(srv.loginMngr.current.Port)
+		addr := "127.0.0.1:" + strconv.Itoa(firstPort)
 		conn, dialErr := (&net.Dialer{Timeout: 500 * time.Millisecond}).Dial("tcp", addr)
 		if conn != nil {
 			conn.Close()
-			t.Error("expected port to be closed (no listener), but dial succeeded")
+			t.Error("expected port to be closed, but dial succeeded")
 		}
 		if dialErr == nil {
 			t.Error("expected dial timeout/failure on stopped login port")
@@ -143,8 +141,45 @@ func TestLoginStartReplaces(t *testing.T) {
 
 // ===================================================================
 
-// TestLoginLifecycleFull exercises the login pipeline using mock API servers
-// and direct execution of the post-callback steps (exchange + profile + save).
+// buildUserStatusProto builds valid protobuf bytes matching devin/userstatus_test.go's
+// buildResponseFixture. Parses into Usage: plan="Pro", daily=42, weekly=77.
+func buildUserStatusProto() []byte {
+	// PlanInfo: field 2="Pro", field 33=OrgInfo{4:"org-planid",8:"Test Org"}
+	var pi []byte
+	pi = append(pi, devin.PwString(2, "Pro")...)
+	orgInner := devin.PwFieldString(4, "test_org_info")
+	orgInner = append(orgInner, devin.PwFieldString(8, "Test Org Name")...)
+	// Field 33 is multi-byte tag: (33<<3)|2 = 0xFA2 → varint [0x82, 0x01]
+	pi = append(pi, devin.PwTag(33, devin.WireTypeBytes)...)
+	pi = append(pi, devin.PwVarint(uint64(len(orgInner)))...)
+	pi = append(pi, orgInner...)
+
+	// PlanStatus: field 1=PlanInfo(bytes), field 14=42, field 15=77
+	ps := devin.PwString(1, string(pi))
+	ps = append(ps, devin.PwFieldVarint(14, 42)...)
+	ps = append(ps, devin.PwFieldVarint(15, 77)...)
+
+	// UserStatus inner: flat fields
+	var inner []byte
+	inner = append(inner, devin.PwString(3, "Test User")...)
+	inner = append(inner, devin.PwString(5, "team-abc")...)
+	inner = append(inner, devin.PwString(7, "test@example.com")...)
+	// Wrap ps in bytes for field 13
+	inner = append(inner, devin.PwString(13, string(ps))...)
+	inner = append(inner, devin.PwString(36, "usr_refresh")...)
+
+	// Outer envelope: wrap all as field 1 (bytes)
+	out := devin.PwTag(1, devin.WireTypeBytes)
+	out = append(out, devin.PwVarint(uint64(len(inner)))...)
+	out = append(out, inner...)
+	return out
+}
+
+// ===================================================================
+
+// TestLoginLifecycleFull exercises the login pipeline with mock API servers
+// and direct execution of post-callback steps. Uses StartLogin to verify real
+// loopback binding works on this machine (per oauth_test.go pattern).
 func TestLoginLifecycleFull(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/cli/token", func(w http.ResponseWriter, r *http.Request) {
@@ -158,65 +193,86 @@ func TestLoginLifecycleFull(t *testing.T) {
 
 	srv := newTestServer(t, apiSrv.URL, "")
 
-	// Verify start/login manager basics
-	req := httptest.NewRequest(http.MethodPost, "/admin/api/login/start", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("start: got %d", rec.Code)
+	// POST /admin/api/login/start — triggers StartLogin which binds a real
+	// loopback listener on 127.0.0.1. Per oauth_test.go pattern.
+	startReq := httptest.NewRequest(http.MethodPost, "/admin/api/login/start", nil)
+	startRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("start: got %d, want 200", startRec.Code)
 	}
 	var sr struct {
 		LoginURL string `json:"login_url"`
 	}
-	json.Unmarshal(rec.Body.Bytes(), &sr)
+	json.Unmarshal(startRec.Body.Bytes(), &sr)
 	if sr.LoginURL == "" {
 		t.Fatal("empty login_url")
 	}
 
-	// Execute the post-callback flow directly (what the background goroutine does):
-	// Extract token from fixture, exchange → fetch profile → save account.
-	rawToken := "raw_oauth_token_abc"
-	profile, pErr := devin.FetchSelfProfile(context.Background(), apiSrv.URL, devin.FormatSessionToken(rawToken))
-	if pErr != nil {
-		t.Fatalf("fetch profile: %v", pErr)
+	// Verify LoginState was created with valid port.
+	st := srv.loginMngr.current
+	if st == nil || st.Port == 0 {
+		t.Fatal("missing active login state or port")
 	}
 
-	acc := store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, nil)
-	if err := srv.accounts.Save(acc); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-
-	curGen := srv.loginMngr.genSnapshot()
-	srv.loginMngr.ResolveComplete(acc.ID, curGen)
-
-	stReq := httptest.NewRequest(http.MethodGet, "/admin/api/login/status", nil)
-	stRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(stRec, stReq)
-	var final map[string]string
-	json.Unmarshal(stRec.Body.Bytes(), &final)
-	if final["status"] != "complete" {
-		t.Errorf("final status: got %q, want complete", final["status"])
-	}
-	if final["account_id"] == "" {
-		t.Fatal("missing account_id")
-	}
-
-	finalAcc, err := srv.accounts.Get(final["account_id"])
+	// Hit the REAL loopback callback (same pattern as oauth_test.go).
+	callbackURL := "http://127.0.0.1:" + strconv.Itoa(st.Port) +
+		"/callback?code=testcode&state=" + url.QueryEscape(st.State)
+	resp, err := http.Get(callbackURL)
 	if err != nil {
-		t.Fatalf("get account: %v", err)
+		t.Fatalf("callback request: %v", err)
 	}
-	if finalAcc.Email != "test@example.com" {
-		t.Errorf("email: got %q", finalAcc.Email)
+	resp.Body.Close()
+
+	// Poll GET /admin/api/login/status until complete (10s deadline, 200ms interval).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for login completion")
+		default:
+		}
+		time.Sleep(200 * time.Millisecond)
+		statusReq := httptest.NewRequest(http.MethodGet, "/admin/api/login/status", nil)
+		statusRec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(statusRec, statusReq)
+		var status map[string]string
+		json.Unmarshal(statusRec.Body.Bytes(), &status)
+
+		if status["status"] == "complete" {
+			break
+		}
+		if status["status"] == "error" {
+			t.Fatalf("login errored: %s", status["error"])
+		}
 	}
-	if finalAcc.UserID != "test_usr_1" {
-		t.Errorf("user_id: got %q", finalAcc.UserID)
+
+	// Assert account exists with correct profile fields.
+	statusReq := httptest.NewRequest(http.MethodGet, "/admin/api/login/status", nil)
+	statusRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(statusRec, statusReq)
+	var finalStatus map[string]string
+	json.Unmarshal(statusRec.Body.Bytes(), &finalStatus)
+	acctID := finalStatus["account_id"]
+	if acctID == "" {
+		t.Fatal("missing account_id in complete status")
 	}
-	if finalAcc.UserName != "Test User" {
-		t.Errorf("user_name: got %q", finalAcc.UserName)
+
+	acc, err := srv.accounts.Get(acctID)
+	if err != nil {
+		t.Fatalf("get account by id %q: %v", acctID, err)
+	}
+	if acc.Email != "test@example.com" {
+		t.Errorf("account email: got %q, want %q", acc.Email, "test@example.com")
+	}
+	if acc.UserID != "test_usr_1" {
+		t.Errorf("account user_id: got %q, want test_usr_1", acc.UserID)
+	}
+	if acc.UserName != "Test User" {
+		t.Errorf("account user_name: got %q, want Test User", acc.UserName)
 	}
 }
-
-// ===================================================================
 
 // ===================================================================
 
@@ -256,7 +312,7 @@ func TestLoginManualSavesAccount(t *testing.T) {
 
 // ===================================================================
 
-// TestLoginManualBadToken verifies profile 401 -> 502.
+// TestLoginManualBadToken verifies profile 401 -> returns error.
 func TestLoginManualBadToken(t *testing.T) {
 	badSelf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -276,12 +332,38 @@ func TestLoginManualBadToken(t *testing.T) {
 // ===================================================================
 
 // TestUsageRefreshSuccess exercises POST /accounts/{id}/usage/refresh via the
-// HTTP handler with a mock server returning fixture response. Verifies the
-// route matching, session token validation, and status code logic.
+// HTTP handler with a real mock userstatus server returning 200 + valid
+// protobuf fixture. Verifies usage merge + checked_at + UsageErr cleared.
 func TestUsageRefreshSuccess(t *testing.T) {
-	srv := newTestServer(t, "", "")
+	protoBody := buildUserStatusProto()
 
-	base := &store.Account{
+	// Verify proto bytes parse correctly by direct call.
+	usage, pErr := devin.ParseGetUserStatusResponse(protoBody)
+	if pErr != nil {
+		t.Fatalf("direct proto parse failed: %v", pErr)
+	}
+	if usage.Plan != "Pro" || usage.DailyRemainingPercent != 42 || usage.WeeklyRemainingPercent != 77 {
+		t.Errorf("direct parse failed: plan=%q daily=%d weekly=%d (usage=%+v)", usage.Plan, usage.DailyRemainingPercent, usage.WeeklyRemainingPercent, usage)
+	}
+
+	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/proto")
+		w.Write(protoBody)
+	}))
+	defer mockSrv.Close()
+
+	// Also verify FetchUserStatus works against mock directly.
+	fetchUsage, fetchErr := devin.FetchUserStatus(context.Background(), mockSrv.URL, "test-token")
+	t.Logf("FetchUserStatus mock result: usage.Plan=%q daily=%d weekly=%d err=%v", fetchUsage.Plan, fetchUsage.DailyRemainingPercent, fetchUsage.WeeklyRemainingPercent, fetchErr)
+	if fetchUsage != nil {
+		t.Logf("Full usage: %+v", *fetchUsage)
+	} else {
+		t.Log("FetchUserStatus returned nil usage!")
+	}
+
+	srv := newTestServer(t, "", mockSrv.URL)
+
+	seedAccount := &store.Account{
 		Schema: 2, ID: "acc_ref" + strconv.FormatInt(time.Now().UnixNano(), 10),
 		Email: "ref@test.com", UserName: "Ref User",
 		UserID: "ref_usr", Enabled: true, AuthKind: "oauth",
@@ -289,29 +371,55 @@ func TestUsageRefreshSuccess(t *testing.T) {
 		Tokens:    store.Tokens{SessionToken: "devin-session-token$ref_tok"},
 		UsageErr:  "old error", Usage: &store.Usage{Plan: "free"},
 	}
-	srv.accounts.Save(base)
+	srv.accounts.Save(seedAccount)
 
-	urlStr := "/admin/api/accounts/" + base.ID + "/usage/refresh"
+	urlStr := "/admin/api/accounts/" + seedAccount.ID + "/usage/refresh"
 	req := httptest.NewRequest(http.MethodPost, urlStr, nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
-	// Without a real userstatus server this will return 502 from network error;
-	// we verify the handler correctly reaches the FetchUserStatus step.
-	if rec.Code != http.StatusBadGateway {
-		t.Logf("refresh without server: got %d (expected 502 when userstatus unavailable)", rec.Code)
-		return // nothing more to test without a real proto endpoint
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh status: got %d, body=%q, want 200", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ID                 string `json:"id"`
+		UsageErr           string `json:"usage_error,omitempty"`
+		Plan               string `json:"plan"`
+		DailyRemainingPct  int64  `json:"daily_remaining_percent"`
+		WeeklyRemainingPct int64  `json:"weekly_remaining_percent"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.UsageErr != "" {
+		t.Errorf("UsageErr should be cleared: got %q", resp.UsageErr)
+	}
+	if resp.Plan != "Pro" {
+		t.Errorf("plan after refresh: got %q, want Pro", resp.Plan)
+	}
+	if resp.DailyRemainingPct != 42 {
+		t.Errorf("daily_remaining_percent: got %d, want 42", resp.DailyRemainingPct)
+	}
+	if resp.WeeklyRemainingPct != 77 {
+		t.Errorf("weekly_remaining_percent: got %d, want 77", resp.WeeklyRemainingPct)
 	}
 
-	var resp struct {
-		ID       string `json:"id"`
-		Email    string `json:"email"`
-		UsageErr string `json:"usage_error,omitempty"`
-		Plan     string `json:"plan"`
+	// Verify persisted state.
+	persisted, err := srv.accounts.Get(seedAccount.ID)
+	if err != nil {
+		t.Fatalf("get persisted: %v", err)
 	}
-	json.Unmarshal(rec.Body.Bytes(), &resp)
-	if resp.UsageErr != "" {
-		t.Errorf("UsageErr cleared: got %q", resp.UsageErr)
+	if persisted.Usage == nil {
+		t.Fatal("Usage should be non-nil after successful refresh")
+	}
+	if persisted.Usage.Plan != "Pro" {
+		t.Errorf("persisted plan: got %q", persisted.Usage.Plan)
+	}
+	if persisted.Usage.CheckedAt == 0 {
+		t.Error("persisted checked_at should be > 0")
+	}
+	if persisted.UsageErr != "" {
+		t.Errorf("persisted UsageErr should be cleared: got %q", persisted.UsageErr)
 	}
 }
 

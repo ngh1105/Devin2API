@@ -11,20 +11,31 @@ import (
 // ---------- wire helpers ----------------------------------------------------
 
 var (
-	wireVarint  = 0
-	wireFixed32 = 5
-	wireBytes   = 2
+	WireVarint    = 0
+	WireFixed32   = 5
+	WireTypeBytes = 2
 )
 
-// pwTag emits the varint-encoded tag for (field, wire).
-// Field numbers >= 16 produce multi-byte varints (little-endian zigzag shift).
-func pwTag(field, wire int) []byte {
+// Internal unexported aliases for backward compatibility with existing callers.
+var (
+	wireVarint    = WireVarint
+	wireFixed32   = WireFixed32
+	wireBytes     = WireTypeBytes
+	pwTag         = PwTag
+	pwVarint      = PwVarint
+	pwString      = PwString
+	pwFieldString = PwFieldString
+	pwFieldVarint = PwFieldVarint
+)
+
+// PwTag emits the varint-encoded tag for (field, wire).
+func PwTag(field, wire int) []byte {
 	val := uint64(field)<<3 | uint64(wire)
-	return pwVarint(val)
+	return PwVarint(val)
 }
 
-// pwVarint encodes a single uint64 as a varint (7 bits + MSB continuation).
-func pwVarint(v uint64) []byte {
+// PwVarint encodes a single uint64 as a varint (7 bits + MSB continuation).
+func PwVarint(v uint64) []byte {
 	var out []byte
 	for v >= 0x80 {
 		out = append(out, byte(v)|0x80)
@@ -34,27 +45,27 @@ func pwVarint(v uint64) []byte {
 	return out
 }
 
-// pwString builds a length-delimited field: tag + varint-length + string bytes.
-func pwString(field int, s string) []byte {
+// PwString builds a length-delimited field: tag + varint-length + string bytes.
+func PwString(field int, s string) []byte {
 	b := []byte(s)
-	out := pwTag(field, wireBytes)
-	out = append(out, pwVarint(uint64(len(b)))...)
+	out := PwTag(field, WireTypeBytes)
+	out = append(out, PwVarint(uint64(len(b)))...)
 	out = append(out, b...)
 	return out
 }
 
-// pwFieldString builds a length-delimited field: tag + varint-length + bytes.
-func pwFieldString(field int, s string) []byte {
-	return pwString(field, s)
+// PwFieldString builds a length-delimited field: tag + varint-length + bytes.
+func PwFieldString(field int, s string) []byte {
+	return PwString(field, s)
 }
 
-// pwFieldVarint builds a varint field: tag + varint value.
-func pwFieldVarint(field int, v uint64) []byte {
-	return append(pwTag(field, wireVarint), pwVarint(v)...)
+// PwFieldVarint builds a varint field: tag + varint value.
+func PwFieldVarint(field int, v uint64) []byte {
+	return append(PwTag(field, WireVarint), PwVarint(v)...)
 }
 
-// pwFieldUint32 builds a fixed32 little-endian field.
-func pwFieldUint32(field int, v uint32) []byte {
+// PwFieldUint32 builds a fixed32 little-endian field.
+func PwFieldUint32(field int, v uint32) []byte {
 	b := make([]byte, 4)
 	binary.LittleEndian.PutUint32(b, v)
 	return append(pwTag(field, wireFixed32), b...)
