@@ -200,3 +200,28 @@ func TestStartLoginCallbackMissingParams(t *testing.T) {
 		t.Errorf("error = %q; expected 'missing code or state'", err.Error())
 	}
 }
+
+// TestWaitAfterStopReturnsImmediately verifies that Stop() delivers a terminal
+// result so Wait returns immediately (via error) instead of blocking for the full
+// timeout duration.
+func TestWaitAfterStopReturnsImmediately(t *testing.T) {
+	s, err := StartLogin("")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Call Stop synchronously BEFORE Wait — no concurrent goroutines.
+	// Stop sends a terminal result on resultCh which Wait will receive.
+	s.Stop()
+
+	result, waitErr := s.Wait(context.Background(), 5*time.Minute)
+	if result.Code != "" {
+		t.Errorf("expected empty code after stop, got %q", result.Code)
+	}
+	if waitErr == nil {
+		t.Fatal("expected error from Wait after Stop")
+	}
+	if !strings.Contains(waitErr.Error(), "stopped") {
+		t.Errorf("error should mention 'stopped', got: %v", waitErr)
+	}
+}

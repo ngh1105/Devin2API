@@ -16,6 +16,7 @@ import (
 type loginManager struct {
 	mu         sync.Mutex
 	current    *devin.LoginState
+	gen        uint64 // monotonically incremented on each SetPending
 	statusCode string // idle | pending | complete | error
 	accountID  string
 	errorMsg   string
@@ -32,6 +33,37 @@ func (m *loginManager) stop() {
 	}
 }
 
+// genSnapshot returns the current generation for use by async goroutines.
+func (m *loginManager) genSnapshot() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.gen
+}
+
+// ResolveComplete only writes if the provided gen matches m.gen.
+func (m *loginManager) ResolveComplete(accountID string, gen uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.gen != gen {
+		return // stale resolve — ignore
+	}
+	m.statusCode = "complete"
+	m.accountID = accountID
+	m.errorMsg = ""
+}
+
+// ResolveError only writes if the provided gen matches m.gen.
+func (m *loginManager) ResolveError(msg string, gen uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.gen != gen {
+		return // stale resolve — ignore
+	}
+	m.statusCode = "error"
+	m.accountID = ""
+	m.errorMsg = msg
+}
+
 func (m *loginManager) Status() (string, string, string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -42,26 +74,11 @@ func (m *loginManager) SetPending(login *devin.LoginState) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stop()
+	m.gen++ // bump generation so old goroutines become stale
 	m.current = login
 	m.statusCode = "pending"
 	m.accountID = ""
 	m.errorMsg = ""
-}
-
-func (m *loginManager) ResolveComplete(accountID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.statusCode = "complete"
-	m.accountID = accountID
-	m.errorMsg = ""
-}
-
-func (m *loginManager) ResolveError(msg string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.statusCode = "error"
-	m.accountID = ""
-	m.errorMsg = msg
 }
 
 func (m *loginManager) Cancel() {

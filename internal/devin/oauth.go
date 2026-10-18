@@ -184,16 +184,17 @@ func StartLogin(appBaseOverride string) (*LoginState, error) {
 	return state, nil
 }
 
-// Stop shuts down the callback HTTP server and releases the listener. Idempotent.
+// Stop shuts down the callback HTTP server and releases the listener.
+// Signals Wait to return immediately by closing the done channel. Idempotent.
 func (l *LoginState) Stop() {
 	if l.shutOnce.Swap(true) {
 		return
 	}
-	l.ln.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if l.srv != nil {
-		_ = l.srv.Shutdown(ctx)
+	l.ln.Close() // closes listener → Serve returns immediately
+	select {
+	case <-l.done:
+	default:
+		close(l.done)
 	}
 }
 
@@ -208,11 +209,17 @@ func (l *LoginState) Wait(ctx context.Context, timeout time.Duration) (Result, e
 		return Result{}, fmt.Errorf("login: context cancelled: %w", ctx.Err())
 	case <-timer.C:
 		return Result{}, errors.New("login timed out")
-	case res := <-l.resultCh:
-		if res.error != "" {
-			return Result{}, errors.New(res.error)
+	case <-l.done:
+		// Stop() or callback closed done. Non-block drain resultCh.
+		select {
+		case res := <-l.resultCh:
+			if res.error != "" {
+				return Result{}, errors.New(res.error)
+			}
+			return Result{Code: res.code}, nil
+		default:
+			return Result{}, errors.New("login stopped")
 		}
-		return Result{Code: res.code}, nil
 	}
 }
 

@@ -74,6 +74,76 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// --- login lifecycle helpers -------------------------------------------------
+
+func (s *Server) startLogin(ctx context.Context) (string, error) {
+	login, err := devin.StartLogin("")
+	if err != nil {
+		return "", fmt.Errorf("start login: %w", err)
+	}
+
+	mgrGen := s.loginMngr.genSnapshot() // capture gen for this goroutine's resolve calls
+	s.loginMngr.SetPending(login)
+
+	go func() {
+		defer login.Stop()
+		result, waitErr := login.Wait(ctx, time.Minute*5)
+		if waitErr != nil {
+			s.loginMngr.ResolveError(waitErr.Error(), mgrGen)
+			return
+		}
+
+		rawToken, err := devin.ExchangeCode(context.Background(), s.loginAPIBase, result.Code, login.Verifier)
+		if err != nil {
+			s.loginMngr.ResolveError(err.Error(), mgrGen)
+			return
+		}
+
+		sessToken := devin.FormatSessionToken(rawToken)
+
+		profile, err := devin.FetchSelfProfile(context.Background(), s.loginAPIBase, sessToken)
+		if err != nil {
+			s.loginMngr.ResolveError(err.Error(), mgrGen)
+			return
+		}
+
+		// Best-effort user status
+		var usage *store.Usage
+		useCtx, useDone := context.WithTimeout(context.Background(), time.Second*120)
+		usage, _ = devin.FetchUserStatus(useCtx, s.loginServerBase, sessToken)
+		useDone()
+
+		acc := store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, usage)
+
+		if err := s.accounts.Save(acc); err != nil {
+			s.loginMngr.ResolveError(err.Error(), mgrGen)
+			return
+		}
+
+		s.loginMngr.ResolveComplete(acc.ID, mgrGen)
+	}()
+
+	return login.LoginURL, nil
+}
+
+// handleLoginManualDirect executes the full manual login business logic given a token.
+func handleLoginManualDirect(s *Server, rawToken string) (*store.Account, error) {
+	sessToken := devin.FormatSessionToken(rawToken)
+	profile, err := devin.FetchSelfProfile(context.Background(), s.loginAPIBase, sessToken)
+	if err != nil {
+		return nil, err
+	}
+	var usage *store.Usage
+	useCtx, useDone := context.WithTimeout(context.Background(), time.Second*120)
+	usage, _ = devin.FetchUserStatus(useCtx, s.loginServerBase, sessToken)
+	useDone()
+	acc := store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, usage)
+	if err := s.accounts.Save(acc); err != nil {
+		return nil, err
+	}
+	return acc, nil
+}
+
 // ---------------------------------------------------------------------------
 // Existing handlers
 // ---------------------------------------------------------------------------
@@ -244,83 +314,15 @@ func (s *Server) handleLoginManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessToken := devin.FormatSessionToken(req.Token)
-
-	// Use Background context so the HTTP handler completing doesn't cancel ops.
-	profile, err := devin.FetchSelfProfile(context.Background(), s.loginAPIBase, sessToken)
+	acc, err := handleLoginManualDirect(s, req.Token)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
-		return
-	}
-
-	// Best-effort user status — detached from request lifetime.
-	var usage *store.Usage
-	useCtx, useDone := context.WithTimeout(context.Background(), time.Second*120)
-	usage, _ = devin.FetchUserStatus(useCtx, s.loginServerBase, sessToken)
-	useDone()
-
-	acc := store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, req.Token, profile.Email, usage)
-	if err := s.accounts.Save(acc); err != nil {
-		writeErr(w, http.StatusInternalServerError, "unable to save account")
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(acc)
-}
-
-// startLogin starts a login flow and returns immediately with the login URL.
-// A background goroutine processes Wait -> ExchangeCode -> Profile -> Usage -> Save.
-func (s *Server) startLogin(ctx context.Context) (string, error) {
-	login, err := devin.StartLogin("")
-	if err != nil {
-		return "", fmt.Errorf("start login: %w", err)
-	}
-
-	s.loginMngr.SetPending(login)
-
-	go func() {
-		defer login.Stop()
-		ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		result, waitErr := login.Wait(ctx2, 5*time.Minute)
-		if waitErr != nil {
-			s.loginMngr.ResolveError(waitErr.Error())
-			return
-		}
-
-		rawToken, err := devin.ExchangeCode(context.Background(), s.loginAPIBase, result.Code, login.Verifier)
-		if err != nil {
-			s.loginMngr.ResolveError(err.Error())
-			return
-		}
-
-		sessToken := devin.FormatSessionToken(rawToken)
-
-		profile, err := devin.FetchSelfProfile(context.Background(), s.loginAPIBase, sessToken)
-		if err != nil {
-			s.loginMngr.ResolveError(err.Error())
-			return
-		}
-
-		// Best-effort user status
-		var usage *store.Usage
-		useCtx, useDone := context.WithTimeout(context.Background(), time.Second*120)
-		usage, _ = devin.FetchUserStatus(useCtx, s.loginServerBase, sessToken)
-		useDone()
-
-		acc := store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, usage)
-
-		if err := s.accounts.Save(acc); err != nil {
-			s.loginMngr.ResolveError(err.Error())
-			return
-		}
-
-		s.loginMngr.ResolveComplete(acc.ID)
-	}()
-
-	return login.LoginURL, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -390,7 +392,6 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
-	// Check: does the body carry at least one modifiable field?
 	hasModifiable := false
 	if v, ok := rawBody["nickname"]; ok && *v != nil && string(*v) != "null" {
 		hasModifiable = true
