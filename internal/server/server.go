@@ -3,27 +3,99 @@ package server
 import (
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/ngh1105/Devin2API/internal/config"
+	"github.com/ngh1105/Devin2API/internal/devin"
 	"github.com/ngh1105/Devin2API/internal/store"
 	"github.com/ngh1105/Devin2API/web"
 )
 
+// ---------- login manager ---------------------------------------------------
+
+type loginManager struct {
+	mu         sync.Mutex
+	current    *devin.LoginState
+	statusCode string // idle | pending | complete | error
+	accountID  string
+	errorMsg   string
+}
+
+func newLoginManager() *loginManager {
+	return &loginManager{statusCode: "idle"}
+}
+
+func (m *loginManager) stop() {
+	if m.current != nil {
+		m.current.Stop()
+		m.current = nil
+	}
+}
+
+func (m *loginManager) Status() (string, string, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.statusCode, m.accountID, m.errorMsg
+}
+
+func (m *loginManager) SetPending(login *devin.LoginState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stop()
+	m.current = login
+	m.statusCode = "pending"
+	m.accountID = ""
+	m.errorMsg = ""
+}
+
+func (m *loginManager) ResolveComplete(accountID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.statusCode = "complete"
+	m.accountID = accountID
+	m.errorMsg = ""
+}
+
+func (m *loginManager) ResolveError(msg string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.statusCode = "error"
+	m.accountID = ""
+	m.errorMsg = msg
+}
+
+func (m *loginManager) Cancel() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stop()
+	m.statusCode = "idle"
+	m.accountID = ""
+	m.errorMsg = ""
+}
+
+// --- Server ------------------------------------------------------------
+
 // Server holds dependencies for HTTP handlers.
 type Server struct {
-	listen   string
-	dataDir  string
-	accounts *store.AccountStore
-	tokens   *store.TokenStore
+	listen          string
+	dataDir         string
+	accounts        *store.AccountStore
+	tokens          *store.TokenStore
+	loginAPIBase    string
+	loginServerBase string
+	loginMngr       *loginManager
 }
 
 // New creates a new Server from config and stores.
 func New(cfg config.Config, accounts *store.AccountStore, tokens *store.TokenStore) *Server {
 	return &Server{
-		listen:   cfg.Listen,
-		dataDir:  cfg.DataDir,
-		accounts: accounts,
-		tokens:   tokens,
+		listen:          cfg.Listen,
+		dataDir:         cfg.DataDir,
+		accounts:        accounts,
+		tokens:          tokens,
+		loginAPIBase:    devin.APIBaseURL,
+		loginServerBase: devin.ServerBaseURL,
+		loginMngr:       newLoginManager(),
 	}
 }
 
@@ -64,7 +136,7 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strings.HasPrefix(path, "/admin/api/") {
-		s.adminHandler(w, r)
+		s.handleAdmin(w, r)
 		return
 	}
 

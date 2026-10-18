@@ -1,23 +1,32 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/ngh1105/Devin2API/internal/devin"
 	"github.com/ngh1105/Devin2API/internal/store"
 )
 
-// accountExpired wraps an Account with an expired bool for the admin API response.
+// --- accountExpired wrapper for list -----------------------------------------
+
 type accountExpired struct {
 	*store.Account
 	Expired bool `json:"expired"`
 }
 
-func (s *Server) adminHandler(w http.ResponseWriter, r *http.Request) {
+// ---------------------------------------------------------------------------
+// Admin route handler
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	prefix := strings.TrimPrefix(path, "/admin/api")
 
@@ -29,47 +38,45 @@ func (s *Server) adminHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		s.handleSettings(w, r)
 	case prefix == "/accounts":
-		if r.Method == http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
 			s.listAccounts(w, r)
-			return
-		}
-		if r.Method == http.MethodPost {
+		case http.MethodPost:
 			s.createAccount(w, r)
-			return
+		default:
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	case prefix == "/stats":
+		s.handleStats(w, r)
+	case prefix == "/login/start":
+		s.handleLoginStart(w, r)
+	case prefix == "/login/status":
+		s.handleLoginStatus(w, r)
+	case prefix == "/login/cancel":
+		s.handleLoginCancel(w, r)
+	case prefix == "/login/manual":
+		s.handleLoginManual(w, r)
+	case strings.HasPrefix(prefix, "/accounts/") && strings.HasSuffix(prefix, "/usage/refresh"):
+		parts := strings.SplitN(strings.TrimPrefix(prefix, "/accounts/"), "/", 2)
+		s.usageRefresh(w, r, parts[0])
 	case strings.HasPrefix(prefix, "/accounts/"):
 		id := strings.TrimPrefix(prefix, "/accounts/")
-		if len(strings.Split(id, "/")) > 1 {
-			writeErr(w, http.StatusNotFound, "not found")
-			return
-		}
-		if r.Method == http.MethodDelete {
+		switch r.Method {
+		case http.MethodDelete:
 			s.deleteAccount(w, r, id)
-			return
+		case http.MethodPatch:
+			s.patchAccount(w, r, id)
+		default:
+			writeErr(w, http.StatusNotFound, "not found")
 		}
-		writeErr(w, http.StatusNotFound, "not found")
-	case prefix == "/tokens":
-		if r.Method == http.MethodGet {
-			s.listTokens(w, r)
-			return
-		}
-		if r.Method == http.MethodPost {
-			s.createToken(w, r)
-			return
-		}
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-	case strings.HasPrefix(prefix, "/tokens/"):
-		id := strings.TrimPrefix(prefix, "/tokens/")
-		if r.Method == http.MethodDelete {
-			s.deleteToken(w, r, id)
-			return
-		}
-		writeErr(w, http.StatusNotFound, "not found")
 	default:
 		writeErr(w, http.StatusNotFound, "not found")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Existing handlers
+// ---------------------------------------------------------------------------
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]string{
@@ -96,19 +103,12 @@ func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
-	rawBody, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "unable to read body")
 		return
 	}
-
-	var parsed map[string]json.RawMessage
-	if err := json.Unmarshal(rawBody, &parsed); err != nil {
-		writeErr(w, http.StatusBadRequest, "malformed JSON")
-		return
-	}
-
-	acc, err := s.accounts.Import(json.RawMessage(rawBody))
+	acct, err := s.accounts.Import(body)
 	if err != nil {
 		var importErr *store.ImportError
 		if errors.As(err, &importErr) {
@@ -118,15 +118,13 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "import failed")
 		return
 	}
-
-	if err := s.accounts.Save(acc); err != nil {
+	if err := s.accounts.Save(acct); err != nil {
 		writeErr(w, http.StatusInternalServerError, "unable to save account")
 		return
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(acc)
+	json.NewEncoder(w).Encode(acct)
 }
 
 func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
@@ -184,6 +182,288 @@ func (s *Server) deleteToken(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// Login lifecycle endpoints
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleLoginStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	url, err := s.startLogin(context.Background())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"login_url": url})
+}
+
+func (s *Server) handleLoginStatus(w http.ResponseWriter, r *http.Request) {
+	code, aid, msg := s.loginMngr.Status()
+	resp := map[string]string{"status": code}
+	if aid != "" {
+		resp["account_id"] = aid
+	}
+	if msg != "" {
+		resp["error"] = msg
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleLoginCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	s.loginMngr.Cancel()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{})
+}
+
+func (s *Server) handleLoginManual(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Token == "" {
+		writeErr(w, http.StatusBadRequest, "token is required")
+		return
+	}
+
+	sessToken := devin.FormatSessionToken(req.Token)
+
+	// Use Background context so the HTTP handler completing doesn't cancel ops.
+	profile, err := devin.FetchSelfProfile(context.Background(), s.loginAPIBase, sessToken)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	// Best-effort user status — detached from request lifetime.
+	var usage *store.Usage
+	useCtx, useDone := context.WithTimeout(context.Background(), time.Second*120)
+	usage, _ = devin.FetchUserStatus(useCtx, s.loginServerBase, sessToken)
+	useDone()
+
+	acc := store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, req.Token, profile.Email, usage)
+	if err := s.accounts.Save(acc); err != nil {
+		writeErr(w, http.StatusInternalServerError, "unable to save account")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(acc)
+}
+
+// startLogin starts a login flow and returns immediately with the login URL.
+// A background goroutine processes Wait -> ExchangeCode -> Profile -> Usage -> Save.
+func (s *Server) startLogin(ctx context.Context) (string, error) {
+	login, err := devin.StartLogin("")
+	if err != nil {
+		return "", fmt.Errorf("start login: %w", err)
+	}
+
+	s.loginMngr.SetPending(login)
+
+	go func() {
+		defer login.Stop()
+		ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		result, waitErr := login.Wait(ctx2, 5*time.Minute)
+		if waitErr != nil {
+			s.loginMngr.ResolveError(waitErr.Error())
+			return
+		}
+
+		rawToken, err := devin.ExchangeCode(context.Background(), s.loginAPIBase, result.Code, login.Verifier)
+		if err != nil {
+			s.loginMngr.ResolveError(err.Error())
+			return
+		}
+
+		sessToken := devin.FormatSessionToken(rawToken)
+
+		profile, err := devin.FetchSelfProfile(context.Background(), s.loginAPIBase, sessToken)
+		if err != nil {
+			s.loginMngr.ResolveError(err.Error())
+			return
+		}
+
+		// Best-effort user status
+		var usage *store.Usage
+		useCtx, useDone := context.WithTimeout(context.Background(), time.Second*120)
+		usage, _ = devin.FetchUserStatus(useCtx, s.loginServerBase, sessToken)
+		useDone()
+
+		acc := store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, usage)
+
+		if err := s.accounts.Save(acc); err != nil {
+			s.loginMngr.ResolveError(err.Error())
+			return
+		}
+
+		s.loginMngr.ResolveComplete(acc.ID)
+	}()
+
+	return login.LoginURL, nil
+}
+
+// ---------------------------------------------------------------------------
+// Usage refresh
+// ---------------------------------------------------------------------------
+
+func (s *Server) usageRefresh(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	acct, err := s.accounts.Get(id)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeErr(w, http.StatusNotFound, "account not found")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "unable to get account")
+		return
+	}
+
+	if acct.Tokens.SessionToken == "" {
+		writeErr(w, http.StatusBadRequest, "no session token")
+		return
+	}
+
+	ctx, done := context.WithTimeout(r.Context(), time.Second*120)
+	usage, err := devin.FetchUserStatus(ctx, s.loginServerBase, acct.Tokens.SessionToken)
+	done()
+
+	if errors.Is(err, devin.ErrTokenExpired) {
+		acct.UsageErr = "token expired or revoked"
+		acct.Usage = nil
+		_ = s.accounts.Save(acct)
+		writeErr(w, http.StatusBadGateway, "token expired or revoked")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	acct.Usage = usage
+	acct.UsageErr = ""
+	now := time.Now().Unix()
+	if acct.Usage != nil {
+		acct.Usage.CheckedAt = now
+	}
+	if err := s.accounts.Save(acct); err != nil {
+		writeErr(w, http.StatusInternalServerError, "unable to save account")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(accountExpired{Account: acct, Expired: acct.Expired()})
+}
+
+// ---------------------------------------------------------------------------
+// Account patch
+// ---------------------------------------------------------------------------
+
+func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request, id string) {
+	rawBody := make(map[string]*json.RawMessage)
+	if err := json.NewDecoder(r.Body).Decode(&rawBody); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	// Check: does the body carry at least one modifiable field?
+	hasModifiable := false
+	if v, ok := rawBody["nickname"]; ok && *v != nil && string(*v) != "null" {
+		hasModifiable = true
+	}
+	if v, ok := rawBody["enabled"]; ok && *v != nil && string(*v) != "null" {
+		hasModifiable = true
+	}
+	if !hasModifiable {
+		writeErr(w, http.StatusBadRequest, "empty patch")
+		return
+	}
+
+	acct, err := s.accounts.Get(id)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeErr(w, http.StatusNotFound, "account not found")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "unable to get account")
+		return
+	}
+
+	if v, ok := rawBody["nickname"]; ok && *v != nil && string(*v) != "null" {
+		var val string
+		if err := json.Unmarshal(*v, &val); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid nickname")
+			return
+		}
+		acct.Nickname = val
+	}
+	if v, ok := rawBody["enabled"]; ok && *v != nil && string(*v) != "null" {
+		var val bool
+		if err := json.Unmarshal(*v, &val); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid enabled")
+			return
+		}
+		acct.Enabled = val
+	}
+
+	if err := s.accounts.Save(acct); err != nil {
+		writeErr(w, http.StatusInternalServerError, "unable to save account")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(accountExpired{Account: acct, Expired: acct.Expired()})
+}
+
+// ---------------------------------------------------------------------------
+// Stats
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	accs, err := s.accounts.List()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "unable to list accounts")
+		return
+	}
+	total := len(accs)
+	enabled := 0
+	for _, a := range accs {
+		if a.Enabled {
+			enabled++
+		}
+	}
+	resp := map[string]int{
+		"accounts": total,
+		"enabled":  enabled,
+		"requests": 0,
+		"failed":   0,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 // writeErr writes a JSON {"error":"..."} response with status code and content-type.
