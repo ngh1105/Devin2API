@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -112,6 +113,7 @@ type LoginState struct {
 	Verifier string // PKCE code_verifier
 	resultCh chan loginResult
 	done     chan struct{}
+	doneOnce sync.Once   // ensures done is closed at most once (prevents close-panic race)
 	shutOnce atomic.Bool // ensures Stop is idempotent
 	srv      *http.Server
 	ln       net.Listener
@@ -193,7 +195,7 @@ func (l *LoginState) Stop() {
 	select {
 	case <-l.done:
 	default:
-		close(l.done)
+		l.doneOnce.Do(func() { close(l.done) })
 	}
 }
 
@@ -212,7 +214,7 @@ func (l *LoginState) Wait(ctx context.Context, timeout time.Duration) (Result, e
 		if res.error != "" {
 			return Result{}, errors.New(res.error)
 		}
-		close(l.done) // close done AFTER receiving valid result
+		l.doneOnce.Do(func() { close(l.done) }) // close done AFTER receiving valid result (race-guarded by sync.Once)
 		return Result{Code: res.code}, nil
 	case <-l.done:
 		// Stop() closed done. Non-block drain resultCh.

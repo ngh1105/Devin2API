@@ -33,7 +33,7 @@ DEVIN2API_LISTEN="127.0.0.1:8080" DEVIN2API_DATA="./data" ./devin2api
 
 The server exposes:
 
-- **Web panel** — open <http://127.0.0.1:8080/> in a browser; jump to specific pages via `/web/accounts.html`, `/web/tokens.html`, `/web/settings.html`, `/web/api.html`.
+- **Web panel** — open <http://127.0.0.1:8080/> in a browser; single-page app at `/web/` with tab navigation (Accounts, API Keys, Settings, API).
 - **Health check** — `GET /healthz` → `{"status":"ok"}`.
 - **OpenAI-compatible `/v1/*` endpoints** — see [API status](#api-status).
 
@@ -50,27 +50,30 @@ The server exposes:
 3. Log in with **any** Devin auth method — email+password, Google, GitHub, SAML, etc.
 4. After successful auth you're redirected back to the local server; the account appears with usage data.
 
-### Panel — CLI login
+### Panel — Login with browser (preferred)
 
-1. Open the Settings tab → **CLI login**.
-2. It runs `devin2api login` in a shell, which prints:
+1. Open the panel at <http://127.0.0.1:8080/web/>, switch to the **Accounts** tab.
+2. Click **Add account**, then **Login with browser**.
+3. A link opens in your default browser pointing to `auth.devin.ai` — click it to authorize.
+4. After auth you're redirected back to the local server; the account appears with usage data.
 
-   ```
-   waiting for browser callback ...
-   saved data/accounts/acc_a1b2c3d4.json
-   ```
+### Panel — Manual token import
 
-The CLI flow opens `auth.devin.ai` in your browser (PKCE flow), waits for the callback on a local port, then saves the account to `data/accounts/`.
-
-### Manual — paste a session token
-
-Paste a Devin session token anywhere the panel shows an Import card:
+Paste a Devin session token or full JSON blob into the **Import** card on the Accounts tab:
 
 - Full token string: `devin-session-token$eyJ...`
 - Raw JWT: auto-prefixed to `devin-session-token$<jwt>` on import.
-- Shape: `"token": "<value>"`
+- Shape: `{"token": "<value>"}` or full v2 schema JSON.
 
 On success the account appears with usage data.
+
+Alternatively via the API endpoint:
+
+```bash
+curl -X POST http://localhost:8080/admin/api/login/manual \
+  -H "Content-Type: application/json" \
+  -d '{"token":"devin-session-token$eyJ..."}'
+```
 
 ### Dead-token handling
 
@@ -155,7 +158,7 @@ Single-page app with four tabs (URL routes):
 | **Settings**     | `/web/settings.html`   | Server URL, port, CLI login button           |
 | **API**          | `/web/api.html`        | Send test POST to `/v1/*` endpoints          |
 
-Stats grid (top of Accounts tab): total accounts, proxies active, tokens defined, plan names.
+Stats grid (top of Accounts tab): Accounts, Models, Requests, Failed.
 
 ---
 

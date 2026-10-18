@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -591,6 +592,61 @@ func TestImportUsageErrorField(t *testing.T) {
 	}
 	if a.UsageErr != "rate-limited" {
 		t.Errorf("usage_error = %q; want %q", a.UsageErr, "rate-limited")
+	}
+}
+
+// TestV2Roundtrip: save a v2 account (usage, nickname, session token, enabled:false),
+// create a NEW store on the same dir, retrieve → all fields must equal.
+func TestV2Roundtrip(t *testing.T) {
+	dir := t.TempDir()
+
+	original := &Account{
+		Schema: 2, ID: "acc_rt1", Email: "rt@example.com",
+		UserName: "RoundTripper", UserID: "usr_rt1", OrgID: "org_rt1",
+		Plan: "pro", Nickname: "RT", Enabled: false, AuthKind: "oauth",
+		CreatedAt: time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC),
+		Tokens:    Tokens{SessionToken: "devin-session-token$eyJ.round.trip"},
+		Usage:     &Usage{Plan: "pro", DailyRemainingPercent: 80, CheckedAt: 1737849600},
+	}
+	if err := os.WriteFile(filepath.Join(dir, original.ID+".json"), func() []byte {
+		data, _ := json.MarshalIndent(original, "", "  ")
+		return data
+	}(), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewAccountStore(dir)
+	if err != nil {
+		t.Fatalf("NewAccountStore: %v", err)
+	}
+	got, err := store.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	checks := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"id", got.ID, "acc_rt1"},
+		{"email", got.Email, "rt@example.com"},
+		{"user_name", got.UserName, "RoundTripper"},
+		{"user_id", got.UserID, "usr_rt1"},
+		{"org_id", got.OrgID, "org_rt1"},
+		{"plan", got.Plan, "pro"},
+		{"nickname", got.Nickname, "RT"},
+		{"enabled", got.Enabled, false},
+		{"auth_kind", got.AuthKind, "oauth"},
+		{"session_token", got.Tokens.SessionToken, "devin-session-token$eyJ.round.trip"},
+		{"usage_plan", got.Usage.Plan, "pro"},
+		{"usage_daily_pct", got.Usage.DailyRemainingPercent, int64(80)},
+		{"usage_checked_at", got.Usage.CheckedAt, int64(1737849600)},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %#v; want %#v", c.name, c.got, c.want)
+		}
 	}
 }
 

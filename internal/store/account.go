@@ -51,6 +51,155 @@ type v1Account struct {
 	CreatedAt json.RawMessage `json:"created_at"`
 }
 
+// accountPlain is a field-identical shadow of Account with NO custom methods.
+// Used by UnmarshalJSON so that v2 records round-trip through plain JSON
+// without entering the v1 migration path.
+type accountPlain struct {
+	Schema               int64     `json:"schema"`
+	ID                   string    `json:"id"`
+	Email                string    `json:"email"`
+	UserName             string    `json:"user_name"`
+	UserID               string    `json:"user_id"`
+	OrgID                string    `json:"org_id"`
+	Plan                 string    `json:"plan"`
+	Nickname             string    `json:"nickname"`
+	Enabled              bool      `json:"enabled"`
+	AuthKind             string    `json:"auth_kind"`
+	CreatedAt            time.Time `json:"created_at"`
+	Tokens               Tokens    `json:"tokens"`
+	Usage                *Usage    `json:"usage"`
+	UsageErr             string    `json:"usage_error,omitempty"`
+	enabledExplicitlySet bool      `json:"-"`
+}
+
+// hasV1TokenMarker reports whether raw JSON carries access_token in tokens,
+// which signals a v1 record even when schema key is absent.
+func hasV1TokenMarker(data []byte) bool {
+	return bytes.Contains(data, []byte(`"access_token"`))
+}
+
+func extractV1Field(m map[string]json.RawMessage, key string, dst *string) {
+	if raw, ok := m[key]; ok {
+		json.Unmarshal(raw, dst)
+	}
+}
+
+func loadV1CreatedAt(raw json.RawMessage) time.Time {
+	if len(raw) > 0 {
+		var t time.Time
+		json.Unmarshal(raw, &t) // RFC3339 or unix float → both parse into time.Time
+		return t
+	}
+	return time.Now()
+}
+
+func resolveSessionTokenFromParsed(parsed map[string]json.RawMessage, tok *Tokens) {
+	// 1. tokens.session_token (v2 nested object).
+	if tokRaw, ok := parsed["tokens"]; ok {
+		var nested map[string]json.RawMessage
+		json.Unmarshal(tokRaw, &nested)
+		if sTok, ok := nested["session_token"]; ok {
+			var val string
+			json.Unmarshal(sTok, &val)
+			tok.SessionToken = FormatSessionToken(val)
+			return
+		}
+	}
+	// 2. Top-level session_token or access_token (v1 top-level or bare-token paths).
+	for _, key := range []string{"session_token", "access_token"} {
+		if raw, ok := parsed[key]; ok {
+			var val string
+			json.Unmarshal(raw, &val)
+			tok.SessionToken = FormatSessionToken(val)
+			return
+		}
+	}
+	// 3. Fallthrough: tokens.access_token (legacy v1 shape).
+	//    The above nested lookup may not match if keys were trimmed; re-parse.
+	if tokRaw, ok := parsed["tokens"]; ok {
+		var nested map[string]json.RawMessage
+		json.Unmarshal(tokRaw, &nested)
+		if at, ok := nested["access_token"]; ok {
+			var val string
+			json.Unmarshal(at, &val)
+			tok.SessionToken = FormatSessionToken(val)
+			return
+		}
+	}
+}
+
+// UnmarshalJSON handles v1→v2 migration during load. v2 files are unmarshalled
+// via a field-identical shadow type (accountPlain) for a perfect round-trip;
+// only v1 records enter the migration path.
+func (a *Account) UnmarshalJSON(data []byte) error {
+	// Peek at top-level keys to decide path.
+	parsed, err := parseJSONRaw(data)
+	if err != nil {
+		return err
+	}
+
+	hasSchemaKey := false
+	schemaVer := int64(2) // default to v2 for unknown records
+	if raw, ok := parsed["schema"]; ok {
+		json.Unmarshal(raw, &schemaVer)
+		hasSchemaKey = true
+	}
+
+	isV1 := schemaVer < 2 || !hasSchemaKey || hasV1TokenMarker(data)
+
+	if isV1 {
+		return a.migrateFromV1(data, parsed)
+	}
+
+	// v2 path: use the accountPlain shadow type for a clean round-trip.
+	var p accountPlain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return fmt.Errorf("unmarshal v2 account: %w", err)
+	}
+
+	a.Schema = 2
+	a.ID = p.ID
+	a.Email = p.Email
+	a.UserName = p.UserName
+	a.UserID = p.UserID
+	a.OrgID = p.OrgID
+	a.Plan = p.Plan
+	a.Nickname = p.Nickname
+	a.Enabled = p.Enabled
+	a.AuthKind = p.AuthKind
+	a.CreatedAt = p.CreatedAt
+	a.Tokens = p.Tokens
+	a.Usage = p.Usage
+	a.UsageErr = p.UsageErr
+	return nil
+}
+
+// migrateFromV1 migrates a v1 JSON blob into an Account.
+func (a *Account) migrateFromV1(data []byte, parsed map[string]json.RawMessage) error {
+	a.Schema = 2
+	extractV1Field(parsed, "id", &a.ID)
+	extractV1Field(parsed, "email", &a.Email)
+	a.CreatedAt = loadV1CreatedAt(parsed["created_at"])
+
+	resolveSessionTokenFromParsed(parsed, &a.Tokens)
+
+	// Enabled: defaults true unless "enabled" key is explicitly present.
+	a.Enabled = true
+	if eRaw, ok := parsed["enabled"]; ok {
+		json.Unmarshal(eRaw, &a.Enabled)
+	}
+	a.AuthKind = "oauth"
+
+	if uRaw, ok := parsed["usage"]; ok && len(uRaw) > 0 && string(uRaw) != "null" {
+		var usage Usage
+		if err := json.Unmarshal(uRaw, &usage); err == nil {
+			a.Usage = &usage
+		}
+	}
+
+	return nil
+}
+
 type v1OAuth struct {
 	ClientID    string `json:"client_id"`
 	Domain      string `json:"domain"`
@@ -94,36 +243,6 @@ type Account struct {
 	// enabledExplicitlySet tracks whether Enabled was explicitly set in the
 	// import payload (used by mergeOnlyExplicitFields to preserve existing state).
 	enabledExplicitlySet bool `json:"-"`
-}
-
-// UnmarshalJSON handles v1→v2 migration during load.
-func (a *Account) UnmarshalJSON(data []byte) error {
-	var v1 v1Account
-	if err := json.Unmarshal(data, &v1); err != nil {
-		return err
-	}
-
-	a.Schema = 2
-	a.ID = v1.ID
-	a.Email = v1.Email
-
-	if len(v1.CreatedAt) > 0 {
-		json.Unmarshal(v1.CreatedAt, &a.CreatedAt)
-	} else {
-		a.CreatedAt = time.Now()
-	}
-
-	// Migrate v1 access_token → session_token.
-	a.Tokens.SessionToken = FormatSessionToken(v1.Tokens.AccessToken)
-
-	// Enabled: defaults true unless the raw JSON explicitly carried an "enabled" key.
-	if !hasKey(data, "enabled") {
-		a.Enabled = true
-	}
-	// AuthKind: always set for migrated accounts.
-	a.AuthKind = "oauth"
-
-	return nil
 }
 
 // Expired reports whether this account's plan has ended (server-side expiry).

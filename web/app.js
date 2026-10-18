@@ -43,6 +43,12 @@
     return fetch(path, { method: "DELETE" }).then(checkStatus);
   }
 
+  function apiPatch(path, body) {
+    return fetch(path, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: body })
+      .then(checkStatus)
+      .then(parseJSON);
+  }
+
   function parseJSON(r) {
     return r.json();
   }
@@ -101,6 +107,10 @@
           }
           tabIdx.className = "tab active";
           panels[tabIdx].className = "tab-panel active";
+          // Load data for the now-visible panel.
+          if (tabIdx === 0) loadAccounts();
+          else if (tabIdx === 1) loadTokens();
+          else if (tabIdx === 2) loadSettings();
         };
       })(i);
     }
@@ -110,7 +120,7 @@
   function planEndStr(a) {
     if (!a.usage) return "—";
     if (!a.usage.plan_end) return "—";
-    return new Date(a.usage.plan_end * 1000).toLocaleDateString();
+    return new Date(a.usage.plan_end).toLocaleDateString();
   }
 
   // ---- Accounts tab ----
@@ -126,7 +136,7 @@
     if (!a.usage) return "<td>—</td>";
     var daily = a.usage.daily_remaining_percent;
     var weekly = a.usage.weekly_remaining_percent;
-    if ((daily > 0 || weekly > 0) && daily != null) {
+    if (daily != null && weekly != null) {
       var usedPct = 100 - daily;
       var barCls = "usage-bar high";
       if (usedPct > 90) barCls = "usage-bar critical";
@@ -137,7 +147,9 @@
   }
 
   function identityCell(a) {
-    return esc(a.email) + " || " + esc(a.user_name) + " || " + esc(a.id);
+    if (a.email) return esc(a.email);
+    if (a.user_name) return esc(a.user_name);
+    return esc(a.id);
   }
 
   var acctCache = [];
@@ -208,7 +220,7 @@
       toggleBtn.onclick = (function (id, cur) {
         return function () {
           var newVal = !cur;
-          apiPost("/admin/api/accounts/" + id, JSON.stringify({ enabled: newVal }))
+          apiPatch("/admin/api/accounts/" + id, JSON.stringify({ enabled: newVal }))
             .then(loadAccounts)
             .catch(function (e) { toast(e.message, "#f87171"); });
         };
@@ -436,17 +448,30 @@
     document.getElementById("btn-refresh-all").onclick = refreshAllUsage;
     document.getElementById("btn-create-token").onclick = function () {
       var box = document.getElementById("new-token-box");
-      box.className = "new-token-box";
+      // Build DOM elements (never innerHTML for security).
+      var header = document.createElement("strong");
+      header.className = "warn-once";
+      header.textContent = "⚠ Shown once — copy now!";
+      var valDiv = document.createElement("div");
+      valDiv.className = "token-value";
+      var codeEl = document.createElement("code");
+      codeEl.title = "Click to copy";
+      codeEl.onclick = function () {
+        navigator.clipboard.writeText(tok.token).then(function () { toast("Copied!", "#34d399"); });
+      };
+      // Assemble fresh: clear any stale content first.
+      while (box.firstChild) { box.removeChild(box.firstChild); }
+      box.appendChild(header);
+      box.appendChild(valDiv);
+      box.appendChild(codeEl);
+      // Display the value.
       apiPost("/admin/api/tokens", "").then(function (tok) {
-        box.innerHTML = '<strong class="warn-once">⚠ Shown once — copy now!</strong><div class="token-value">';
-        box.children[1] = box.children[1] || document.createElement("code");
-        if (!box.children[1]) { box.appendChild(document.createElement("code")); }
-        box.querySelector("code").textContent = tok.token;
-        box.querySelector("code").title = "Click to copy";
-        box.querySelector("code").onclick = function () {
-          navigator.clipboard.writeText(tok.token).then(function () { toast("Copied!", "#34d399"); });
-        };
-      }).catch(function (e) { box.textContent = e.message; box.className = "new-token-box err"; });
+        codeEl.textContent = tok.token;
+        box.className = "new-token-box";
+      }).catch(function (e) {
+        box.textContent = e.message;
+        box.className = "new-token-box err";
+      });
       box.style.display = "";
     };
     document.getElementById("btn-refresh-all").onclick = refreshAllUsage;

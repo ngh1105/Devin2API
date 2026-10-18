@@ -69,6 +69,22 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		default:
 			writeErr(w, http.StatusNotFound, "not found")
 		}
+	case prefix == "/tokens":
+		switch r.Method {
+		case http.MethodGet:
+			s.listTokens(w, r)
+		case http.MethodPost:
+			s.createToken(w, r)
+		default:
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	case strings.HasPrefix(prefix, "/tokens/"):
+		id := strings.TrimPrefix(prefix, "/tokens/")
+		if r.Method != http.MethodDelete {
+			writeErr(w, http.StatusNotFound, "not found")
+			return
+		}
+		s.deleteToken(w, r, id)
 	default:
 		writeErr(w, http.StatusNotFound, "not found")
 	}
@@ -84,6 +100,7 @@ func (s *Server) startLogin(ctx context.Context) (string, error) {
 
 	mgrGen := s.loginMngr.genSnapshot() // capture gen for this goroutine's resolve calls
 	s.loginMngr.SetPending(login)
+	mgrGen = s.loginMngr.genSnapshot() // snap AFTER gen bump so Resolve* calls match
 
 	go func() {
 		defer login.Stop()
@@ -292,6 +309,16 @@ func (s *Server) handleLoginCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.loginMngr.Cancel()
+	// Post-cancel gen bump: ensures any concurrent Resolve* from async goroutines
+	// sees a mismatched mgrGen and is treated as stale → ignored. This guarantees
+	// that cancel always wins the race against background resolves.
+	s.loginMngr.mu.Lock()
+	s.loginMngr.gen++
+	s.loginMngr.statusCode = "idle"
+	s.loginMngr.current = nil
+	s.loginMngr.accountID = ""
+	s.loginMngr.errorMsg = ""
+	s.loginMngr.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{})
 }

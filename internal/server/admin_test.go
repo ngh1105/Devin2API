@@ -622,3 +622,150 @@ func TestGenerationGuard(t *testing.T) {
 		t.Errorf("account_id should be valid_acc_id, got %q", aid)
 	}
 }
+
+// ===================================================================
+
+// TestAdminTokenLifecycle exercises POST/GET/DELETE /admin/api/tokens.
+func TestAdminTokenLifecycle(t *testing.T) {
+	srv := newTestServer(t, "", "")
+
+	// Create a token.
+	createReq := httptest.NewRequest(http.MethodPost, "/admin/api/tokens", nil)
+	createRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create token: got %d, want 201", createRec.Code)
+	}
+	var createdTok map[string]string
+	json.Unmarshal(createRec.Body.Bytes(), &createdTok)
+	tokenID := createdTok["id"]
+	if tokenID == "" {
+		t.Fatal("expected non-empty id in response")
+	}
+
+	// List tokens — expect 1.
+	listReq := httptest.NewRequest(http.MethodGet, "/admin/api/tokens", nil)
+	listRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list tokens: got %d", listRec.Code)
+	}
+	var toks []map[string]string
+	json.Unmarshal(listRec.Body.Bytes(), &toks)
+	if len(toks) != 1 {
+		t.Fatalf("expected 1 token, got %d", len(toks))
+	}
+	if toks[0]["id"] != tokenID {
+		t.Errorf("token id = %q; want %q", toks[0]["id"], tokenID)
+	}
+
+	// Delete the token.
+	delReq := httptest.NewRequest(http.MethodDelete, "/admin/api/tokens/"+tokenID, nil)
+	delRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(delRec, delReq)
+	if delRec.Code != http.StatusNoContent {
+		t.Fatalf("delete token: got %d, want 204", delRec.Code)
+	}
+
+	// List again — now empty.
+	listReq2 := httptest.NewRequest(http.MethodGet, "/admin/api/tokens", nil)
+	listRec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(listRec2, listReq2)
+	if listRec2.Code != http.StatusOK {
+		t.Fatalf("list after delete: got %d", listRec2.Code)
+	}
+	var toks2 []map[string]string
+	json.Unmarshal(listRec2.Body.Bytes(), &toks2)
+	if len(toks2) != 0 {
+		t.Errorf("expected 0 tokens after delete, got %d", len(toks2))
+	}
+}
+
+// ===================================================================
+
+// TestLoginLifecycleAsync exercises the full async login pipeline with real loopback binding,
+// callback delivery, status polling, and final store verification. Proves the gen-fix works.
+func TestLoginLifecycleAsync(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/cli/token", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(fixtureAuth)
+	})
+	mux.HandleFunc("/v3/self", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(fixtureSelfJSON))
+	})
+	apiSrv := httptest.NewServer(mux)
+	defer apiSrv.Close()
+
+	srv := newTestServer(t, apiSrv.URL, "")
+
+	// Start login via handler.
+	startReq := httptest.NewRequest(http.MethodPost, "/admin/api/login/start", nil)
+	startRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("start: got %d, body=%q", startRec.Code, startRec.Body.String())
+	}
+
+	st := srv.loginMngr.current
+	if st == nil || st.Port == 0 {
+		t.Fatal("missing active login state or port")
+	}
+
+	// Hit REAL loopback callback per oauth_test.go pattern.
+	callbackURL := "http://127.0.0.1:" + strconv.Itoa(st.Port) +
+		"/callback?code=testcode&state=" + url.QueryEscape(st.State)
+	resp, err := http.Get(callbackURL)
+	if err != nil {
+		t.Fatalf("callback dial: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("callback status: got %d", resp.StatusCode)
+	}
+
+	// Poll GET /admin/api/login/status until complete or timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for ctx.Err() == nil {
+		statusReq := httptest.NewRequest(http.MethodGet, "/admin/api/login/status", nil)
+		statusRec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(statusRec, statusReq)
+		var statusResp map[string]string
+		json.Unmarshal(statusRec.Body.Bytes(), &statusResp)
+
+		code := statusResp["status"]
+		switch code {
+		case "complete":
+			// Verified: async pipeline succeeded.
+			acctID := statusResp["account_id"]
+			finalAcc, err := srv.accounts.Get(acctID)
+			if err != nil {
+				t.Fatalf("get account after poll: %v", err)
+			}
+			if finalAcc.Email != "test@example.com" {
+				t.Errorf("email: got %q; want %q", finalAcc.Email, "test@example.com")
+			}
+			if finalAcc.UserName != "Test User" {
+				t.Errorf("user_name: got %q; want %q", finalAcc.UserName, "Test User")
+			}
+			if finalAcc.UserID != "test_usr_1" {
+				t.Errorf("user_id: got %q; want %q", finalAcc.UserID, "test_usr_1")
+			}
+			if !strings.HasPrefix(finalAcc.Tokens.SessionToken, "devin-session-token$") {
+				t.Errorf("session_token missing prefix: got %q", finalAcc.Tokens.SessionToken)
+			}
+			return
+
+		case "error":
+			t.Fatalf("login ended with error: %s", statusResp["error"])
+
+		case "idle":
+			// Stale — no pending login started yet; shouldn't happen.
+			t.Fatal("status idle before callback was delivered")
+		}
+
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// ===================================================================
