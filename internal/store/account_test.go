@@ -211,6 +211,20 @@ func TestImportSingleTokenFields(t *testing.T) {
 	}
 }
 
+func TestImportBareTokenWithExtraKeys(t *testing.T) {
+	store := mustStore(t)
+	for _, raw := range []string{
+		`{"access_token":"x","foo":"bar"}`,
+		`{"refresh_token":"r","extra":true}`,
+		`{"token":"t","baz":123,"qux":"q"}`,
+	} {
+		_, err := store.Import([]byte(raw))
+		if _, ok := err.(*ImportError); !ok {
+			t.Fatalf("expected ImportError for %q, got %T: %v", raw, err, err)
+		}
+	}
+}
+
 func TestImportPreservesNonMatchingFields(t *testing.T) {
 	const baseEmail = "existing@example.com"
 	base := makeAccount("keep-me", baseEmail, "auth0|keep")

@@ -78,7 +78,7 @@ func TestTouch(t *testing.T) {
 	list, _ := ts1.List()
 	for _, entry := range list {
 		if entry.ID == tok.ID && entry.LastUsed == nil {
-			t.Fatal("LastExpectedAfter touch: LastUsed should be non-nil")
+			t.Fatal("LastUsed after touch: LastUsed should be non-nil")
 		}
 	}
 	// Reload and confirm LastUsed survived.

@@ -162,6 +162,22 @@ func (s *AccountStore) Import(raw json.RawMessage) (*Account, error) {
 	}
 }
 
+// tokenBlobKeys are the only keys allowed in a bare token import blob.
+var tokenBlobKeys = map[string]bool{
+	"access_token":  true,
+	"refresh_token": true,
+	"token":         true,
+}
+
+func isSubset(m map[string]json.RawMessage, allow map[string]bool) bool {
+	for k := range m {
+		if !allow[k] {
+			return false
+		}
+	}
+	return true
+}
+
 // UpdateTokens sets the token fields and computes expires_at from tok.ExpiresIn.
 func (s *AccountStore) UpdateTokens(id string, tok auth.Tokens) error {
 	s.mu.Lock()
@@ -182,7 +198,9 @@ func (s *AccountStore) UpdateTokens(id string, tok auth.Tokens) error {
 
 func genHex(prefix string, nbytes int) string {
 	b := make([]byte, nbytes)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand entropy exhaustion: " + err.Error())
+	}
 	return prefix + hex.EncodeToString(b)
 }
 
@@ -352,7 +370,7 @@ func findSub(store *AccountStore, sub string) *Account {
 }
 
 func importSchemaOrTokens(store *AccountStore, m map[string]json.RawMessage, keys []string) (*Account, error) {
-	// Check if this looks like a full schema (has known top-level keys).
+	// Full-schema import: dispatch when any known top-level key is present.
 	for _, k := range keys {
 		switch k {
 		case "schema", "id", "email", "sub", "created_at", "oauth", "tokens", "profile", "usage":
@@ -364,12 +382,16 @@ func importSchemaOrTokens(store *AccountStore, m map[string]json.RawMessage, key
 		}
 	}
 
-	// Bare token blob?
-	if len(keys) == 1 {
-		key := keys[0]
-		if key == "access_token" || key == "refresh_token" || key == "token" {
-			return withSubCheck(store, importFromTokenBlob(m, key)), nil
+	// Bare token blob: keys must be a subset of {access_token, refresh_token, token}.
+	if isSubset(m, tokenBlobKeys) && len(keys) > 0 {
+		var tokenKey string
+		for k := range m {
+			if tokenBlobKeys[k] {
+				tokenKey = k
+				break
+			}
 		}
+		return withSubCheck(store, importFromTokenBlob(m, tokenKey)), nil
 	}
 
 	// Anything else: unexpected keys.

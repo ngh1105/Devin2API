@@ -49,10 +49,12 @@ func (s *TokenStore) Create() (Token, error) {
 	tok := Token{ID: id, Token: val, CreatedAt: now, LastUsed: nil}
 	s.mu.Lock()
 	s.tokens[id] = tok
-	s.mu.Unlock()
 	if err := s.saveTokens(); err != nil {
+		delete(s.tokens, id)
+		s.mu.Unlock()
 		return tok, fmt.Errorf("save after create: %w", err)
 	}
+	s.mu.Unlock()
 	return tok, nil
 }
 
@@ -71,10 +73,13 @@ func (s *TokenStore) List() ([]Token, error) {
 func (s *TokenStore) Delete(id string) error {
 	s.mu.Lock()
 	delete(s.tokens, id)
-	s.mu.Unlock()
 	if err := s.saveTokens(); err != nil {
+		// Rollback: re-add since disk still holds it.
+		s.tokens[id] = Token{ID: id} // placeholder to restore consistency
+		s.mu.Unlock()
 		return fmt.Errorf("save after delete: %w", err)
 	}
+	s.mu.Unlock()
 	return nil
 }
 
