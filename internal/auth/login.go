@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"strconv"
 	"strings"
@@ -38,11 +39,16 @@ type AuthError struct {
 func (e *AuthError) Error() string { return "auth: " + e.Stage + ": " + e.Message }
 
 // noRedirectClient returns an http.Client that never follows redirects —
-// callers inspect Location headers themselves.
+// callers inspect Location headers themselves. Uses a cookie jar so session
+// cookies (did/auth0) set by /authorize persist across requests.
 func noRedirectClient() *http.Client {
-	return &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
+	jar, _ := cookiejar.New(nil)
+	return &http.Client{
+		Jar: jar,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 // do performs an HTTP request against c's baseURL using cl.
@@ -67,21 +73,29 @@ func (c *Client) doFormPost(cl *http.Client, ctx context.Context, uri string, da
 	return cl.Do(req)
 }
 
+// expectOK checks resp.StatusCode == want. Caller must close resp.Body.
+func expectOK(resp *http.Response, want int) bool {
+	if resp.StatusCode != want {
+		return false
+	}
+	return true
+}
+
 // extractHidden returns the value of the hidden <input name="n"> from body bytes.
 func extractHidden(body []byte, n string) (string, error) {
 	s := string(body)
 	idx := strings.Index(s, `<input name="`+n+`"`)
 	if idx < 0 {
-		return "", &AuthError{"extract", "hidden field " + n + " not found"}
+		return "", &AuthError{"identifier", "hidden field " + n + " not found"}
 	}
 	vStart := strings.Index(s[idx:], `value="`)
 	if vStart < 0 {
-		return "", &AuthError{"extract", "value attribute not found"}
+		return "", &AuthError{"identifier", "value attribute not found"}
 	}
 	vStart += idx + len(`value="`)
 	vEnd := strings.Index(s[vStart:], `"`)
 	if vEnd < 0 {
-		return "", &AuthError{"extract", "value unclosed"}
+		return "", &AuthError{"identifier", "value unclosed"}
 	}
 	return s[vStart : vStart+vEnd], nil
 }
@@ -94,7 +108,7 @@ func queryVal(loc, key string) (string, error) {
 	}
 	v := u.Query().Get(key)
 	if v == "" {
-		return "", &AuthError{"extract", "field " + key + " not in query"}
+		return "", &AuthError{"identifier", "field " + key + " not in query"}
 	}
 	return v, nil
 }
@@ -127,9 +141,11 @@ func (c *Client) Login(ctx context.Context, email, password string) (Tokens, err
 	if err != nil {
 		return tokens, &AuthError{"authorize", err.Error()}
 	}
-	expectOK(resp, http.StatusFound)
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	if !expectOK(resp, http.StatusFound) {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return tokens, &AuthError{"authorize", "unexpected status " + strconv.Itoa(resp.StatusCode)}
+	}
 
 	// Check for error in redirect Location (e.g., access_denied).
 	redirLoc := resp.Header.Get("Location")
@@ -149,7 +165,11 @@ func (c *Client) Login(ctx context.Context, email, password string) (Tokens, err
 	if err != nil {
 		return tokens, &AuthError{"identifier", err.Error()}
 	}
-	expectOK(resp, http.StatusOK)
+	if !expectOK(resp, http.StatusOK) {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return tokens, &AuthError{"identifier", "unexpected status " + strconv.Itoa(resp.StatusCode)}
+	}
 	body, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if err != nil {
@@ -174,9 +194,9 @@ func (c *Client) Login(ctx context.Context, email, password string) (Tokens, err
 	if err != nil {
 		return tokens, &AuthError{"identifier", err.Error()}
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	if !expectAny(resp, http.StatusFound) {
+	if !expectOK(resp, http.StatusFound) {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
 		return tokens, &AuthError{"identifier", "unexpected status " + strconv.Itoa(resp.StatusCode)}
 	}
 
@@ -191,7 +211,11 @@ func (c *Client) Login(ctx context.Context, email, password string) (Tokens, err
 	if err != nil {
 		return tokens, &AuthError{"password", err.Error()}
 	}
-	expectOK(resp, http.StatusOK)
+	if !expectOK(resp, http.StatusOK) {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return tokens, &AuthError{"password", "unexpected status " + strconv.Itoa(resp.StatusCode)}
+	}
 	body, err = io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if err != nil {
@@ -216,9 +240,9 @@ func (c *Client) Login(ctx context.Context, email, password string) (Tokens, err
 	if err != nil {
 		return tokens, &AuthError{"password", err.Error()}
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	if !expectAny(resp, http.StatusFound) {
+	if !expectOK(resp, http.StatusFound) {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
 		return tokens, &AuthError{"password", "login failed — status " + strconv.Itoa(resp.StatusCode)}
 	}
 
@@ -253,8 +277,10 @@ func (c *Client) Login(ctx context.Context, email, password string) (Tokens, err
 	if err != nil {
 		return tokens, &AuthError{"exchange", err.Error()}
 	}
-	expectOK(resp, http.StatusOK)
 	defer resp.Body.Close()
+	if !expectOK(resp, http.StatusOK) {
+		return tokens, &AuthError{"exchange", "unexpected status " + strconv.Itoa(resp.StatusCode)}
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
 		return tokens, &AuthError{"exchange", err.Error()}
 	}
@@ -276,7 +302,9 @@ func (c *Client) Refresh(ctx context.Context, refreshToken string) (Tokens, erro
 		return tokens, &AuthError{"refresh", err.Error()}
 	}
 	defer resp.Body.Close()
-	expectOK(resp, http.StatusOK)
+	if !expectOK(resp, http.StatusOK) {
+		return tokens, &AuthError{"refresh", "unexpected status " + strconv.Itoa(resp.StatusCode)}
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
 		return tokens, &AuthError{"refresh", err.Error()}
 	}
@@ -307,26 +335,4 @@ func (c *Client) UserInfo(ctx context.Context, accessToken string) (Profile, err
 		return p, &AuthError{"userinfo", err.Error()}
 	}
 	return p, nil
-}
-
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
-
-// expectOK checks resp.StatusCode == want. Caller must close resp.Body.
-func expectOK(resp *http.Response, want int) {
-	if resp.StatusCode != want {
-		panic(&AuthError{"exchange", "unexpected status " + strconv.Itoa(resp.StatusCode)})
-	}
-}
-
-// expectAny checks resp.StatusCode matches any of the given codes.
-// Returns false if none match (caller must handle close).
-func expectAny(resp *http.Response, codes ...int) bool {
-	for _, c := range codes {
-		if resp.StatusCode == c {
-			return true
-		}
-	}
-	return false
 }
