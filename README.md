@@ -1,6 +1,5 @@
 # Devin2API
-
-OpenAI-compatible reverse proxy API for Devin — built from scratch in Go.
+OpenAI & Anthropic compatible reverse proxy API for Devin — built from scratch in Go.
 
 **Milestone 1:** OAuth login (Auth0 PKCE), account persistence as JSON, a web panel (accounts + tokens pages), and a token-gated `/v1` proxy stub. The chat completions endpoint currently returns **501 "upstream not implemented yet"** (as plain `data:` frames per the OpenAI stream protocol). The next milestone is implementing the Devin upstream chat protocol (WebSocket) to make `/v1/chat/completions` functional.
 
