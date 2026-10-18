@@ -174,7 +174,6 @@ func StartLogin(appBaseOverride string) (*LoginState, error) {
 				fmt.Fprint(w, res.error)
 			}
 			state.resultCh <- res
-			close(state.done)
 		})
 
 		state.srv = &http.Server{Handler: mux}
@@ -185,7 +184,7 @@ func StartLogin(appBaseOverride string) (*LoginState, error) {
 }
 
 // Stop shuts down the callback HTTP server and releases the listener.
-// Signals Wait to return immediately by closing the done channel. Idempotent.
+// Signals Wait to finish by closing the done channel. Idempotent.
 func (l *LoginState) Stop() {
 	if l.shutOnce.Swap(true) {
 		return
@@ -209,8 +208,14 @@ func (l *LoginState) Wait(ctx context.Context, timeout time.Duration) (Result, e
 		return Result{}, fmt.Errorf("login: context cancelled: %w", ctx.Err())
 	case <-timer.C:
 		return Result{}, errors.New("login timed out")
+	case res := <-l.resultCh:
+		if res.error != "" {
+			return Result{}, errors.New(res.error)
+		}
+		close(l.done) // close done AFTER receiving valid result
+		return Result{Code: res.code}, nil
 	case <-l.done:
-		// Stop() or callback closed done. Non-block drain resultCh.
+		// Stop() closed done. Non-block drain resultCh.
 		select {
 		case res := <-l.resultCh:
 			if res.error != "" {
