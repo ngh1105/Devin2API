@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ngh1105/Devin2API/internal/auth"
 	"github.com/ngh1105/Devin2API/internal/config"
 	"github.com/ngh1105/Devin2API/internal/store"
 	"github.com/ngh1105/Devin2API/web"
@@ -16,17 +15,15 @@ type Server struct {
 	dataDir  string
 	accounts *store.AccountStore
 	tokens   *store.TokenStore
-	auth     *auth.Client
 }
 
-// New creates a new Server from config, stores, and auth client.
-func New(cfg config.Config, accounts *store.AccountStore, tokens *store.TokenStore, authClient *auth.Client) *Server {
+// New creates a new Server from config and stores.
+func New(cfg config.Config, accounts *store.AccountStore, tokens *store.TokenStore) *Server {
 	return &Server{
 		listen:   cfg.Listen,
 		dataDir:  cfg.DataDir,
 		accounts: accounts,
 		tokens:   tokens,
-		auth:     authClient,
 	}
 }
 
@@ -72,9 +69,4 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.NotFound(w, r)
-}
-
-// redirectWeb redirects GET / to /web/accounts.html.
-func (*Server) redirectWeb(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/web/accounts.html", http.StatusFound)
 }

@@ -10,7 +10,7 @@ import (
 // TestWebRoutes verifies embed serving of /web/ pages and JS/CSS.
 func TestWebRoutes(t *testing.T) {
 	tmp := t.TempDir()
-	srv := makeTestServerWithAuth(t, tmp, nil)
+	srv := makeTestServer(t, tmp)
 
 	// 1) GET / → 302 to /web/accounts.html.
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -94,7 +94,7 @@ func TestWebRoutes(t *testing.T) {
 // TestAdminAPIWorks verifies admin API is still operational alongside web panel.
 func TestAdminAPIWorks(t *testing.T) {
 	tmp := t.TempDir()
-	srv := makeTestServerWithAuth(t, tmp, nil)
+	srv := makeTestServer(t, tmp)
 
 	// Settings endpoint should return correct JSON.
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/settings", nil)

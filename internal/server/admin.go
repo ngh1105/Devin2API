@@ -7,9 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
-	"github.com/ngh1105/Devin2API/internal/auth"
 	"github.com/ngh1105/Devin2API/internal/store"
 )
 
@@ -40,10 +38,6 @@ func (s *Server) adminHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-	case strings.HasSuffix(prefix, "/refresh"):
-		id := strings.TrimPrefix(prefix, "/accounts/")
-		id = strings.TrimSuffix(id, "/refresh")
-		s.refreshAccount(w, r, id)
 	case strings.HasPrefix(prefix, "/accounts/"):
 		id := strings.TrimPrefix(prefix, "/accounts/")
 		if len(strings.Split(id, "/")) > 1 {
@@ -114,22 +108,6 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hasEmail := false
-	hasPassword := false
-	for k := range parsed {
-		if k == "email" {
-			hasEmail = true
-		}
-		if k == "password" {
-			hasPassword = true
-		}
-	}
-
-	if hasEmail && hasPassword {
-		s.handleLoginFlow(w, r, rawBody)
-		return
-	}
-
 	acc, err := s.accounts.Import(json.RawMessage(rawBody))
 	if err != nil {
 		var importErr *store.ImportError
@@ -151,56 +129,6 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(acc)
 }
 
-func (s *Server) handleLoginFlow(w http.ResponseWriter, r *http.Request, rawBody []byte) {
-	if s.auth == nil {
-		writeErr(w, http.StatusServiceUnavailable, "auth client not configured")
-		return
-	}
-	var parsed map[string]json.RawMessage
-	json.Unmarshal(rawBody, &parsed)
-
-	var email, password string
-	if v, ok := parsed["email"]; ok {
-		json.Unmarshal(v, &email)
-	}
-	if v, ok := parsed["password"]; ok {
-		json.Unmarshal(v, &password)
-	}
-
-	tokens, err := s.auth.Login(r.Context(), email, password)
-	if err != nil {
-		var authErr *auth.AuthError
-		if errors.As(err, &authErr) {
-			writeErr(w, http.StatusBadGateway, authErr.Error())
-			return
-		}
-		writeErr(w, http.StatusBadGateway, "login failed")
-		return
-	}
-
-	profile, err := s.auth.UserInfo(r.Context(), tokens.AccessToken)
-	if err != nil {
-		var authErr *auth.AuthError
-		if errors.As(err, &authErr) {
-			writeErr(w, http.StatusBadGateway, authErr.Error())
-			return
-		}
-		writeErr(w, http.StatusBadGateway, "userinfo failed")
-		return
-	}
-
-	acct := store.AccountFromLogin(email, tokens, profile)
-
-	if err := s.accounts.Save(acct); err != nil {
-		writeErr(w, http.StatusInternalServerError, "unable to save account")
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(acct)
-}
-
 func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
 	if _, err := s.accounts.Get(id); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -215,53 +143,6 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) refreshAccount(w http.ResponseWriter, r *http.Request, id string) {
-	if s.auth == nil {
-		writeErr(w, http.StatusServiceUnavailable, "auth client not configured")
-		return
-	}
-	acc, err := s.accounts.Get(id)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeErr(w, http.StatusNotFound, "account not found")
-			return
-		}
-		writeErr(w, http.StatusInternalServerError, "unable to get account")
-		return
-	}
-
-	if acc.Tokens.RefreshToken == "" {
-		writeErr(w, http.StatusBadRequest, "no refresh token")
-		return
-	}
-
-	newTokens, err := s.auth.Refresh(r.Context(), acc.Tokens.RefreshToken)
-	if err != nil {
-		var authErr *auth.AuthError
-		if errors.As(err, &authErr) {
-			writeErr(w, http.StatusBadGateway, authErr.Error())
-			return
-		}
-		writeErr(w, http.StatusBadGateway, "refresh failed")
-		return
-	}
-
-	// Mutate directly (same pointer as Get returns; Save persists it back).
-	acc.Tokens.AccessToken = newTokens.AccessToken
-	acc.Tokens.RefreshToken = newTokens.RefreshToken
-	acc.Tokens.IDToken = newTokens.IDToken
-	acc.Tokens.ExpiresAt = time.Now().Add(time.Duration(newTokens.ExpiresIn) * time.Second).Unix()
-	acc.Tokens.Scope = newTokens.Scope
-
-	if err := s.accounts.Save(acc); err != nil {
-		writeErr(w, http.StatusInternalServerError, "save failed")
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(acc)
 }
 
 func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {
