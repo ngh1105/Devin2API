@@ -37,6 +37,11 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
+// Start runs the HTTP server on the configured address.
+func (s *Server) Start(addr string) error {
+	return http.ListenAndServe(addr, s.Handler())
+}
+
 // rootHandler dispatches web files, admin API, and healthz.
 func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path

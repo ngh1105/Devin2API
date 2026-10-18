@@ -6,6 +6,7 @@ import "os"
 type Config struct {
 	Listen  string
 	DataDir string
+	BaseURL string // optional: overrides auth client base URL (tests only)
 }
 
 // Load reads configuration from environment variables, falling back to defaults.

@@ -194,6 +194,37 @@ func (s *AccountStore) UpdateTokens(id string, tok auth.Tokens) error {
 	return nil
 }
 
+// AccountFromLogin builds an Account from auth login tokens and user info.
+// Fills the oauth block from auth constants, generates id + created_at,
+// sets expires_at using tok.ExpiresIn like UpdateTokens does.
+func AccountFromLogin(email string, tok auth.Tokens, p auth.Profile) *Account {
+	return &Account{
+		Schema:    1,
+		ID:        genHex("acc_", 8),
+		Email:     email,
+		Sub:       p.Sub,
+		CreatedAt: time.Now(),
+		OAuth: OAuth{
+			ClientID:    auth.ClientID,
+			Domain:      auth.AuthDomain,
+			Audience:    auth.Audience,
+			RedirectURI: auth.RedirectURI,
+		},
+		Tokens: Tokens{
+			AccessToken:  tok.AccessToken,
+			RefreshToken: tok.RefreshToken,
+			IDToken:      tok.IDToken,
+			ExpiresAt:    time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix(),
+			Scope:        tok.Scope,
+		},
+		Profile: Profile{
+			Name:    p.Name,
+			Picture: p.Picture,
+		},
+		Usage: nil,
+	}
+}
+
 // --- internal helpers --------------------------------------------------------
 
 func genHex(prefix string, nbytes int) string {

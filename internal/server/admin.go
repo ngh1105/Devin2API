@@ -152,6 +152,10 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLoginFlow(w http.ResponseWriter, r *http.Request, rawBody []byte) {
+	if s.auth == nil {
+		writeErr(w, http.StatusServiceUnavailable, "auth client not configured")
+		return
+	}
 	var parsed map[string]json.RawMessage
 	json.Unmarshal(rawBody, &parsed)
 
@@ -236,6 +240,10 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request, id string
 }
 
 func (s *Server) refreshAccount(w http.ResponseWriter, r *http.Request, id string) {
+	if s.auth == nil {
+		writeErr(w, http.StatusServiceUnavailable, "auth client not configured")
+		return
+	}
 	acc, err := s.accounts.Get(id)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
