@@ -28,7 +28,7 @@ func connectFrame(flag byte, payload []byte) []byte {
 // fakeDevin answers GetChatMessage per session token: tokens listed in
 // trailers get that end-of-stream JSON, all others stream "pong".
 type fakeDevin struct {
-	mu       sync.Mutex
+	mu         sync.Mutex
 	calls      []string // chat Authorization headers seen, in order
 	modelCalls int
 	trailers   map[string]string
