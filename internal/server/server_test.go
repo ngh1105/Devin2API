@@ -22,7 +22,7 @@ func makeTestServer(t *testing.T, tmpDir string) *Server {
 	if err != nil {
 		t.Fatalf("new token store: %v", err)
 	}
-	return New(config.Config{Listen: ":0"}, acc, tok, nil)
+	return New(config.Config{Listen: ":0"}, acc, tok)
 }
 
 // TestHealthz ensures GET /healthz returns {"status":"ok"}.

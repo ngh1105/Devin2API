@@ -1,7 +1,12 @@
 # Devin2API
-OpenAI & Anthropic compatible reverse proxy API for Devin — built from scratch in Go.
 
-**Milestone 1:** OAuth login (Auth0 PKCE), account persistence as JSON, a web panel (accounts + tokens pages), and a token-gated `/v1` proxy stub. The chat completions endpoint currently returns **501 "upstream not implemented yet"** (as plain `data:` frames per the OpenAI stream protocol). The next milestone is implementing the Devin upstream chat protocol (WebSocket) to make `/v1/chat/completions` functional.
+OpenAI-compatible reverse proxy API for Devin — built from scratch in Go.
+
+**Milestones achieved:**
+1. OAuth login (browser-link, any Devin auth method incl. Google/SSO)
+2. Web panel (accounts, quota display, API keys, settings), CLI login, live usage/quota panel, CLIProxyAPI-compatible account JSON import, token-gated `/v1` proxy stub
+
+**What it does:** Proxies OpenAI-compatible `/v1/*` requests for Devin. The chat completions endpoint currently returns **501 "upstream not implemented"** (`data:` frames when streaming). Milestone 3 will wire it to Devin's upstream chat protocol (WebSocket).
 
 ---
 
@@ -28,88 +33,141 @@ DEVIN2API_LISTEN="127.0.0.1:8080" DEVIN2API_DATA="./data" ./devin2api
 
 The server exposes:
 
-- **Web panel** — open <http://127.0.0.1:8080/> in a browser; jump directly to the accounts page at `/web/accounts.html`.
+- **Web panel** — open <http://127.0.0.1:8080/> in a browser; single-page app at `/web/` with tab navigation (Accounts, API Keys, Settings, API).
 - **Health check** — `GET /healthz` → `{"status":"ok"}`.
 - **OpenAI-compatible `/v1/*` endpoints** — see [API status](#api-status).
 
-> **Warning about non-loopback binding.** Panel pages are unauthenticated. The admin API (`/admin/api/*`) only answers requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]`, rejects cross-origin requests, and requires an `X-Devin2API` header on state-changing calls (the panel sends it). Token values are masked in every list response. Do not expose the server on a public interface without adding your own auth/gateway layer.
+> **Warning about non-loopback binding.** Panel pages are unauthenticated — anyone who can reach them gets full admin control over accounts and tokens. Do not bind to `0.0.0.0` or any public interface without adding your own auth/gateway layer.
 
 ---
 
 ## Login
 
-Run the headless login command to authenticate against `auth.devin.ai` and save an account:
+### Panel — browser login (any IdP)
+
+1. Open the Accounts tab → **Add account** → **Login with browser**.
+2. A link to `auth.devin.ai` opens in your default browser.
+3. Log in with **any** Devin auth method — email+password, Google, GitHub, SAML, etc.
+4. After successful auth you're redirected back to the local server; the account appears with usage data.
+
+### Panel — Login with browser (preferred)
+
+1. Open the panel at <http://127.0.0.1:8080/web/>, switch to the **Accounts** tab.
+2. Click **Add account**, then **Login with browser**.
+3. A link opens in your default browser pointing to `auth.devin.ai` — click it to authorize.
+4. After auth you're redirected back to the local server; the account appears with usage data.
+
+### Panel — Manual token import
+
+Paste a Devin session token or full JSON blob into the **Import** card on the Accounts tab:
+
+- Full token string: `devin-session-token$eyJ...`
+- Raw JWT: auto-prefixed to `devin-session-token$<jwt>` on import.
+- Shape: `{"token": "<value>"}` or full v2 schema JSON.
+
+On success the account appears with usage data.
+
+Alternatively via the API endpoint:
 
 ```bash
-devin2api login
+curl -X POST http://localhost:8080/admin/api/login/manual \
+  -H "Content-Type: application/json" \
+  -d '{"token":"devin-session-token$eyJ..."}'
 ```
 
-1. You will be prompted for **Email**, then **Password**.
-2. The tool performs a full Auth0 PKCE hosted-login flow (identifier → password → authorize → userinfo).
-3. On success it prints something like:
+### Dead-token handling
 
-```
-saved data/accounts/acc_a1b2c3d4.json
-```
+Server-side session tokens expire (TTL'd). If a token is dead:
 
-Supported account types: email+password sign-ups on Devin. Enterprise accounts that use Google, GitHub, SAML, or other IdP logins are **not supported** via the headless flow — those routes redirect to the external identity provider, which the CLI cannot follow automatically. Users with such identities can obtain tokens manually through the browser's DevTools and import them via the [Accounts panel textarea](#account-json-import).
+- Usage queries surface a **"Token dead"** badge alongside the account name.
+- The account remains; re-login via the steps above to obtain a fresh token.
 
 ---
 
 ## Account JSON
 
-### Schema (v1)
+Accounts are persisted as individual `<id>.json` files under `$DEVIN2API_DATA/accounts/`. The store accepts three import shapes:
+
+### Schema v2 (full import)
 
 ```jsonc
 {
-  "schema": 1,
-  "id":        "acc_XXXXXXXX",    // auto-generated acc_ + 16 hex chars
-  "email":     "user@example.com",
-  "sub":       "auth0|xxxxxxxxx", // Auth0 sub identifier
-  "created_at":"2026-10-18T...",   // ISO timestamp
-  "oauth": {                       // Auth0 connection info
-    "client_id": "…",
-    "domain":    "auth.devin.ai",
-    "audience":  "…",
-    "redirect_uri": "…"
+  "schema": 2,
+  "id":          "acc_XXXXXXXX",    // optional — autogenerated if absent
+  "email":       "user@example.com",
+  "user_name":   "handle",
+  "user_id":     "user-xxxx",
+  "org_id":      "org-xxxxx",
+  "plan":        "Pro",
+  "nickname":    "",                // optional human label
+  "enabled":     true,
+  "auth_kind":   "oauth",
+  "created_at":  "2026-10-18T...",  // ISO timestamp
+  "tokens": {
+    "session_token": "devin-session-token$eyJ..."
   },
-  "tokens": {                      // Bearer credentials
-    "access_token":  "…",          // IDP access token
-    "refresh_token": "…",          // used to renew expired tokens
-    "id_token":      "…",
-    "expires_at":    1729251234,   // unix seconds (computed from expires_in)
-    "scope":         "openid …"
-  },
-  "profile": {                     // userinfo payload
-    "name":  "Display Name",
-    "picture": "https://…"
-  },
-  "usage": null                    // reserved — future per-account quotas
+  "usage": null                     // populated after first usage fetch
 }
 ```
 
-Accounts are persisted as individual `<id>.json` files under `$DEVIN2API_DATA/accounts/`.
+### CLIProxyAPI import (recommended)
 
-### Importing Accounts
+Drop in a JSON blob exported from a client like curl-curl-in-js or Postman. Both `api_key` and `session_token` fields are accepted; if both are present, `session_token` takes precedence. Raw JWT values are auto-prefixed with `devin-session-token$`.
 
-You can paste JSON into the Accounts panel textarea (`/web/accounts.html`) to import accounts:
+**Exact example (real file):**
 
-| Input shape                        | Result                                           |
-|------------------------------------|--------------------------------------------------|
-| Full schema blob (all v1 fields)   | Parsed as-is; same-sub re-imports upsert.       |
-| A bare `"access_token": "..."` blob | New account generated; only the token is set.   |
-| A bare `"refresh_token": "..."` blob| New account generated; only the refresh token.  |
+```json
+{"api_key":"devin-session-token$eyJ...","auth_kind":"oauth","disabled":false,"email":"user@hotmail.com","org_id":"org-...","plan":"Pro","session_token":"devin-session-token$eyJ...","type":"devin","user_id":"user-...","user_name":"handle"}
+```
 
-Re-importing an account updates the existing record instead of creating a duplicate. Accounts match by `sub`, or by token value for bare token blobs. The original `id` and `created_at` are kept. Imported `id` values may only contain letters, digits, `_` and `-`. An account holding only a refresh token shows as expired until you refresh it.
+Fields extracted: email, user_name, user_id, org_id, plan, auth_kind, enabled. Tokens from `session_token` or `api_key` become `tokens.session_token`.
+
+### Bare token blob
+
+```json
+{"access_token": "raw-jwt-here"}
+```
+
+Only token-bearing keys (`access_token`, `refresh_token`, `token`) plus optional identity fields (`user_id`, `email`, `user_name`, `org_id`, `api_key`, `session_token`) are accepted. Generates a minimal account with schema v2.
+
+Same-user re-import (by `user_id` or `email`) merges the new data into the existing record — accounts stay deduplicated.
+
+---
+
+## Usage
+
+Usage data comes from Devin's seat-management API:
+
+- **Plan** — e.g. "Pro".
+- **Daily / Weekly remaining** — percentage bars (`daily_remaining_percent`, `weekly_remaining_percent`).
+- **Reset times** — `daily_reset_at` and `weekly_reset_at` ISO timestamps.
+- **Plan window** — `plan_start` and `plan_end`.
+
+Refresh per account (Accounts tab → Refresh) or refresh all. Errors surface as a "Token dead" badge or an error message under the account row.
+
+---
+
+## Panel
+
+Single-page app with four tabs (URL routes):
+
+| Tab              | Route                  | Contents                                     |
+|------------------|------------------------|----------------------------------------------|
+| **Accounts**     | `/web/accounts.html`   | Accounts grid, add/rename/delete/import, refresh usage |
+| **API Keys**     | `/web/tokens.html`     | Create/list/delete proxy tokens              |
+| **Settings**     | `/web/settings.html`   | Server URL, port, CLI login button           |
+| **API**          | `/web/api.html`        | Send test POST to `/v1/*` endpoints          |
+
+Stats grid (top of Accounts tab): Accounts, Models, Requests, Failed.
 
 ---
 
 ## Downstream Tokens (Proxy Authentication)
 
-Use the **Tokens** page (`/web/tokens.html`) in the panel to create tokens. Each call generates:
+Use the **API Keys** tab (`/web/tokens.html`) in the panel to create tokens. Each call generates:
 
 - **ID** — internal `t_XXXXXXXX`
-- **Value** — `d2sk_` + 32 hex characters (shown once on creation; later listings show it masked, so store it securely)
+- **Value** — `d2sk_` + 32 hex characters (shown once on creation; store it securely)
 
 Include the token value with any request to the `/v1/*` endpoints:
 
@@ -141,12 +199,13 @@ The `/v1/chat/completions` endpoint mirrors the OpenAI Chat Completions wire for
 
 ## Roadmap
 
-| Milestone | What                          | Status         |
-|-----------|-------------------------------|----------------|
-| 1         | OAuth login + account JSON + web panel + `/v1` proxy stub | Done           |
-| 2         | Devin upstream chat protocol (WebSocket) — brings `/v1/chat/completions` live | Next           |
+| Milestone | What                                                      | Status   |
+|-----------|-----------------------------------------------------------|----------|
+| 1         | OAuth login (Auth0 PKCE), account persistence, web panel, `/v1` proxy stub | Done     |
+| 2         | Browser-link login (any IdP), usage/quota panel, CLI login, CLIProxyAPI JSON import, token-gated /v1 stub | Done |
+| 3         | Devin upstream chat protocol (WebSocket) — brings `/v1/chat/completions` live | Next |
 
-Once milestone 2 lands, the chat completions endpoint will forward user messages to Devin over WebSocket, stream back responses, and complete the OpenAI-compatible experience.
+Once milestone 3 lands, the chat completions endpoint will forward user messages to Devin over WebSocket, stream back responses, and complete the OpenAI-compatible experience.
 
 ---
 
@@ -154,7 +213,7 @@ Once milestone 2 lands, the chat completions endpoint will forward user messages
 
 ```
 cmd/devin2api/          # CLI entry point (login + serve subcommands)
-internal/auth/          # Auth0 PKCE login client
+internal/devin/         # OAuth client, session tokens, seat-management API
 internal/config/        # Environment-variable config loader
 internal/server/        # HTTP handlers (/v1/*, web panel, admin API, healthz)
 internal/store/         # Account and token file-based stores

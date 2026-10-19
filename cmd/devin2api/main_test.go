@@ -3,112 +3,102 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ngh1105/Devin2API/internal/config"
+	"github.com/ngh1105/Devin2API/internal/devin"
 )
 
-// TestRunLoginSavesAccount runs runLogin against a fake auth server.
-// Stdin is non-TTY (pipe), so term.ReadPassword falls back to line read.
+// TestRunLoginSavesAccount simulates the CLI OAuth login flow against fake
+// Devin endpoints.
 func TestRunLoginSavesAccount(t *testing.T) {
-	var ts *httptest.Server
-	ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		if path == "/authorize" {
-			state := r.URL.Query().Get("state")
-			w.Header().Set("Location",
-				ts.URL+"/u/login/identifier?state="+url.PathEscape(state))
-			w.WriteHeader(http.StatusFound)
-			return
-		}
-		if path == "/u/login/identifier" && r.Method == "GET" {
-			state := r.URL.Query().Get("state")
-			w.Header().Set("Content-Type", "text/html")
-			w.Write([]byte(`<html><form id="f"><input name="state" value="` + state + `"/></form></html>`))
-			return
-		}
-		if path == "/u/login/identifier" && r.Method == "POST" {
-			r.ParseForm()
-			state := r.FormValue("state")
-			w.Header().Set("Location",
-				ts.URL+"/u/login/password?state="+url.PathEscape(state))
-			w.WriteHeader(http.StatusFound)
-			return
-		}
-		if path == "/u/login/password" && r.Method == "GET" {
-			state := r.URL.Query().Get("state")
-			w.Header().Set("Content-Type", "text/html")
-			w.Write([]byte(`<html><form><input name="state" value="` + state + `"/></form></html>`))
-			return
-		}
-		if path == "/u/login/password" && r.Method == "POST" {
-			r.ParseForm()
-			code := "c-test"
-			loc := "https://app.devin.ai/post-auth?code=" + url.QueryEscape(code) + "&state=" + url.QueryEscape(r.FormValue("state"))
-			w.Header().Set("Location", loc)
-			w.WriteHeader(http.StatusFound)
-			return
-		}
-		if path == "/oauth/token" && r.Method == "POST" {
-			r.ParseForm()
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"access_token":"tok-ok","refresh_token":"rt-ok","id_token":"idt-ok","token_type":"Bearer","expires_in":3600,"scope":"openid profile email offline_access"}`))
-			return
-		}
-		if path == "/userinfo" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"sub":"uid-abc","email":"test@example.com","name":"Test User","picture":"https://example.com/pic.jpg"}`))
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer ts.Close()
-
 	tmp := t.TempDir()
+	portCh := make(chan int, 1)
+
+	appServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/auth/cli/continue" {
+			http.NotFound(w, r)
+			return
+		}
+		state := r.URL.Query().Get("state")
+		redirect := r.URL.Query().Get("redirect_uri")
+		w.Header().Set("Location", redirect+"?code=fake-code&state="+state)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer appServer.Close()
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/auth/cli/token":
+			var req struct {
+				Code         string `json:"code"`
+				CodeVerifier string `json:"code_verifier"`
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"token": "eyJhbGciOiJIUzI1NiJ9.test"})
+		case "/v3/self":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"user_id":        "uid-test-123",
+				"user_name":      "testuser",
+				"org_id":         "org-abc",
+				"principal_type": "cli",
+			})
+		case "/exa.seat_management_pb.SeatManagementService/GetUserStatus":
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer apiServer.Close()
+
+	devin.APIBaseURL = apiServer.URL
+	devin.AppBaseURL = appServer.URL
+	devin.ServerBaseURL = apiServer.URL
 
 	cfg := config.Config{
 		Listen:  "127.0.0.1:0",
 		DataDir: tmp,
-		BaseURL: ts.URL,
+		BaseURL: "", // leave empty — ExchangeCode uses devin.APIBaseURL, FetchSelfProfile uses same
 	}
 
-	stdin := strings.NewReader("test@example.com\nsupersecret\n")
-	var buf strings.Builder
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runLogin(context.Background(), os.Stdout, cfg, func(p int) { portCh <- p })
+	}()
 
-	err := runLogin(context.Background(), &buf, stdin, cfg)
-	if err != nil {
+	port := <-portCh
+	time.Sleep(100 * time.Millisecond)
+
+	cbReq, _ := http.NewRequest(http.MethodGet,
+		fmt.Sprintf("http://127.0.0.1:%d/callback?code=fake-code&state=%s",
+			port, devin.LastVerifier()), nil)
+	if _, err := http.DefaultClient.Do(cbReq); err != nil {
 		t.Fatal(err)
 	}
 
-	// --- assertions -----------------------------------------------------------
-
-	out := buf.String()
-	if !strings.Contains(out, "saved ") {
-		t.Fatalf("expected 'saved' in output, got %q", out)
+	err := <-errCh
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	entries, err := os.ReadDir(tmp + "/accounts/")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var accFile string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
-			accFile = e.Name()
-			break
-		}
-	}
-	if accFile == "" {
+	if len(entries) == 0 {
 		t.Fatal("no account files written")
 	}
 
-	data, err := os.ReadFile(tmp + "/accounts/" + accFile)
+	data, err := os.ReadFile(tmp + "/accounts/" + entries[0].Name())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,18 +112,12 @@ func TestRunLoginSavesAccount(t *testing.T) {
 	if !ok || tokens == nil {
 		t.Fatal("no 'tokens' object in saved account")
 	}
-	if accessToken, ok := tokens["access_token"].(string); !ok || accessToken == "" {
-		t.Error("missing access_token in saved account tokens")
-	}
 
-	if sub, ok := acct["sub"].(string); !ok || sub != "uid-abc" {
-		t.Errorf("sub: got %v, want %q", acct["sub"], "uid-abc")
+	st, ok := tokens["session_token"].(string)
+	if !ok || st == "" {
+		t.Error("missing session_token")
 	}
-
-	// Password must NOT appear in the saved file bytes.
-	if strings.Contains(string(data), "supersecret") {
-		t.Error("password found in saved account file — security violation")
+	if !strings.HasPrefix(st, "devin-session-token$") {
+		t.Errorf("session_token missing prefix: %q", st)
 	}
 }
-
-var _ = time.NewTimer(0) // ensure time import is used

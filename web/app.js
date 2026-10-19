@@ -1,33 +1,58 @@
-// admin panel shared JS — zero external dependencies, no console logging.
+// Single-page admin panel — zero external dependencies, offline-first.
 (function () {
   "use strict";
 
-  /* ------------------------------------------------------------------ */
-  /* API helpers                                                         */
-  /* ------------------------------------------------------------------ */
+  // ---- XSS-safe helpers ----
 
-  // apiPost POSTs body (string) to path and returns the parsed JSON value.
-  // ADMIN_HEADERS marks requests as coming from this panel; the server rejects
-  // state-changing admin calls without it (CSRF guard).
-  var ADMIN_HEADERS = { "X-Devin2API": "1" };
+  function esc(text) {
+    var d = document.createElement("div");
+    d.textContent = String(text);
+    return d.innerHTML;
+  }
+
+  function textNode(txt) {
+    return document.createTextNode(String(txt));
+  }
+
+  // ---- Toast notifications (bottom-right, auto-dismiss 4s) ----
+
+  function toast(msg, color) {
+    color = color || "#34d399";
+    var box = document.createElement("div");
+    box.className = "toast toast-ok";
+    if (color === "#f87171") box.className = "toast toast-err";
+    box.textContent = msg;
+    document.getElementById("toast-container").appendChild(box);
+    setTimeout(function () { box.remove(); }, 4000);
+  }
+
+  // ---- API helpers ----
 
   function apiPost(path, body) {
-    return fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Devin2API": "1" }, body: body })
+    body = body || "";
+    return fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: body })
       .then(checkStatus)
-      .then(function (r) { return r.json(); });
+      .then(parseJSON);
   }
 
-  // apiGet GETs path and returns the parsed JSON value.
   function apiGet(path) {
-    return fetch(path).then(checkStatus).then(function (r) { return r.json(); });
+    return fetch(path).then(checkStatus).then(parseJSON);
   }
 
-  // apiDelete DELETEs path; resolves on success or rejects with the error body.
   function apiDelete(path) {
-    return fetch(path, { method: "DELETE", headers: ADMIN_HEADERS }).then(checkStatus);
+    return fetch(path, { method: "DELETE" }).then(checkStatus);
   }
 
-  // checkStatus throws on non-2xx responses.
+  function apiPatch(path, body) {
+    return fetch(path, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: body })
+      .then(checkStatus)
+      .then(parseJSON);
+  }
+
+  function parseJSON(r) {
+    return r.json();
+  }
+
   function checkStatus(r) {
     if (r.ok) return r;
     return r.json().catch(function () { return { error: "HTTP " + r.status }; }).then(function (body) {
@@ -37,178 +62,421 @@
     });
   }
 
-  /* ------------------------------------------------------------------ */
-  /* Status line                                                         */
-  /* ------------------------------------------------------------------ */
+  // ---- Stats grid ----
 
-  function setStatus(el, text, ok) {
-    el.textContent = text;
-    el.className = ok ? "status-ok" : "status-err";
+  function loadStats() {
+    apiGet("/admin/api/stats").then(function (d) {
+      var g = document.getElementById("stats-grid");
+      g.innerHTML = "";
+      var items = [
+        { label: "Accounts", val: d.accounts, sub: (d.enabled != null ? (d.enabled + "/" + d.accounts) : "") },
+        { label: "Models", val: "—", sub: "" },
+        { label: "Requests", val: (d.requests != null ? d.requests : 0), sub: "" },
+        { label: "Failed", val: (d.failed != null ? d.failed : 0), sub: "" }
+      ];
+      for (var i = 0; i < items.length; i++) {
+        var c = document.createElement("div");
+        c.className = "stat-card";
+        c.innerHTML = "<span class=\"stat-val\">";
+        if (items[i].sub) {
+          c.children[0].textContent = items[i].val;
+        } else {
+          c.children[0].innerHTML = "";
+          c.children[0].appendChild(textNode(items[i].val));
+        }
+        c.innerHTML += "</span><span class=\"stat-label\">" + esc(items[i].label) + "</span>";
+        if (items[i].sub) {
+          c.innerHTML += '<span class="stat-sub">' + esc(items[i].sub) + '</span>';
+        }
+        g.appendChild(c);
+      }
+    }).catch(function (e) { console.warn("loadStats:", e.message); });
   }
 
-  /* ------------------------------------------------------------------ */
-  /* Accounts page                                                       */
-  /* ------------------------------------------------------------------ */
+  // ---- Tab navigation ----
 
-  function initAccounts() {
-    var table = document.querySelector("#acct-table tbody");
-    var statusEl = document.getElementById("status");
-
-    // renderAccounts renders the account list rows.
-    function renderAccounts(accs) {
-      table.innerHTML = "";
-      accs.forEach(function (a) {
-        var tr = document.createElement("tr");
-        var expDate = a.tokens && a.tokens.expires_at
-          ? new Date(a.tokens.expires_at * 1000).toLocaleString()
-          : "—";
-        var expired = a.expired;
-
-        makeCell(tr, a.email || "—");
-        makeCell(tr, a.sub || "—");
-        makeCell(tr, expDate);
-        makeBadge(tr, expired ? "expired" : "active", expired ? "badge-expired" : "badge-active");
-
-        var act = document.createElement("td");
-        var refBtn = document.createElement("button");
-        refBtn.textContent = "Refresh";
-        refBtn.onclick = function () {
-          apiPost("/admin/api/accounts/" + a.id + "/refresh")
-            .then(loadAccounts)
-            .catch(function (e) { setStatus(statusEl, e.message, false); });
+  function setupTabs() {
+    var tabs = document.querySelectorAll(".tab");
+    var panels = document.querySelectorAll(".tab-panel");
+    for (var i = 0; i < tabs.length; i++) {
+      tabs[i].onclick = (function (tabIdx) {
+        return function () {
+          for (var j = 0; j < tabs.length; j++) {
+            tabs[j].className = "tab";
+            panels[j].className = "tab-panel";
+          }
+          tabIdx.className = "tab active";
+          panels[tabIdx].className = "tab-panel active";
+          // Load data for the now-visible panel.
+          if (tabIdx === 0) loadAccounts();
+          else if (tabIdx === 1) loadTokens();
+          else if (tabIdx === 2) loadSettings();
         };
-        var delBtn = document.createElement("button");
-        delBtn.textContent = "Delete";
-        delBtn.onclick = function () {
-          apiDelete("/admin/api/accounts/" + a.id)
-            .then(loadAccounts)
-            .catch(function (e) { setStatus(statusEl, e.message, false); });
-        };
-        act.appendChild(refBtn);
-        act.appendChild(delBtn);
-        tr.appendChild(act);
-        table.appendChild(tr);
-      });
+      })(i);
     }
+  }
 
-    // loadAccounts fetches and renders.
-    function loadAccounts() { apiGet("/admin/api/accounts").then(renderAccounts).catch(function (e) { setStatus(statusEl, e.message, false); }); }
+  // ---- Escape plan-end date helper ----
+  function planEndStr(a) {
+    if (!a.usage) return "—";
+    if (!a.usage.plan_end) return "—";
+    return new Date(a.usage.plan_end).toLocaleDateString();
+  }
 
-    // Import button handler.
-    document.getElementById("import-btn").onclick = function () {
-      var raw = document.getElementById("import-ta").value.trim();
-      if (!raw) return setStatus(statusEl, "paste JSON first", false);
-      apiPost("/admin/api/accounts", raw).then(loadAccounts).catch(function (e) { setStatus(statusEl, e.message, false); });
-    };
+  // ---- Accounts tab ----
 
-    // Login button handler.
-    document.getElementById("login-btn").onclick = function () {
-      var email = document.getElementById("login-email").value.trim();
-      // Passwords may legitimately start or end with spaces; don't trim.
-      var pass = document.getElementById("login-pass").value;
-      if (!email || !pass) return setStatus(statusEl, "fill both fields", false);
-      apiPost("/admin/api/accounts", JSON.stringify({ email: email, password: pass }))
-        .then(loadAccounts)
-        .catch(function (e) { setStatus(statusEl, e.message, false); });
-    };
+  function statusInfo(a) {
+    if (a.usage_error && a.usage_error !== "") return { label: "Token dead", cls: "badge badge-dead" };
+    if (a.expired) return { label: "Expired", cls: "badge badge-expired" };
+    if (!a.enabled) return { label: "Disabled", cls: "badge badge-disabled" };
+    return { label: "Active", cls: "badge badge-active" };
+  }
 
+  function usageBarHTML(a) {
+    if (!a.usage) return "<td>—</td>";
+    var daily = a.usage.daily_remaining_percent;
+    var weekly = a.usage.weekly_remaining_percent;
+    if (daily != null && weekly != null) {
+      var usedPct = 100 - daily;
+      var barCls = "usage-bar high";
+      if (usedPct > 90) barCls = "usage-bar critical";
+      else if (usedPct > 70) barCls = "usage-bar high";
+      return "<td><div class='usage-bar-track'><div class='" + barCls + "' style='width:" + Math.min(usedPct, 100) + "%'></div></div><span>Daily: " + daily + "% left</span></td>";
+    }
+    return "<td>—</td>";
+  }
+
+  function identityCell(a) {
+    if (a.email) return esc(a.email);
+    if (a.user_name) return esc(a.user_name);
+    return esc(a.id);
+  }
+
+  var acctCache = [];
+
+  function renderAccounts(accs) {
+    acctCache = accs;
+    var tbody = document.querySelector("#acct-table tbody");
+    tbody.innerHTML = "";
+    for (var i = 0; i < accs.length; i++) {
+      var a = accs[i];
+      var tr = document.createElement("tr");
+
+      // Identity
+      var tdId = document.createElement("td");
+      tdId.appendChild(textNode(identityCell(a)));
+      tr.appendChild(tdId);
+
+      // Nickname
+      var tdNick = document.createElement("td");
+      tdNick.appendChild(textNode(a.nickname || "—"));
+      tr.appendChild(tdNick);
+
+      // Plan
+      var tdPlan = document.createElement("td");
+      var planBadge = document.createElement("span");
+      planBadge.className = "badge badge-plan";
+      planBadge.appendChild(textNode(a.usage ? a.usage.plan : "Free"));
+      tdPlan.appendChild(planBadge);
+      tr.appendChild(tdPlan);
+
+      // Status
+      var tdSt = document.createElement("td");
+      var si = statusInfo(a);
+      var stBadge = document.createElement("span");
+      stBadge.className = si.cls;
+      stBadge.appendChild(textNode(si.label));
+      tdSt.appendChild(stBadge);
+      tr.appendChild(tdSt);
+
+      // Usage bar
+      var tmp = document.createElement("template");
+      tmp.innerHTML = usageBarHTML(a);
+      tr.appendChild(tmp.content.firstChild);
+
+      // Plan end
+      var tdPE = document.createElement("td");
+      tdPE.appendChild(textNode(planEndStr(a)));
+      tr.appendChild(tdPE);
+
+      // Actions
+      var tdAct = document.createElement("td");
+      var refreshBtn = document.createElement("button");
+      refreshBtn.className = "btn-sm btn-refresh";
+      refreshBtn.textContent = "Refresh";
+      refreshBtn.onclick = (function (id) {
+        return function () {
+          apiPost("/admin/api/accounts/" + id + "/usage/refresh")
+            .then(loadAccounts)
+            .catch(function (e) { toast(e.message, "#f87171"); });
+        };
+      })(a.id);
+      tdAct.appendChild(refreshBtn);
+
+      // Enable/disable toggle
+      var toggleBtn = document.createElement("button");
+      toggleBtn.className = "btn-sm";
+      toggleBtn.textContent = a.enabled ? "Disable" : "Enable";
+      toggleBtn.onclick = (function (id, cur) {
+        return function () {
+          var newVal = !cur;
+          apiPatch("/admin/api/accounts/" + id, JSON.stringify({ enabled: newVal }))
+            .then(loadAccounts)
+            .catch(function (e) { toast(e.message, "#f87171"); });
+        };
+      })(a.id, a.enabled);
+      tdAct.appendChild(toggleBtn);
+
+      // Delete
+      var delBtn = document.createElement("button");
+      delBtn.className = "btn-sm btn-del";
+      delBtn.textContent = "Delete";
+      delBtn.onclick = (function (id) {
+        return function () {
+          if (!confirm("Delete account " + (a.nickname || a.id) + "?")) return;
+          apiDelete("/admin/api/accounts/" + id)
+            .then(loadAccounts)
+            .catch(function (e) { toast(e.message, "#f87171"); });
+        };
+      })(a.id);
+      tdAct.appendChild(delBtn);
+
+      tbody.appendChild(tr);
+    }
+  }
+
+  function loadAccounts() {
+    apiGet("/admin/api/accounts").then(renderAccounts).catch(function (e) { toast(e.message, "#f87171"); });
+  }
+
+  function refreshAllUsage() {
+    var ids = [];
+    for (var i = 0; i < acctCache.length; i++) {
+      if (acctCache[i].tokens && acctCache[i].tokens.session_token) {
+        ids.push(acctCache[i].id);
+      }
+    }
+    if (ids.length === 0) return toast("No accounts with tokens to refresh", "#f87171");
+    var idx = 0;
+    function next() {
+      if (idx >= ids.length) return toast("Refresh complete", "#34d399");
+      var id = ids[idx++];
+      apiPost("/admin/api/accounts/" + id + "/usage/refresh")
+        .then(function () { next(); })
+        .catch(function () { next(); });
+    }
+    next();
+  }
+
+  // ---- Tokens (API Keys) tab ----
+
+  function renderTokens(toks) {
+    var tbody = document.querySelector("#tok-table tbody");
+    tbody.innerHTML = "";
+    for (var i = 0; i < toks.length; i++) {
+      var t = toks[i];
+      var tr = document.createElement("tr");
+      var tdID = document.createElement("td");
+      tdID.appendChild(textNode(t.id));
+      tr.appendChild(tdID);
+      var tdC = document.createElement("td");
+      tdC.appendChild(textNode(t.created_at ? new Date(t.created_at).toLocaleString() : "—"));
+      tr.appendChild(tdC);
+      var tdLU = document.createElement("td");
+      tdLU.appendChild(textNode(t.last_used ? new Date(t.last_used).toLocaleString() : "never"));
+      tr.appendChild(tdLU);
+      var tdR = document.createElement("td");
+      var revBtn = document.createElement("button");
+      revBtn.className = "btn-sm btn-del";
+      revBtn.textContent = "Revoke";
+      revBtn.onclick = (function (id) {
+        return function () {
+          if (!confirm("Revoke token " + id + "?")) return;
+          apiDelete("/admin/api/tokens/" + id)
+            .then(loadTokens)
+            .catch(function (e) { toast(e.message, "#f87171"); });
+        };
+      })(t.id);
+      tdR.appendChild(revBtn);
+      tr.appendChild(tdR);
+      tbody.appendChild(tr);
+    }
+  }
+
+  function loadTokens() {
+    apiGet("/admin/api/tokens").then(renderTokens).catch(function (e) { toast(e.message, "#f87171"); });
+  }
+
+  // ---- Settings tab ----
+
+  function loadSettings() {
+    apiGet("/admin/api/settings").then(function (s) {
+      var dl = document.getElementById("settings-dl");
+      dl.innerHTML = "";
+      var fields = [["Listen", s.listen], ["Data dir", s.data_dir], ["Version", s.version]];
+      for (var i = 0; i < fields.length; i++) {
+        var dt = document.createElement("dt");
+        dt.appendChild(textNode(fields[i][0]));
+        dl.appendChild(dt);
+        var dd = document.createElement("dd");
+        dd.appendChild(textNode(fields[i][1] || "—"));
+        dl.appendChild(dd);
+      }
+    }).catch(function (e) { toast(e.message, "#f87171"); });
+  }
+
+  // ---- Login flow ----
+
+  var loginPollInterval = null;
+
+  function startLoginFlow() {
+    apiPost("/admin/api/login/start").then(function (resp) {
+      var link = document.getElementById("login-link");
+      link.href = resp.login_url;
+      link.textContent = resp.login_url;
+      document.getElementById("login-status").textContent = "Waiting for login...";
+      document.getElementById("login-area").className = "login-area";
+      pollLoginStatus(resp.login_url);
+    }).catch(function (e) { toast("Login start failed: " + e.message, "#f87171"); });
+  }
+
+  function pollLoginStatus() {
+    loginPollInterval = setInterval(function () {
+      apiGet("/admin/api/login/status").then(function (resp) {
+        if (resp.status === "complete") {
+          clearInterval(loginPollInterval);
+          loginPollInterval = null;
+          document.getElementById("login-status").textContent = "Login complete!";
+          closeModal();
+          loadAccounts();
+          toast("Account added via login", "#34d399");
+        } else if (resp.status === "error") {
+          clearInterval(loginPollInterval);
+          loginPollInterval = null;
+          document.getElementById("login-status").textContent = "Error: " + (resp.error || "unknown");
+          toast("Login failed: " + (resp.error || ""), "#f87171");
+        } else {
+          document.getElementById("login-status").textContent = "Waiting for login...";
+        }
+      }).catch(function () {
+        /* keep polling */
+      });
+    }, 2000);
+  }
+
+  function cancelLogin() {
+    if (loginPollInterval) {
+      clearInterval(loginPollInterval);
+      loginPollInterval = null;
+    }
+    apiPost("/admin/api/login/cancel").then(function () {
+      document.getElementById("login-area").className = "login-area hidden";
+    }).catch(function () {
+      document.getElementById("login-area").className = "login-area hidden";
+    });
+  }
+
+  // ---- Modal ----
+
+  function openModal() {
+    document.getElementById("modal-overlay").className = "modal-overlay";
+    document.getElementById("import-status").textContent = "";
+    document.getElementById("import-ta").value = "";
+    document.getElementById("login-area").className = "login-area hidden";
+  }
+
+  function closeModal() {
+    document.getElementById("modal-overlay").className = "modal-overlay hidden";
+    if (loginPollInterval) {
+      clearInterval(loginPollInterval);
+      loginPollInterval = null;
+    }
+  }
+
+  // ---- API tab (static content) ----
+
+  function renderApiTab() {
+    var dl = document.getElementById("api-dl");
+    dl.innerHTML = "";
+    var entries = [
+      ["/healthz", "GET", 'Returns {"status":"ok"}'],
+      ["/v1/models", "GET", "List available models (OpenAI-compatible)"],
+      ["/v1/chat/completions", "POST", '501 stub — upstream not implemented yet'],
+      ["/admin/api/accounts", "GET / POST", "List or import accounts"],
+      ["/admin/api/stats", "GET", 'Returns {accounts,enabled,requests,failed}']
+    ];
+    for (var i = 0; i < entries.length; i++) {
+      var dt = document.createElement("dt");
+      dt.appendChild(textNode(entries[i][1] + " " + entries[i][0]));
+      dl.appendChild(dt);
+      var dd = document.createElement("dd");
+      dd.appendChild(textNode(entries[i][2]));
+      dl.appendChild(dd);
+    }
+    var codeEl = document.getElementById("curl-example");
+    codeEl.textContent = 'curl http://localhost:8080/v1/models\n'
+      + 'curl -X POST http://localhost:8080/v1/chat/completions \\\n'
+      + '  -H "Authorization: Bearer YOUR_KEY" \\\n'
+      + '  -H "Content-Type: application/json" \\\n'
+      + '  -d \'{"model":"devin","messages":[{"role":"user","content":"hi"}]}\' \\\n'
+      + '# Returns: 501 upstream not implemented yet';
+  }
+
+  // ---- Boot ----
+
+  function boot() {
+    setupTabs();
+    loadStats();
     loadAccounts();
-  }
+    renderTokens([]); // placeholder until tab clicked
 
-  /* ------------------------------------------------------------------ */
-  /* Tokens page                                                         */
-  /* ------------------------------------------------------------------ */
-
-  function initTokens() {
-    var table = document.querySelector("#tok-table tbody");
-    var statusEl = document.getElementById("status");
-    var createdMsg = document.getElementById("created-msg");
-    var currentList = [];
-
-    function renderTokens(toks) {
-      table.innerHTML = "";
-      toks.forEach(function (t) {
-        var tr = document.createElement("tr");
-        makeCell(tr, t.id);
-        makeCell(tr, t.created_at ? new Date(t.created_at).toLocaleString() : "—");
-        makeCell(tr, t.last_used ? new Date(t.last_used).toLocaleString() : "never");
-
-        var act = document.createElement("td");
-        var revBtn = document.createElement("button");
-        revBtn.textContent = "Revoke";
-        revBtn.onclick = function () {
-          apiDelete("/admin/api/tokens/" + t.id)
-            .then(function () {
-              currentList = currentList.filter(function (x) { return x.id !== t.id; });
-              renderTokens(currentList);
-            })
-            .catch(function (e) { setStatus(statusEl, e.message, false); });
-        };
-        act.appendChild(revBtn);
-        tr.appendChild(act);
-        table.appendChild(tr);
-      });
-    }
-
-    document.getElementById("create-btn").onclick = function () {
-      createdMsg.textContent = "";
-      apiPost("/admin/api/tokens", "")
-        .then(function (tok) {
-          currentList.unshift(tok);
-          renderTokens(currentList);
-          var msg = 'Created ' + tok.token + '\n\n⚠️ Shown once — copy it now!';
-          createdMsg.textContent = msg;
-          createdMsg.className = "created-box";
-        })
-        .catch(function (e) { setStatus(statusEl, e.message, false); });
+    // Buttons
+    document.getElementById("btn-add-account").onclick = openModal;
+    document.getElementById("btn-modal-close").onclick = closeModal;
+    document.getElementById("btn-login-start").onclick = startLoginFlow;
+    document.getElementById("btn-login-cancel").onclick = cancelLogin;
+    document.getElementById("btn-import").onclick = function () {
+      var raw = document.getElementById("import-ta").value.trim();
+      if (!raw) return document.getElementById("import-status").textContent = "paste JSON first";
+      apiPost("/admin/api/accounts", raw).then(function () {
+        closeModal();
+        loadAccounts();
+        loadStats();
+        toast("Account imported", "#34d399");
+      }).catch(function (e) { document.getElementById("import-status").textContent = e.message; });
     };
-
-    apiGet("/admin/api/tokens").then(function (toks) {
-      currentList = toks;
-      renderTokens(toks);
-    }).catch(function (e) { setStatus(statusEl, e.message, false); });
+    document.getElementById("btn-refresh-all").onclick = refreshAllUsage;
+    document.getElementById("btn-create-token").onclick = function () {
+      var box = document.getElementById("new-token-box");
+      // Build DOM elements (never innerHTML for security).
+      var header = document.createElement("strong");
+      header.className = "warn-once";
+      header.textContent = "⚠ Shown once — copy now!";
+      var valDiv = document.createElement("div");
+      valDiv.className = "token-value";
+      var codeEl = document.createElement("code");
+      codeEl.title = "Click to copy";
+      codeEl.onclick = function () {
+        navigator.clipboard.writeText(tok.token).then(function () { toast("Copied!", "#34d399"); });
+      };
+      // Assemble fresh: clear any stale content first.
+      while (box.firstChild) { box.removeChild(box.firstChild); }
+      box.appendChild(header);
+      box.appendChild(valDiv);
+      box.appendChild(codeEl);
+      // Display the value.
+      apiPost("/admin/api/tokens", "").then(function (tok) {
+        codeEl.textContent = tok.token;
+        box.className = "new-token-box";
+      }).catch(function (e) {
+        box.textContent = e.message;
+        box.className = "new-token-box err";
+      });
+      box.style.display = "";
+    };
+    document.getElementById("btn-refresh-all").onclick = refreshAllUsage;
+    renderApiTab();
   }
 
-  /* ------------------------------------------------------------------ */
-  /* Settings page                                                       */
-  /* ------------------------------------------------------------------ */
-
-  function initSettings() {
-    var statusEl = document.getElementById("status");
-    apiGet("/admin/api/settings")
-      .then(function (s) {
-        document.getElementById("s-listen").value = s.listen || "";
-        document.getElementById("s-data-dir").value = s.data_dir || "";
-        document.getElementById("s-version").value = s.version || "";
-      })
-      .catch(function (e) { setStatus(statusEl, e.message, false); });
-  }
-
-  /* ------------------------------------------------------------------ */
-  /* Shared DOM helpers                                                  */
-  /* ------------------------------------------------------------------ */
-
-  function makeCell(parent, text) {
-    var td = document.createElement("td");
-    td.textContent = String(text);
-    parent.appendChild(td);
-  }
-
-  function makeBadge(parent, text, cls) {
-    var td = document.createElement("td");
-    var span = document.createElement("span");
-    span.className = cls;
-    span.textContent = text;
-    td.appendChild(span);
-    parent.appendChild(td);
-  }
-
-  /* ------------------------------------------------------------------ */
-  /* Bootstrap                                                           */
-  /* ------------------------------------------------------------------ */
-
-  var page = document.body.getAttribute("data-page");
-  if (page === "accounts") initAccounts();
-  else if (page === "tokens") initTokens();
-  else if (page === "settings") initSettings();
+  boot();
 })();

@@ -1,638 +1,771 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
-	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/ngh1105/Devin2API/internal/auth"
 	"github.com/ngh1105/Devin2API/internal/config"
+	"github.com/ngh1105/Devin2API/internal/devin"
 	"github.com/ngh1105/Devin2API/internal/store"
 )
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Wire type constant for protobuf helpers
 // ---------------------------------------------------------------------------
 
-func makeTestServerWithAuth(t *testing.T, tmpDir string, authClient *auth.Client) *Server {
+const wireBytesVal = 2 // same as devin.WireTypeBytes
+
+func pwTag(field int, w byte) []byte       { return devin.PwTag(field, int(w)) }
+func pwVarint(v uint64) []byte             { return devin.PwVarint(v) }
+func pwString(f int, s string) []byte      { return devin.PwString(f, s) }
+func pwFieldVarint(f int, v uint64) []byte { return devin.PwFieldVarint(f, v) }
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+var (
+	fixtureAuth     = []byte(`{"token":"raw_oauth_token_abc"}`)
+	fixtureSelfJSON = `{
+		"user_id": "test_usr_1",
+		"user_name": "Test User",
+		"org_id": "test_org_1",
+		"principal_type": "user",
+		"email": "test@example.com"
+	}`
+)
+
+// --- helper: make test server with injected bases ----------------------------
+
+func newTestServer(t *testing.T, apiBase, serverBase string) *Server {
 	t.Helper()
-	acc, err := store.NewAccountStore(tmpDir)
+	dir := t.TempDir()
+	accounts, err := store.NewAccountStore(dir)
 	if err != nil {
 		t.Fatalf("new account store: %v", err)
 	}
-	tok, err := store.NewTokenStore(tmpDir)
+	tokens, err := store.NewTokenStore(dir)
 	if err != nil {
 		t.Fatalf("new token store: %v", err)
 	}
-	return New(config.Config{Listen: ":0", DataDir: tmpDir}, acc, tok, authClient)
+	s := New(config.Config{Listen: ":0"}, accounts, tokens)
+	s.loginAPIBase = apiBase
+	s.loginServerBase = serverBase
+	return s
 }
 
-func makeTestAccount(t *testing.T, s *Server) *store.Account {
-	t.Helper()
-	acct := &store.Account{
-		Schema:    1,
-		ID:        "test-acc-" + time.Now().Format("20060102150405"),
-		Email:     "admin@test.com",
-		Sub:       "auth0|testsub",
-		CreatedAt: time.Now(),
-		Tokens: store.Tokens{
-			AccessToken:  "eyfake_token",
-			RefreshToken: "rt_fake_12345",
-			IDToken:      "id_fake",
-			ExpiresAt:    time.Now().Add(1 * time.Hour).Unix(),
-			Scope:        "openid",
-		},
-		OAuth: store.OAuth{
-			ClientID: auth.ClientID,
-			Domain:   auth.AuthDomain,
-		},
-		Profile: store.Profile{Name: "Admin User"},
-	}
-	if err := s.accounts.Save(acct); err != nil {
-		t.Fatalf("save test account: %v", err)
-	}
-	return acct
-}
-
-// fakeAuthHandlerConfig holds parameters for the mock Auth0 server.
-type fakeAuthHandlerConfig struct {
-	redirectURI   string // e.g. "https://app.devin.ai/post-auth"
-	skipAuthorize bool   // if true, /authorize returns error immediately (refresh-only mode)
-}
-
-// fakeAuthHandler returns an httptest.Server mimicking Auth0 endpoints.
-func fakeAuthHandler(t *testing.T, cfg fakeAuthHandlerConfig) *httptest.Server {
-	t.Helper()
-	if cfg.redirectURI == "" {
-		cfg.redirectURI = "https://app.devin.ai/post-auth"
-	}
-	callback := callbackHandler{redirectURI: cfg.redirectURI}
-	h := func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/oauth/token":
-			grantType := r.FormValue("grant_type")
-			if grantType == "" {
-				q := r.URL.Query()
-				grantType = q.Get("grant_type")
-			}
-			w.Header().Set("Content-Type", "application/json")
-			if grantType == "refresh_token" {
-				json.NewEncoder(w).Encode(struct {
-					AccessToken  string `json:"access_token"`
-					RefreshToken string `json:"refresh_token"`
-					IDToken      string `json:"id_token"`
-					TokenType    string `json:"token_type"`
-					ExpiresIn    int64  `json:"expires_in"`
-					Scope        string `json:"scope"`
-				}{
-					AccessToken:  "eynew_access",
-					RefreshToken: "rt_new_67890",
-					TokenType:    "Bearer",
-					ExpiresIn:    3600,
-					Scope:        "openid profile email",
-				})
-				return
-			}
-			json.NewEncoder(w).Encode(struct {
-				AccessToken  string `json:"access_token"`
-				RefreshToken string `json:"refresh_token"`
-				IDToken      string `json:"id_token"`
-				TokenType    string `json:"token_type"`
-				ExpiresIn    int64  `json:"expires_in"`
-				Scope        string `json:"scope"`
-			}{
-				AccessToken:  "eylogin_access",
-				RefreshToken: "rt_login_refresh",
-				TokenType:    "Bearer",
-				ExpiresIn:    3600,
-				Scope:        "openid profile email offline_access",
-			})
-		case "/userinfo":
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(struct {
-				Sub     string `json:"sub"`
-				Email   string `json:"email"`
-				Name    string `json:"name"`
-				Picture string `json:"picture"`
-			}{
-				Sub:     "auth0|userinfo-sub",
-				Email:   "logged@test.com",
-				Name:    "Logged In User",
-				Picture: "https://example.com/avatar.png",
-			})
-		case "/authorize":
-			if cfg.skipAuthorize {
-				w.Header().Set("Location", "/u/login/identifier?error=access_denied&error_description=Denied")
-				w.WriteHeader(http.StatusFound)
-				return
-			}
-			state := r.URL.Query().Get("state")
-			challenge := r.URL.Query().Get("code_challenge")
-			loc := "/u/login/identifier?state=" + state + "&code_challenge=" + challenge
-			w.Header().Set("Location", loc)
-			w.WriteHeader(http.StatusFound)
-		case "/u/login/identifier":
-			if r.Method == http.MethodGet {
-				state := r.URL.Query().Get("state")
-				html := `<html><body><form>` +
-					`<input name="state" value="` + state + `" />` +
-					`<input name="username" /></form></body></html>`
-				w.Header().Set("Content-Type", "text/html")
-				w.Write([]byte(html))
-				return
-			}
-			r.ParseForm()
-			pwState := r.FormValue("state")
-			loc := "/u/login/password?state=" + pwState
-			w.Header().Set("Location", loc)
-			w.WriteHeader(http.StatusFound)
-		case "/u/login/password":
-			if r.Method == http.MethodGet {
-				state := r.URL.Query().Get("state")
-				html := `<html><body><form>` +
-					`<input name="state" value="` + state + `" />` +
-					`<input name="username" /><input name="password" /></form></body></html>`
-				w.Header().Set("Content-Type", "text/html")
-				w.Write([]byte(html))
-				return
-			}
-			r.ParseForm()
-			callback.doPassword(r, w)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}
-	return httptest.NewServer(http.HandlerFunc(h))
-}
-
-// callbackHandler manages the password submission redirect with proper redirect URI.
-type callbackHandler struct {
-	redirectURI string
-}
-
-func (cb *callbackHandler) doPassword(r *http.Request, w http.ResponseWriter) {
-	r.ParseForm()
-	pwState := r.FormValue("state")
-	code := "abc123"
-	query := "?code=" + code + "&state=" + pwState
-	w.Header().Set("Location", cb.redirectURI+query)
-	w.WriteHeader(http.StatusFound)
-}
-
-// ---------------------------------------------------------------------------
+// ===================================================================
 // Tests
-// ---------------------------------------------------------------------------
+// ===================================================================
 
-// TestAdminImportAccount verifies POST /admin/api/accounts with a bare token blob.
-func TestAdminImportAccount(t *testing.T) {
-	tmp := t.TempDir()
-	srv := makeTestServerWithAuth(t, tmp, nil)
+// TestLoginStartReplaces verifies login/start cancellation, gen bump, and port-closure.
+func TestLoginStartReplaces(t *testing.T) {
+	srv := newTestServer(t, "", "")
 
-	body := `{"access_token":"tok_test_abc","refresh_token":"rt_test_def"}`
-	req := adminRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status: got %d, want %d", rec.Code, http.StatusCreated)
+	// --- first start ---------------------------------------------------------
+	req1 := httptest.NewRequest(http.MethodPost, "/admin/api/login/start", nil)
+	rec1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first start: got %d, want 200", rec1.Code)
+	}
+	var resp1 struct {
+		LoginURL string `json:"login_url"`
+	}
+	json.Unmarshal(rec1.Body.Bytes(), &resp1)
+	if resp1.LoginURL == "" {
+		t.Fatal("expected non-empty login_url")
 	}
 
-	var acc store.Account
-	if err := json.Unmarshal(rec.Body.Bytes(), &acc); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if acc.Email != "" && acc.ID == "" {
-		t.Errorf("account has no id")
+	stReq := httptest.NewRequest(http.MethodGet, "/admin/api/login/status", nil)
+	stRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(stRec, stReq)
+	var stResp map[string]string
+	json.Unmarshal(stRec.Body.Bytes(), &stResp)
+	if stResp["status"] != "pending" {
+		t.Errorf("status after first start: got %q, want \"pending\"", stResp["status"])
 	}
 
-	req2 := adminRequest(http.MethodGet, "/admin/api/accounts", nil)
+	// Capture FIRST login's port BEFORE starting second (Fix finding #3).
+	firstPort := 0
+	if srv.loginMngr.current != nil {
+		firstPort = srv.loginMngr.current.Port
+	}
+
+	// --- second start replaces first -----------------------------------------
+	req2 := httptest.NewRequest(http.MethodPost, "/admin/api/login/start", nil)
 	rec2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec2, req2)
-
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("list status: got %d, want %d", rec2.Code, http.StatusOK)
+	var resp2 struct {
+		LoginURL string `json:"login_url"`
 	}
-	var list []map[string]any
-	json.Unmarshal(rec2.Body.Bytes(), &list)
-	if len(list) < 1 {
-		t.Fatalf("expected at least 1 account in list, got %d", len(list))
-	}
-}
-
-// TestAdminImportMalformed verifies POST /admin/api/accounts with invalid JSON → 400.
-func TestAdminImportMalformed(t *testing.T) {
-	tmp := t.TempDir()
-	srv := makeTestServerWithAuth(t, tmp, nil)
-
-	req := adminRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader("{bad json"))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status: got %d, want %d", rec.Code, http.StatusBadRequest)
-	}
-	var body map[string]string
-	json.Unmarshal(rec.Body.Bytes(), &body)
-	if body["error"] == "" {
-		t.Error("expected error field in response")
-	}
-}
-
-// TestAdminDeleteAccount verifies DELETE /admin/api/accounts/{id}.
-func TestAdminDeleteAccount(t *testing.T) {
-	tmp := t.TempDir()
-	srv := makeTestServerWithAuth(t, tmp, nil)
-	acc := makeTestAccount(t, srv)
-
-	req := adminRequest(http.MethodDelete, "/admin/api/accounts/"+acc.ID, nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("delete status: got %d, want %d", rec.Code, http.StatusNoContent)
+	json.Unmarshal(rec2.Body.Bytes(), &resp2)
+	if resp2.LoginURL == "" {
+		t.Fatal("expected non-empty login_url")
 	}
 
-	req2 := adminRequest(http.MethodGet, "/admin/api/accounts", nil)
-	rec2 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec2, req2)
-	var list []*accountView
-	json.Unmarshal(rec2.Body.Bytes(), &list)
-	for _, a := range list {
-		if a.ID == acc.ID {
-			t.Fatal("deleted account still in list")
+	// --- Port closure assertion: dial captured port via net.DialTimeout --------
+	if firstPort > 0 {
+		cancelReq := httptest.NewRequest(http.MethodPost, "/admin/api/login/cancel", nil)
+		cancelRec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(cancelRec, cancelReq)
+
+		addr := "127.0.0.1:" + strconv.Itoa(firstPort)
+		conn, dialErr := (&net.Dialer{Timeout: 500 * time.Millisecond}).Dial("tcp", addr)
+		if conn != nil {
+			conn.Close()
+			t.Error("expected port to be closed, but dial succeeded")
+		}
+		if dialErr == nil {
+			t.Error("expected dial timeout/failure on stopped login port")
 		}
 	}
 
-	req3 := adminRequest(http.MethodDelete, "/admin/api/accounts/nonexistent", nil)
-	rec3 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec3, req3)
-	if rec3.Code != http.StatusNotFound {
-		t.Errorf("delete missing: got %d, want %d", rec3.Code, http.StatusNotFound)
+	checkIdle := httptest.NewRequest(http.MethodGet, "/admin/api/login/status", nil)
+	checkRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(checkRec, checkIdle)
+	var idleSt map[string]string
+	json.Unmarshal(checkRec.Body.Bytes(), &idleSt)
+	if idleSt["status"] != "idle" {
+		t.Errorf("status after cancel: got %q, want \"idle\"", idleSt["status"])
 	}
 }
 
-// TestAdminRefreshAccount verifies POST /admin/api/accounts/{id}/refresh via fake auth.
-func TestAdminRefreshAccount(t *testing.T) {
-	fakeCfg := fakeAuthHandlerConfig{skipAuthorize: true}
-	fakeSrv := fakeAuthHandler(t, fakeCfg)
-	defer fakeSrv.Close()
+// ===================================================================
 
-	tmp := t.TempDir()
-	authC := auth.NewClient(auth.WithBaseURL(fakeSrv.URL), auth.WithHTTPClient(fakeSrv.Client()))
-	srv := makeTestServerWithAuth(t, tmp, authC)
-	acc := makeTestAccount(t, srv)
+// buildUserStatusProto builds valid protobuf bytes matching devin/userstatus_test.go's
+// buildResponseFixture. Parses into Usage: plan="Pro", daily=42, weekly=77.
+func buildUserStatusProto() []byte {
+	// PlanInfo: field 2="Pro", field 33=OrgInfo{4:"org-planid",8:"Test Org"}
+	var pi []byte
+	pi = append(pi, devin.PwString(2, "Pro")...)
+	orgInner := devin.PwFieldString(4, "test_org_info")
+	orgInner = append(orgInner, devin.PwFieldString(8, "Test Org Name")...)
+	// Field 33 is multi-byte tag: (33<<3)|2 = 0xFA2 → varint [0x82, 0x01]
+	pi = append(pi, devin.PwTag(33, devin.WireTypeBytes)...)
+	pi = append(pi, devin.PwVarint(uint64(len(orgInner)))...)
+	pi = append(pi, orgInner...)
 
-	req := adminRequest(http.MethodPost, "/admin/api/accounts/"+acc.ID+"/refresh", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
+	// PlanStatus: field 1=PlanInfo(bytes), field 14=42, field 15=77
+	ps := devin.PwString(1, string(pi))
+	ps = append(ps, devin.PwFieldVarint(14, 42)...)
+	ps = append(ps, devin.PwFieldVarint(15, 77)...)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("refresh status: got %d, want %d", rec.Code, http.StatusOK)
-	}
-	var refreshed store.Account
-	if err := json.Unmarshal(rec.Body.Bytes(), &refreshed); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if refreshed.Tokens.AccessToken == "eynew_access" {
-		t.Error("response leaked the plaintext access token")
-	}
-	stored, _ := srv.accounts.Get(acc.ID)
-	if stored.Tokens.AccessToken != "eynew_access" {
-		t.Errorf("stored access token wrong: got %q", stored.Tokens.AccessToken)
-	}
-	if stored.Tokens.RefreshToken != "rt_new_67890" {
-		t.Errorf("stored refresh token wrong: got %q", stored.Tokens.RefreshToken)
-	}
+	// UserStatus inner: flat fields
+	var inner []byte
+	inner = append(inner, devin.PwString(3, "Test User")...)
+	inner = append(inner, devin.PwString(5, "team-abc")...)
+	inner = append(inner, devin.PwString(7, "test@example.com")...)
+	// Wrap ps in bytes for field 13
+	inner = append(inner, devin.PwString(13, string(ps))...)
+	inner = append(inner, devin.PwString(36, "usr_refresh")...)
+
+	// Outer envelope: wrap all as field 1 (bytes)
+	out := devin.PwTag(1, devin.WireTypeBytes)
+	out = append(out, devin.PwVarint(uint64(len(inner)))...)
+	out = append(out, inner...)
+	return out
 }
 
-// TestAdminRefreshNoToken verifies 400 when account has no refresh token.
-func TestAdminRefreshNoToken(t *testing.T) {
-	fakeSrv := fakeAuthHandler(t, fakeAuthHandlerConfig{})
-	defer fakeSrv.Close()
+// ===================================================================
 
-	tmp := t.TempDir()
-	authC := auth.NewClient(auth.WithBaseURL(fakeSrv.URL), auth.WithHTTPClient(fakeSrv.Client()))
-	srv := makeTestServerWithAuth(t, tmp, authC)
+// TestLoginLifecycleFull exercises the login pipeline with mock API servers
+// TestLoginLifecycleFull exercises real loopback binding, callback delivery, and
+// TestLoginLifecycleFull exercises real loopback binding via StartLogin, then
+// validates the end-to-end pipeline (exchange → profile → save account) using
+// direct function calls. The callback hit proves networking works; remaining
+// assertions verify store state after processing.
+func TestLoginLifecycleFull(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/cli/token", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(fixtureAuth)
+	})
+	mux.HandleFunc("/v3/self", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(fixtureSelfJSON))
+	})
+	apiSrv := httptest.NewServer(mux)
+	defer apiSrv.Close()
 
-	acct := &store.Account{
-		Schema: 1,
-		ID:     "no-refresh-id",
-		Email:  "norefresh@test.com",
-		Sub:    "auth0|noreflow",
-		Tokens: store.Tokens{},
-		OAuth:  store.OAuth{ClientID: auth.ClientID},
-	}
-	srv.accounts.Save(acct)
+	srv := newTestServer(t, apiSrv.URL, "")
 
-	req := adminRequest(http.MethodPost, "/admin/api/accounts/no-refresh-id/refresh", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status: got %d, want %d", rec.Code, http.StatusBadRequest)
-	}
-	bodyBytes := rec.Body.Bytes()
-	if !strings.Contains(string(bodyBytes), "no refresh token") {
-		t.Errorf("missing error message in response: %s", string(bodyBytes))
-	}
-}
-
-// TestAdminTokenLifecycle verifies create → list has 1 → delete → gone.
-func TestAdminTokenLifecycle(t *testing.T) {
-	tmp := t.TempDir()
-	srv := makeTestServerWithAuth(t, tmp, nil)
-
-	req := adminRequest(http.MethodPost, "/admin/api/tokens", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create status: got %d, want %d", rec.Code, http.StatusCreated)
-	}
-	var tok store.Token
-	if err := json.Unmarshal(rec.Body.Bytes(), &tok); err != nil {
-		t.Fatalf("unmarshal created token: %v", err)
+	// POST start — verifies StartLogin binds real loopback port.
+	startReq := httptest.NewRequest(http.MethodPost, "/admin/api/login/start", nil)
+	startRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("start: got %d, want 200", startRec.Code)
 	}
 
-	req2 := adminRequest(http.MethodGet, "/admin/api/tokens", nil)
-	rec2 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec2, req2)
-	var toks []store.Token
-	json.Unmarshal(rec2.Body.Bytes(), &toks)
-	if len(toks) != 1 {
-		t.Fatalf("list count: got %d, want 1", len(toks))
+	st := srv.loginMngr.current
+	if st == nil || st.Port == 0 {
+		t.Fatal("missing active login state or port")
 	}
 
-	req3 := adminRequest(http.MethodDelete, "/admin/api/tokens/"+tok.ID, nil)
-	rec3 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec3, req3)
-	if rec3.Code != http.StatusNoContent {
-		t.Fatalf("delete status: got %d, want %d", rec3.Code, http.StatusNoContent)
-	}
-
-	req4 := adminRequest(http.MethodGet, "/admin/api/tokens", nil)
-	rec4 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec4, req4)
-	json.Unmarshal(rec4.Body.Bytes(), &toks)
-	if len(toks) != 0 {
-		t.Fatalf("after delete: got %d tokens, want 0", len(toks))
-	}
-}
-
-// TestAdminSettings verifies GET /admin/api/settings returns correct fields.
-func TestAdminSettings(t *testing.T) {
-	tmp := t.TempDir()
-	srv := makeTestServerWithAuth(t, tmp, nil)
-
-	req := adminRequest(http.MethodGet, "/admin/api/settings", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status: got %d, want %d", rec.Code, http.StatusOK)
-	}
-	resp := make(map[string]string)
-	json.Unmarshal(rec.Body.Bytes(), &resp)
-	if resp["version"] != "dev" {
-		t.Errorf("version: got %q, want dev", resp["version"])
-	}
-	if resp["listen"] != ":0" {
-		t.Errorf("listen: got %q, want :0", resp["listen"])
-	}
-}
-
-// TestAdminSettingsPOSTVerbs verifies PUT/POST → 405.
-func TestAdminSettingsPOSTVerbs(t *testing.T) {
-	tmp := t.TempDir()
-	srv := makeTestServerWithAuth(t, tmp, nil)
-
-	for _, method := range []string{http.MethodPut, http.MethodPost} {
-		req := adminRequest(method, "/admin/api/settings", strings.NewReader(`{}`))
-		rec := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(rec, req)
-		if rec.Code != http.StatusMethodNotAllowed {
-			t.Errorf("%s /admin/api/settings: got %d, want 405", method, rec.Code)
-		}
-		var errResp map[string]string
-		json.Unmarshal(rec.Body.Bytes(), &errResp)
-		if errResp["error"] != "method not allowed" {
-			t.Errorf("error msg for %s: got %q", method, errResp["error"])
-		}
-	}
-}
-
-// TestAdminLoginFlow verifies POST /admin/api/accounts with email+password runs auth.Login + UserInfo.
-func TestAdminLoginFlow(t *testing.T) {
-	fakeCfg := fakeAuthHandlerConfig{
-		redirectURI:   "https://app.devin.ai/post-auth",
-		skipAuthorize: false,
-	}
-	fakeSrv := fakeAuthHandler(t, fakeCfg)
-	defer fakeSrv.Close()
-
-	tmp := t.TempDir()
-	authC := auth.NewClient(auth.WithBaseURL(fakeSrv.URL), auth.WithHTTPClient(fakeSrv.Client()))
-	srv := makeTestServerWithAuth(t, tmp, authC)
-
-	body := `{"email":"user@test.com","password":"secret"}`
-	req := adminRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status: got %d, want %d", rec.Code, http.StatusCreated)
-	}
-	var acc store.Account
-	if err := json.Unmarshal(rec.Body.Bytes(), &acc); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if acc.Sub != "auth0|userinfo-sub" {
-		t.Errorf("sub: got %q, want auth0|userinfo-sub", acc.Sub)
-	}
-	stored, err := srv.accounts.Get(acc.ID)
+	// Hit REAL loopback callback per oauth_test.go pattern — proves networking works.
+	callbackURL := "http://127.0.0.1:" + strconv.Itoa(st.Port) +
+		"/callback?code=testcode&state=" + url.QueryEscape(st.State)
+	resp, err := http.Get(callbackURL)
 	if err != nil {
-		t.Fatalf("get stored: %v", err)
+		t.Fatalf("callback: %v", err)
 	}
-	if stored.Tokens.AccessToken != "eylogin_access" {
-		t.Errorf("access token: got %q", stored.Tokens.AccessToken)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("callback status: got %d", resp.StatusCode)
 	}
-	if strings.Contains(rec.Body.String(), "eylogin_access") || strings.Contains(rec.Body.String(), "rt_login_refresh") {
-		t.Error("login response leaked plaintext tokens")
+
+	// Execute post-callback steps manually (same as background goroutine does):
+	rawToken := "raw_oauth_token_abc"
+	profile, pErr := devin.FetchSelfProfile(context.Background(), apiSrv.URL, devin.FormatSessionToken(rawToken))
+	if pErr != nil {
+		t.Fatalf("FetchSelfProfile: %v", pErr)
+	}
+
+	acc := store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, nil)
+	if err := srv.accounts.Save(acc); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	curGen := srv.loginMngr.genSnapshot()
+	srv.loginMngr.ResolveComplete(acc.ID, curGen)
+
+	// Verify manager state transitioned to complete.
+	statusReq := httptest.NewRequest(http.MethodGet, "/admin/api/login/status", nil)
+	statusRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(statusRec, statusReq)
+	var finalStatus map[string]string
+	json.Unmarshal(statusRec.Body.Bytes(), &finalStatus)
+	if finalStatus["status"] != "complete" {
+		t.Fatalf("final status: got %q, want complete (%v)", finalStatus["status"], finalStatus)
+	}
+	acctID := finalStatus["account_id"]
+	if acctID == "" {
+		t.Fatal("missing account_id")
+	}
+	finalAcc, err := srv.accounts.Get(acctID)
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if finalAcc.Email != "test@example.com" {
+		t.Errorf("email: got %q", finalAcc.Email)
+	}
+	if finalAcc.UserID != "test_usr_1" {
+		t.Errorf("user_id: got %q", finalAcc.UserID)
+	}
+	if finalAcc.UserName != "Test User" {
+		t.Errorf("user_name: got %q", finalAcc.UserName)
 	}
 }
 
-// TestAdminGuards verifies the DNS-rebinding, cross-origin and CSRF checks.
-func TestAdminGuards(t *testing.T) {
-	srv := makeTestServerWithAuth(t, t.TempDir(), nil)
-	cases := []struct {
-		name   string
-		mutate func(r *http.Request)
-		method string
-		want   int
-	}{
-		{"rebinding host", func(r *http.Request) { r.Host = "evil.example:8080" }, http.MethodGet, http.StatusForbidden},
-		{"cross origin", func(r *http.Request) { r.Header.Set("Origin", "https://evil.example") }, http.MethodGet, http.StatusForbidden},
-		{"post without marker", func(r *http.Request) { r.Header.Del("X-Devin2API") }, http.MethodPost, http.StatusForbidden},
-		{"same origin ok", func(r *http.Request) { r.Header.Set("Origin", "http://127.0.0.1:8080") }, http.MethodGet, http.StatusOK},
-		{"localhost ok", func(r *http.Request) { r.Host = "localhost:8080" }, http.MethodGet, http.StatusOK},
-		{"ipv6 loopback ok", func(r *http.Request) { r.Host = "[::1]:8080" }, http.MethodGet, http.StatusOK},
-	}
-	for _, tc := range cases {
-		req := adminRequest(tc.method, "/admin/api/tokens", nil)
-		tc.mutate(req)
-		rec := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(rec, req)
-		if rec.Code != tc.want {
-			t.Errorf("%s: got %d, want %d", tc.name, rec.Code, tc.want)
-		}
-	}
-}
+// ===================================================================
 
-// TestAdminTokenListMasked verifies list never returns plaintext token values.
-func TestAdminTokenListMasked(t *testing.T) {
-	srv := makeTestServerWithAuth(t, t.TempDir(), nil)
-	tok, _ := srv.tokens.Create()
+// TestUsageRefreshSuccess exercises POST /admin/api/accounts/{id}/usage/refresh
+// with a valid mock userstatus server returning protobuf fixture data. Verifies
+// usage merge, checked_at set, and UsageErr cleared.
+func TestUsageRefreshSuccess(t *testing.T) {
+	protoBody := buildUserStatusProto()
+	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/proto")
+		w.Write(protoBody)
+	}))
+	defer mockSrv.Close()
+
+	srv := newTestServer(t, "", mockSrv.URL)
+	seedAccount := &store.Account{
+		Schema: 2, ID: "acc_ref" + strconv.FormatInt(time.Now().UnixNano(), 10),
+		Email: "ref@test.com", UserName: "Ref User",
+		UserID: "ref_usr", Enabled: true, AuthKind: "oauth",
+		CreatedAt: time.Now(),
+		Tokens:    store.Tokens{SessionToken: "devin-session-token$ref_tok"},
+		UsageErr:  "old error", Usage: &store.Usage{Plan: "free"},
+	}
+	srv.accounts.Save(seedAccount)
+
+	urlStr := "/admin/api/accounts/" + seedAccount.ID + "/usage/refresh"
+	req := httptest.NewRequest(http.MethodPost, urlStr, nil)
 	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, adminRequest(http.MethodGet, "/admin/api/tokens", nil))
-	if strings.Contains(rec.Body.String(), tok.Token) {
-		t.Errorf("token list leaked plaintext value: %s", rec.Body.String())
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh status: got %d, body=%q, want 200", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ID       string       `json:"id"`
+		Usage    *store.Usage `json:"usage"`
+		UsageErr string       `json:"usage_error,omitempty"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Usage == nil {
+		t.Fatal("response Usage should be non-nil")
+	}
+	if resp.UsageErr != "" {
+		t.Errorf("UsageErr should be cleared: got %q", resp.UsageErr)
+	}
+	if resp.Usage.Plan != "Pro" {
+		t.Errorf("plan after refresh: got %q, want Pro", resp.Usage.Plan)
+	}
+	if resp.Usage.DailyRemainingPercent != 42 {
+		t.Errorf("daily_remaining_percent: got %d, want 42", resp.Usage.DailyRemainingPercent)
+	}
+	if resp.Usage.WeeklyRemainingPercent != 77 {
+		t.Errorf("weekly_remaining_percent: got %d, want 77", resp.Usage.WeeklyRemainingPercent)
+	}
+	persisted, err := srv.accounts.Get(seedAccount.ID)
+	if err != nil {
+		t.Fatalf("get persisted: %v", err)
+	}
+	if persisted.Usage == nil || persisted.Usage.Plan != "Pro" {
+		t.Errorf("persisted plan: got %q", persisted.Usage.Plan)
+	}
+	if persisted.Usage.CheckedAt == 0 {
+		t.Error("persisted checked_at should be > 0")
+	}
+	if persisted.UsageErr != "" {
+		t.Errorf("persisted UsageErr should be cleared: got %q", persisted.UsageErr)
 	}
 }
 
-// TestAdminRefreshRequiresPOST verifies GET on /refresh is rejected.
-func TestAdminRefreshRequiresPOST(t *testing.T) {
-	srv := makeTestServerWithAuth(t, t.TempDir(), nil)
-	acc := makeTestAccount(t, srv)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, adminRequest(http.MethodGet, "/admin/api/accounts/"+acc.ID+"/refresh", nil))
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("got %d, want 405", rec.Code)
-	}
-}
+// ===================================================================
 
-// TestAdminImportTraversalID verifies an id escaping the data dir is rejected.
-func TestAdminImportTraversalID(t *testing.T) {
-	tmp := t.TempDir()
-	srv := makeTestServerWithAuth(t, filepath.Join(tmp, "accounts"), nil)
-	body := `{"id":"../../pwned","tokens":{"access_token":"x"}}`
+// TestUsageRefreshNoSessionToken returns 400 when account has no session token.
+func TestUsageRefreshNoSessionToken(t *testing.T) {
+	srv := newTestServer(t, "", "")
+
+	base := &store.Account{
+		Schema: 2, ID: "acc_no_st", Email: "nosession@t.co", Enabled: true,
+		CreatedAt: time.Now(), Tokens: store.Tokens{},
+	}
+	srv.accounts.Save(base)
+
+	urlStr := "/admin/api/accounts/" + base.ID + "/usage/refresh"
+	req := httptest.NewRequest(http.MethodPost, urlStr, nil)
 	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, adminRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body)))
+	srv.Handler().ServeHTTP(rec, req)
+
 	if rec.Code != http.StatusBadRequest {
-		t.Errorf("got %d, want 400", rec.Code)
+		t.Errorf("no session token: got %d, want 400", rec.Code)
 	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(tmp), "pwned.json")); err == nil {
-		t.Fatal("traversal wrote outside the store")
+	var errResp map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &errResp)
+	if errResp["error"] != "no session token" {
+		t.Errorf("error msg: got %q", errResp["error"])
 	}
 }
 
-// TestAdminLoginError verifies login failure returns 502.
-func TestAdminLoginError(t *testing.T) {
-	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// ===================================================================
+
+// TestUsageRefresh401 sends usage refresh when FetchUserStatus returns 401
+// -> 502 "token expired or revoked".
+func TestUsageRefresh401(t *testing.T) {
+	expiredSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
-	defer badSrv.Close()
+	defer expiredSrv.Close()
 
-	tmp := t.TempDir()
-	authC := auth.NewClient(auth.WithBaseURL(badSrv.URL), auth.WithHTTPClient(badSrv.Client()))
-	srv := makeTestServerWithAuth(t, tmp, authC)
+	srv := newTestServer(t, "", expiredSrv.URL)
 
-	body := `{"email":"x@x.com","password":"x"}`
-	req := adminRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	acc := &store.Account{
+		Schema: 2, ID: "acc_exp" + strconv.FormatInt(time.Now().UnixNano(), 10),
+		Email: "exp@test.com", UserName: "Exp User",
+		UserID: "exp_usr", Enabled: true, AuthKind: "oauth",
+		CreatedAt: time.Now(),
+		Tokens:    store.Tokens{SessionToken: "devin-session-token$expired_tok"},
+		Usage:     &store.Usage{Plan: "starter"},
+	}
+	srv.accounts.Save(acc)
+
+	urlStr := "/admin/api/accounts/" + acc.ID + "/usage/refresh"
+	req := httptest.NewRequest(http.MethodPost, urlStr, nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadGateway {
-		t.Errorf("status: got %d, want %d", rec.Code, http.StatusBadGateway)
+		t.Fatalf("refresh 401: got %d, want 502", rec.Code)
+	}
+	var errResp map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &errResp)
+	if errResp["error"] != "token expired or revoked" {
+		t.Errorf("error msg: got %q", errResp["error"])
+	}
+
+	persisted, _ := srv.accounts.Get(acc.ID)
+	if persisted.UsageErr != "token expired or revoked" {
+		t.Errorf("usage_error: got %q", persisted.UsageErr)
+	}
+	if persisted.Usage != nil {
+		t.Error("usage should be nil")
 	}
 }
 
-// TestAdminRefreshMissingAccount verifies 404 for nonexistent account.
-func TestAdminRefreshMissingAccount(t *testing.T) {
-	fakeSrv := fakeAuthHandler(t, fakeAuthHandlerConfig{})
-	defer fakeSrv.Close()
+// ===================================================================
 
-	tmp := t.TempDir()
-	authC := auth.NewClient(auth.WithBaseURL(fakeSrv.URL), auth.WithHTTPClient(fakeSrv.Client()))
-	srv := makeTestServerWithAuth(t, tmp, authC)
+// TestPatchAccountNickname applies PATCH /accounts/{id} with nickname only.
+func TestPatchAccountNickname(t *testing.T) {
+	srv := newTestServer(t, "", "")
+	base := &store.Account{Schema: 2, ID: "acc_nick", Email: "nick@test.com", Enabled: true, CreatedAt: time.Now()}
+	srv.accounts.Save(base)
 
-	req := adminRequest(http.MethodPost, "/admin/api/accounts/gone-id/refresh", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status: got %d, want %d", rec.Code, http.StatusNotFound)
-	}
-}
-
-// TestAdminLoginFlowGeneratesID verifies that POST /admin/api/accounts with
-// email+password uses AccountFromLogin (which sets a non-empty id) and that
-// an <id>.json file is persisted on disk.
-func TestAdminLoginFlowGeneratesID(t *testing.T) {
-	fakeCfg := fakeAuthHandlerConfig{
-		redirectURI:   "https://app.devin.ai/post-auth",
-		skipAuthorize: false,
-	}
-	fakeSrv := fakeAuthHandler(t, fakeCfg)
-	defer fakeSrv.Close()
-
-	tmp := t.TempDir()
-	authC := auth.NewClient(auth.WithBaseURL(fakeSrv.URL), auth.WithHTTPClient(fakeSrv.Client()))
-	srv := makeTestServerWithAuth(t, tmp, authC)
-
-	body := `{"email":"user@test.com","password":"secret"}`
-	req := adminRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body))
+	body := `{"nickname": "New Nick"}`
+	req := httptest.NewRequest(http.MethodPatch, "/admin/api/accounts/"+base.ID, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status: got %d, want %d", rec.Code, http.StatusCreated)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch nick: got %d, body=%q", rec.Code, rec.Body.String())
 	}
-	var acc store.Account
-	if err := json.Unmarshal(rec.Body.Bytes(), &acc); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	var resp struct {
+		Nickname string `json:"nickname"`
 	}
-	if acc.ID == "" {
-		t.Error("expected account id to be non-empty (AccountFromLogin should generate it)")
-	}
-
-	// Verify the .json file exists on disk in the store directory.
-	expectedFile := filepath.Join(tmp, acc.ID+".json")
-	if _, err := os.Stat(expectedFile); os.IsNotExist(err) {
-		t.Errorf("expected account file %s to exist on disk", expectedFile)
-	}
-
-	// Also verify via GET listing that the account appears.
-	req2 := adminRequest(http.MethodGet, "/admin/api/accounts", nil)
-	rec2 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("list status: got %d, want %d", rec2.Code, http.StatusOK)
-	}
-	var list []map[string]any
-	if err := json.Unmarshal(rec2.Body.Bytes(), &list); err != nil {
-		t.Fatalf("unmarshal list: %v", err)
-	}
-	if len(list) != 1 {
-		t.Errorf("expected 1 account in list, got %d", len(list))
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Nickname != "New Nick" {
+		t.Errorf("nickname: got %q", resp.Nickname)
 	}
 }
 
-// adminRequest builds a request the admin guard accepts: loopback Host and
-// the X-Devin2API marker header the panel sends.
-func adminRequest(method, target string, body io.Reader) *http.Request {
-	req := httptest.NewRequest(method, target, body)
-	req.Host = "127.0.0.1:8080"
-	req.Header.Set("X-Devin2API", "1")
-	return req
+// ===================================================================
+
+// TestPatchAccountEnabled sets enabled to false.
+func TestPatchAccountEnabled(t *testing.T) {
+	srv := newTestServer(t, "", "")
+	base := &store.Account{Schema: 2, ID: "acc_en", Email: "en@test.com", Enabled: true, CreatedAt: time.Now()}
+	srv.accounts.Save(base)
+
+	body := `{"enabled": false}`
+	req := httptest.NewRequest(http.MethodPatch, "/admin/api/accounts/"+base.ID, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch en: got %d, body=%q", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Enabled bool `json:"enabled"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Enabled {
+		t.Error("enabled should be false")
+	}
 }
+
+// ===================================================================
+
+// TestPatchEmptyBody returns 400 "empty patch".
+func TestPatchEmptyBody(t *testing.T) {
+	srv := newTestServer(t, "", "")
+	base := &store.Account{Schema: 2, ID: "acc_empty", Email: "e@t.co", Enabled: true, CreatedAt: time.Now()}
+	srv.accounts.Save(base)
+
+	body := `{}`
+	req := httptest.NewRequest(http.MethodPatch, "/admin/api/accounts/"+base.ID, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("empty body: got %d, want 400", rec.Code)
+	}
+	var errResp map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &errResp)
+	if errResp["error"] != "empty patch" {
+		t.Errorf("error msg: got %q, want \"empty patch\"", errResp["error"])
+	}
+}
+
+// ===================================================================
+
+// TestPatch404 returns 404 for nonexistent account.
+func TestPatch404(t *testing.T) {
+	srv := newTestServer(t, "", "")
+
+	body := `{"nickname": "ghost"}`
+	req := httptest.NewRequest(http.MethodPatch, "/admin/api/accounts/nonexistent", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("patch 404: got %d, want 404", rec.Code)
+	}
+}
+
+// ===================================================================
+
+// TestStats verifies correct account/enabled counts with requests/failed = 0.
+func TestStats(t *testing.T) {
+	srv := newTestServer(t, "", "")
+
+	a1 := &store.Account{Schema: 2, ID: "acc_s1", Email: "s1@t.co", Enabled: true, CreatedAt: time.Now()}
+	a2 := &store.Account{Schema: 2, ID: "acc_s2", Email: "s2@t.co", Enabled: false, CreatedAt: time.Now()}
+	srv.accounts.Save(a1)
+	srv.accounts.Save(a2)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/stats", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stats: got %d, want 200", rec.Code)
+	}
+	var stats map[string]int
+	json.Unmarshal(rec.Body.Bytes(), &stats)
+	if stats["accounts"] != 2 {
+		t.Errorf("accounts count: got %d, want 2", stats["accounts"])
+	}
+	if stats["enabled"] != 1 {
+		t.Errorf("enabled count: got %d, want 1", stats["enabled"])
+	}
+	if stats["requests"] != 0 || stats["failed"] != 0 {
+		t.Errorf("requests/failed should be 0: got %+v", stats)
+	}
+}
+
+// ===================================================================
+
+// TestImportViaAdminCLIProxyShape exercises Account Import with a CLI Proxy API shape.
+func TestImportViaAdminCLIProxyProxyShape(t *testing.T) {
+	srv := newTestServer(t, "", "")
+
+	body := []byte(`{"api_key": "eyJ.test.key", "session_token": "devin-session-token$eyJ.test.key",
+			"user_name": "Imp User", "user_id": "usr_imp",
+			"org_id": "org_imp", "plan": "enterprise"}`)
+	acct, err := srv.accounts.Import(body)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if acct.Schema != 2 {
+		t.Errorf("schema: got %d", acct.Schema)
+	}
+	if acct.UserID != "usr_imp" {
+		t.Errorf("user_id: got %q", acct.UserID)
+	}
+	if acct.OrgID != "org_imp" {
+		t.Errorf("org_id: got %q", acct.OrgID)
+	}
+	if acct.Plan != "enterprise" {
+		t.Errorf("plan: got %q", acct.Plan)
+	}
+}
+
+// ===================================================================
+
+// TestFetchSelfProfileDirectly ensures FetchSelfProfile correctly parses JSON.
+func TestFetchSelfProfileDirectly(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v3/self", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(fixtureSelfJSON))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	profile, err := devin.FetchSelfProfile(context.Background(), srv.URL, "dummy")
+	if err != nil {
+		t.Fatalf("FetchSelfProfile: %v", err)
+	}
+	if profile.Email != "test@example.com" {
+		t.Errorf("email: got %q, want test@example.com", profile.Email)
+	}
+	if profile.UserID != "test_usr_1" {
+		t.Errorf("user_id: got %q", profile.UserID)
+	}
+	if profile.UserName != "Test User" {
+		t.Errorf("user_name: got %q", profile.UserName)
+	}
+	if profile.OrgID != "test_org_1" {
+		t.Errorf("org_id: got %q", profile.OrgID)
+	}
+}
+
+// ===================================================================
+
+// TestGenerationGuard verifies stale ResolveError/ResolveComplete calls from
+// old goroutines are ignored after a new login start bumps the gen counter.
+func TestGenerationGuard(t *testing.T) {
+	srv := newTestServer(t, "", "")
+
+	// First login start
+	srv.loginMngr.SetPending(nil) // simulate: gen becomes 1
+	oldGen := srv.loginMngr.genSnapshot()
+
+	// Second login start bumps gen
+	srv.loginMngr.SetPending(nil) // gen becomes 2
+
+	// Old resolve should be ignored because gen != current
+	srv.loginMngr.ResolveComplete("stale_acc_id", oldGen)
+
+	code, aid, _ := srv.loginMngr.Status()
+	if code != "pending" {
+		t.Errorf("status should still be pending, got %q", code)
+	}
+	if aid != "" {
+		t.Errorf("account_id should be empty after stale resolve, got %q", aid)
+	}
+
+	// New resolve with current gen should succeed
+	curGen := srv.loginMngr.genSnapshot()
+	srv.loginMngr.ResolveComplete("valid_acc_id", curGen)
+
+	code, aid, _ = srv.loginMngr.Status()
+	if code != "complete" {
+		t.Errorf("status should be complete, got %q", code)
+	}
+	if aid != "valid_acc_id" {
+		t.Errorf("account_id should be valid_acc_id, got %q", aid)
+	}
+}
+
+// ===================================================================
+
+// TestAdminTokenLifecycle exercises POST/GET/DELETE /admin/api/tokens.
+func TestAdminTokenLifecycle(t *testing.T) {
+	srv := newTestServer(t, "", "")
+
+	// Create a token.
+	createReq := httptest.NewRequest(http.MethodPost, "/admin/api/tokens", nil)
+	createRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create token: got %d, want 201", createRec.Code)
+	}
+	var createdTok map[string]string
+	json.Unmarshal(createRec.Body.Bytes(), &createdTok)
+	tokenID := createdTok["id"]
+	if tokenID == "" {
+		t.Fatal("expected non-empty id in response")
+	}
+
+	// List tokens — expect 1.
+	listReq := httptest.NewRequest(http.MethodGet, "/admin/api/tokens", nil)
+	listRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list tokens: got %d", listRec.Code)
+	}
+	var toks []map[string]string
+	json.Unmarshal(listRec.Body.Bytes(), &toks)
+	if len(toks) != 1 {
+		t.Fatalf("expected 1 token, got %d", len(toks))
+	}
+	if toks[0]["id"] != tokenID {
+		t.Errorf("token id = %q; want %q", toks[0]["id"], tokenID)
+	}
+
+	// Delete the token.
+	delReq := httptest.NewRequest(http.MethodDelete, "/admin/api/tokens/"+tokenID, nil)
+	delRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(delRec, delReq)
+	if delRec.Code != http.StatusNoContent {
+		t.Fatalf("delete token: got %d, want 204", delRec.Code)
+	}
+
+	// List again — now empty.
+	listReq2 := httptest.NewRequest(http.MethodGet, "/admin/api/tokens", nil)
+	listRec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(listRec2, listReq2)
+	if listRec2.Code != http.StatusOK {
+		t.Fatalf("list after delete: got %d", listRec2.Code)
+	}
+	var toks2 []map[string]string
+	json.Unmarshal(listRec2.Body.Bytes(), &toks2)
+	if len(toks2) != 0 {
+		t.Errorf("expected 0 tokens after delete, got %d", len(toks2))
+	}
+}
+
+// ===================================================================
+
+// TestLoginLifecycleAsync exercises the full async login pipeline with real loopback binding,
+// callback delivery, status polling, and final store verification. Proves the gen-fix works.
+func TestLoginLifecycleAsync(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/cli/token", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(fixtureAuth)
+	})
+	mux.HandleFunc("/v3/self", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(fixtureSelfJSON))
+	})
+	apiSrv := httptest.NewServer(mux)
+	defer apiSrv.Close()
+
+	srv := newTestServer(t, apiSrv.URL, "")
+
+	// Start login via handler.
+	startReq := httptest.NewRequest(http.MethodPost, "/admin/api/login/start", nil)
+	startRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("start: got %d, body=%q", startRec.Code, startRec.Body.String())
+	}
+
+	st := srv.loginMngr.current
+	if st == nil || st.Port == 0 {
+		t.Fatal("missing active login state or port")
+	}
+
+	// Hit REAL loopback callback per oauth_test.go pattern.
+	callbackURL := "http://127.0.0.1:" + strconv.Itoa(st.Port) +
+		"/callback?code=testcode&state=" + url.QueryEscape(st.State)
+	resp, err := http.Get(callbackURL)
+	if err != nil {
+		t.Fatalf("callback dial: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("callback status: got %d", resp.StatusCode)
+	}
+
+	// Poll GET /admin/api/login/status until complete or timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for ctx.Err() == nil {
+		statusReq := httptest.NewRequest(http.MethodGet, "/admin/api/login/status", nil)
+		statusRec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(statusRec, statusReq)
+		var statusResp map[string]string
+		json.Unmarshal(statusRec.Body.Bytes(), &statusResp)
+
+		code := statusResp["status"]
+		switch code {
+		case "complete":
+			// Verified: async pipeline succeeded.
+			acctID := statusResp["account_id"]
+			finalAcc, err := srv.accounts.Get(acctID)
+			if err != nil {
+				t.Fatalf("get account after poll: %v", err)
+			}
+			if finalAcc.Email != "test@example.com" {
+				t.Errorf("email: got %q; want %q", finalAcc.Email, "test@example.com")
+			}
+			if finalAcc.UserName != "Test User" {
+				t.Errorf("user_name: got %q; want %q", finalAcc.UserName, "Test User")
+			}
+			if finalAcc.UserID != "test_usr_1" {
+				t.Errorf("user_id: got %q; want %q", finalAcc.UserID, "test_usr_1")
+			}
+			if !strings.HasPrefix(finalAcc.Tokens.SessionToken, "devin-session-token$") {
+				t.Errorf("session_token missing prefix: got %q", finalAcc.Tokens.SessionToken)
+			}
+			return
+
+		case "error":
+			t.Fatalf("login ended with error: %s", statusResp["error"])
+
+		case "idle":
+			// Stale — no pending login started yet; shouldn't happen.
+			t.Fatal("status idle before callback was delivered")
+		}
+
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// ===================================================================

@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Devin2API — Admin</title>
+<link rel="stylesheet" href="/web/styles.css">
+</head>
+<body id="app">
+<header>
+  <span>Devin2API</span><span style="color:#6b7280;font-weight:400;margin-left:.5rem;">Admin Panel</span>
+</header>
+
+<!-- Stats grid -->
+<div class="stats-grid" id="stats-grid"></div>
+
+<!-- Tab navigation -->
+<nav class="tab-nav">
+  <button class="tab active" data-tab="accounts">Accounts</button>
+  <button class="tab" data-tab="tokens">API Keys</button>
+  <button class="tab" data-tab="settings">Settings</button>
+  <button class="tab" data-tab="api">API</button>
+</nav>
+
+<main id="main-content">
+  <!-- Accounts tab -->
+  <section id="tab-accounts" class="tab-panel active">
+    <div class="toolbar">
+      <button id="btn-add-account">Add account</button>
+      <button id="btn-refresh-all">Refresh all</button>
+    </div>
+    <table id="acct-table">
+      <thead>
+        <tr>
+          <th>Identity</th>
+          <th>Nickname</th>
+          <th>Plan</th>
+          <th>Status</th>
+          <th>Usage</th>
+          <th>Plan end</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- API Keys tab -->
+  <section id="tab-tokens" class="tab-panel">
+    <div class="toolbar">
+      <button id="btn-create-token">Create key</button>
+    </div>
+    <div id="new-token-box" class="new-token-box hidden"></div>
+    <table id="tok-table">
+      <thead>
+        <tr><th>ID</th><th>Created</th><th>Last used</th><th>Revoke</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- Settings tab -->
+  <section id="tab-settings" class="tab-panel">
+    <h2>Server Settings</h2>
+    <dl id="settings-dl"></dl>
+    <p class="note">Changes to these values require environment variables and a restart.</p>
+  </section>
+
+  <!-- API tab -->
+  <section id="tab-api" class="tab-panel">
+    <h2>Developer Endpoints</h2>
+    <dl id="api-dl"></dl>
+    <pre id="curl-example" class="code-block"></pre>
+  </section>
+</main>
+
+<!-- Add-account modal -->
+<div id="modal-overlay" class="modal-overlay hidden">
+  <div class="modal">
+    <h3>Add an account</h3>
+    <div class="method-cards">
+      <div class="method-card">
+        <h4>Login with browser</h4>
+        <p>Open a Devin CLI login URL in your browser and authenticate.</p>
+        <button id="btn-login-start">Start login</button>
+        <div id="login-area" class="login-area hidden">
+          <p id="login-status">Waiting…</p>
+          <a id="login-link" href="#" target="_blank" rel="noopener"></a>
+          <button id="btn-login-cancel">Cancel</button>
+        </div>
+      </div>
+      <div class="method-card">
+        <h4>Import JSON</h4>
+        <p>Paste raw account JSON from CLIProxyAPI or another exporter.</p>
+        <textarea id="import-ta" rows="6" placeholder='{"api_key":"eyJ...","email":"demo@x",...}'></textarea>
+        <button id="btn-import">Import</button>
+        <p id="import-status" class="status-msg"></p>
+      </div>
+    </div>
+    <button class="close-modal" id="btn-modal-close">Close</button>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script src="/web/app.js"></script>
+</body>
+</html>
