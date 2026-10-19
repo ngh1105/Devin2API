@@ -161,16 +161,24 @@ func adminRequestError(r *http.Request) string {
 	if !isLoopbackHost(r.Host) {
 		return "admin API is only served on loopback hosts"
 	}
-	if origin := r.Header.Get("Origin"); origin != "" {
-		u, err := url.Parse(origin)
-		if err != nil || !strings.EqualFold(u.Host, r.Host) {
-			return "cross-origin request rejected"
-		}
+	if foreignOrigin(r) {
+		return "cross-origin request rejected"
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Header.Get("X-Devin2API") == "" {
 		return "missing X-Devin2API header"
 	}
 	return ""
+}
+
+// foreignOrigin reports whether r carries an Origin header that does not
+// match its Host. Non-browser clients send no Origin and pass.
+func foreignOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	return err != nil || !strings.EqualFold(u.Host, r.Host)
 }
 
 // isLoopbackHost reports whether a Host header names this machine.

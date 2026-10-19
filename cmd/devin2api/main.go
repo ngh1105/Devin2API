@@ -105,8 +105,9 @@ func runLogin(ctx context.Context, stdout io.Writer, cfg config.Config, notifyPo
 		return fmt.Errorf("account store: %w", err)
 	}
 
-	acct := store.AccountFromLogin(p.UserName, p.UserID, p.OrgID, formatted, p.Email, usage)
-	if err := accounts.Save(acct); err != nil {
+	// Upsert: logging in again with the same Devin user updates it in place.
+	acct, err := accounts.Upsert(store.AccountFromLogin(p.UserName, p.UserID, p.OrgID, formatted, p.Email, usage))
+	if err != nil {
 		return fmt.Errorf("save account: %w", err)
 	}
 

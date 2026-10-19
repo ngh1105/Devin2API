@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -29,7 +30,7 @@ func makeTestServer(t *testing.T, tmpDir string) *Server {
 func TestHealthz(t *testing.T) {
 	tmp := t.TempDir()
 	srv := makeTestServer(t, tmp)
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req := v1Request(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -47,7 +48,7 @@ func TestHealthz(t *testing.T) {
 func TestModels(t *testing.T) {
 	tmp := t.TempDir()
 	srv := makeTestServer(t, tmp)
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := v1Request(http.MethodGet, "/v1/models", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -79,7 +80,7 @@ func TestV1OpenWhenNoTokens(t *testing.T) {
 	tmp := t.TempDir()
 	srv := makeTestServer(t, tmp)
 	payload := `{"model":"devin","messages":[{"role":"user","content":"hi"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
+	req := v1Request(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -107,7 +108,7 @@ func TestV1RejectsBadToken(t *testing.T) {
 		t.Fatalf("create token: %v", err)
 	}
 	payload := `{"model":"devin","messages":[{"role":"user","content":"hi"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
+	req := v1Request(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
 	req.Header.Set("Authorization", "Bearer bad-token")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -132,7 +133,7 @@ func TestV1AcceptsCreatedToken(t *testing.T) {
 		t.Fatalf("create token: %v", err)
 	}
 	payload := `{"model":"devin","messages":[{"role":"user","content":"hi"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
+	req := v1Request(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
 	req.Header.Set("Authorization", "Bearer "+tok.Token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -142,7 +143,7 @@ func TestV1AcceptsCreatedToken(t *testing.T) {
 		t.Errorf("status: got %d, want %d (not 401)", rec.Code, http.StatusServiceUnavailable)
 	}
 	// With X-Api-Key header should also work.
-	req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
+	req2 := v1Request(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
 	req2.Header.Set("X-Api-Key", tok.Token)
 	req2.Header.Set("Content-Type", "application/json")
 	rec2 := httptest.NewRecorder()
@@ -158,7 +159,7 @@ func TestV1RejectsWrongScheme(t *testing.T) {
 	srv := makeTestServer(t, t.TempDir())
 	tok, _ := srv.tokens.Create()
 	for _, h := range []string{"Basic " + tok.Token, "Bearer ", "Bearer", "XXXXXXX" + tok.Token} {
-		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req := v1Request(http.MethodGet, "/v1/models", nil)
 		req.Header.Set("Authorization", h)
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
@@ -172,7 +173,7 @@ func TestV1RejectsWrongScheme(t *testing.T) {
 func TestV1TouchesToken(t *testing.T) {
 	srv := makeTestServer(t, t.TempDir())
 	tok, _ := srv.tokens.Create()
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := v1Request(http.MethodGet, "/v1/models", nil)
 	req.Header.Set("Authorization", "bearer "+tok.Token)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -189,7 +190,7 @@ func TestV1TouchesToken(t *testing.T) {
 func TestChatCompletionsBadBody(t *testing.T) {
 	tmp := t.TempDir()
 	srv := makeTestServer(t, tmp)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{bad"))
+	req := v1Request(http.MethodPost, "/v1/chat/completions", strings.NewReader("{bad"))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -204,7 +205,6 @@ func TestChatCompletionsBadBody(t *testing.T) {
 	}
 }
 
-
 func TestTokenListEmpty(t *testing.T) {
 	tmp := t.TempDir()
 	ts, err := store.NewTokenStore(tmp)
@@ -217,5 +217,38 @@ func TestTokenListEmpty(t *testing.T) {
 	}
 	if len(list) != 0 {
 		t.Errorf("expected empty list, got %d tokens", len(list))
+	}
+}
+
+// v1Request builds a /v1 request from a loopback Host, as a local client
+// would send it; keyless mode rejects anything else.
+func v1Request(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Host = "127.0.0.1:8080"
+	return req
+}
+
+// TestV1KeylessGuard ensures that without API keys /v1 only serves local,
+// same-origin callers, so a web page or rebound DNS name cannot spend quota.
+func TestV1KeylessGuard(t *testing.T) {
+	srv := makeTestServer(t, t.TempDir())
+	cases := []struct {
+		name   string
+		mutate func(r *http.Request)
+		want   int
+	}{
+		{"loopback ok", func(r *http.Request) {}, http.StatusOK},
+		{"localhost ok", func(r *http.Request) { r.Host = "localhost:8080" }, http.StatusOK},
+		{"rebinding host", func(r *http.Request) { r.Host = "evil.example:8080" }, http.StatusUnauthorized},
+		{"cross origin", func(r *http.Request) { r.Header.Set("Origin", "https://evil.example") }, http.StatusUnauthorized},
+	}
+	for _, tc := range cases {
+		req := v1Request(http.MethodGet, "/v1/models", nil)
+		tc.mutate(req)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, rec.Code, tc.want)
+		}
 	}
 }

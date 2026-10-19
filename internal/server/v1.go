@@ -36,6 +36,13 @@ func (s *Server) v1Middleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tokens, err := s.tokens.List()
 		if err != nil || len(tokens) == 0 {
+			// Keyless mode spends real Devin quota, so only local non-browser
+			// style callers are let in: loopback Host (blocks DNS rebinding)
+			// and no foreign Origin (blocks cross-site requests).
+			if !isLoopbackHost(r.Host) || foreignOrigin(r) {
+				openai.WriteError(w, http.StatusUnauthorized, "create an API key in the panel to use /v1 from this origin")
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}

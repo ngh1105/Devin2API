@@ -69,7 +69,7 @@ func chatTestServer(t *testing.T, fake *fakeDevin, sessionTokens ...string) *Ser
 }
 
 func postChat(srv *Server, body string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req := v1Request(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	return rec

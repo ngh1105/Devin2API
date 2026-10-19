@@ -38,7 +38,7 @@ The server exposes:
 - **Health check** — `GET /healthz` → `{"status":"ok"}`.
 - **OpenAI-compatible `/v1/*` endpoints** — see [API status](#api-status).
 
-> **Warning about non-loopback binding.** Panel pages are unauthenticated — anyone who can reach them gets full admin control over accounts and tokens. Do not bind to `0.0.0.0` or any public interface without adding your own auth/gateway layer.
+> **Warning about non-loopback binding.** Panel pages are unauthenticated. The admin API (`/admin/api/*`) only answers requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]`, rejects cross-origin requests, and requires an `X-Devin2API` header on state-changing calls (the panel sends it). Session tokens and API keys are masked in every admin response. Imported account `id` values may only contain letters, digits, `_` and `-`. Do not bind to `0.0.0.0` or any public interface without adding your own auth/gateway layer.
 
 ---
 
@@ -182,7 +182,7 @@ or equivalently:
 X-Api-Key: d2sk_xxxx...
 ```
 
-If the token store is **empty** (no tokens created), the proxy accepts requests without authentication. As soon as one or more tokens exist, every `/v1/*` request must include a valid token.
+If the token store is **empty** (no tokens created), `/v1/*` accepts requests without a key, but only from local callers: the `Host` must be `localhost`, `127.0.0.1` or `[::1]`, and any `Origin` header must match it. This stops web pages and DNS-rebinding tricks from spending your Devin quota. As soon as one or more tokens exist, every `/v1/*` request must include a valid token. Token values are masked in list responses; the full value is only shown once, on creation.
 
 ---
 
