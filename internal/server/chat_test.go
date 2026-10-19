@@ -520,3 +520,11 @@ func TestChatToolCallIDsEncodedAndDecoded(t *testing.T) {
 		t.Errorf("upstream did not get the original id twice (call + result)")
 	}
 }
+
+func TestChatRejectsNonObjectToolSchema(t *testing.T) {
+	srv, bodies := toolUpstream(t)
+	rec := postChat(srv, `{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"a","parameters":"not an object"}}]}`)
+	if rec.Code != http.StatusBadRequest || len(*bodies) != 0 {
+		t.Errorf("status %d, upstream calls %d", rec.Code, len(*bodies))
+	}
+}

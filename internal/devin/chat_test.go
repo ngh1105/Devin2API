@@ -322,3 +322,34 @@ func TestBuildChatRequestToolHistory(t *testing.T) {
 		t.Errorf("tool result prompt = %x", prompts[2])
 	}
 }
+
+// TestToolTrackerSplitsIDLessCalls: two calls that arrive without upstream
+// ids must stay separate, both for different functions and for the same
+// function called twice.
+func TestToolTrackerSplitsIDLessCalls(t *testing.T) {
+	tr := newToolTracker()
+	tr.feed(rawToolDelta{name: "read", args: `{"path":"a"}`})
+	tr.feed(rawToolDelta{name: "write", args: `{"path":"b"}`})
+	tr.feed(rawToolDelta{name: "write", args: `{"path":`})
+	tr.feed(rawToolDelta{args: `"c"}`})
+	if len(tr.calls) != 3 {
+		t.Fatalf("got %d calls: %+v", len(tr.calls), tr.calls)
+	}
+	want := []string{`{"path":"a"}`, `{"path":"b"}`, `{"path":"c"}`}
+	for i, w := range want {
+		if tr.calls[i].Arguments != w {
+			t.Errorf("call %d args = %q, want %q", i, tr.calls[i].Arguments, w)
+		}
+	}
+}
+
+// TestToolTrackerNewIDStartsNewCall: a fragment with an unseen upstream id
+// never extends a call that already has a different id.
+func TestToolTrackerNewIDStartsNewCall(t *testing.T) {
+	tr := newToolTracker()
+	tr.feed(rawToolDelta{id: "a", name: "f", args: `{"x":`})
+	tr.feed(rawToolDelta{id: "b", args: `{}`})
+	if len(tr.calls) != 2 || tr.calls[0].Arguments != `{"x":` || tr.calls[1].Arguments != `{}` {
+		t.Errorf("calls = %+v", tr.calls)
+	}
+}

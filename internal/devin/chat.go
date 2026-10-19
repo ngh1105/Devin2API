@@ -366,18 +366,18 @@ func newToolTracker() *toolTracker {
 // when the fragment adds nothing or the call limit is reached).
 func (t *toolTracker) feed(raw rawToolDelta) *ToolCallDelta {
 	idx := -1
-	switch {
-	case raw.id != "":
+	if raw.id != "" {
 		if i, ok := t.byUpID[raw.id]; ok {
 			idx = i
-		} else if t.active >= 0 && t.upIDs[t.active] == "" {
+		}
+	}
+	if idx < 0 && t.active >= 0 && t.continues(raw) {
+		idx = t.active
+		if raw.id != "" {
 			// The active call started without an id; this is its id.
-			idx = t.active
 			t.upIDs[idx] = raw.id
 			t.byUpID[raw.id] = idx
 		}
-	case t.active >= 0:
-		idx = t.active
 	}
 
 	out := &ToolCallDelta{}
@@ -414,6 +414,22 @@ func (t *toolTracker) feed(raw rawToolDelta) *ToolCallDelta {
 		return nil
 	}
 	return out
+}
+
+// continues reports whether a fragment that matches no known upstream id
+// extends the active call. It starts a new call instead when it carries a
+// different upstream id, names a different function, or repeats the name
+// after the active call's arguments already form complete JSON (the same
+// tool called twice).
+func (t *toolTracker) continues(raw rawToolDelta) bool {
+	if raw.id != "" && t.upIDs[t.active] != "" {
+		return false
+	}
+	cur := t.calls[t.active]
+	if raw.name != "" && cur.Name != "" && (raw.name != cur.Name || json.Valid([]byte(cur.Arguments))) {
+		return false
+	}
+	return true
 }
 
 // flush emits argument bytes still held back by the UTF-8 buffers.

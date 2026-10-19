@@ -111,7 +111,7 @@ func toDevinTools(tools []openai.Tool, choice json.RawMessage) ([]devin.Tool, er
 		}
 		seen[name] = true
 		params := []byte(t.Function.Parameters)
-		if len(params) > 0 && !json.Valid(params) {
+		if len(params) > 0 && (!json.Valid(params) || !strings.HasPrefix(strings.TrimSpace(string(params)), "{")) {
 			return nil, fmt.Errorf("tools[%d]: parameters must be a JSON schema object", i)
 		}
 		out = append(out, devin.Tool{Name: name, Description: t.Function.Description, Parameters: params})
