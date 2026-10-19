@@ -96,22 +96,39 @@
 
   // ---- Theme ----
 
-  // The page follows the OS theme until the user picks one; the choice is a
-  // per-browser convenience, so storage failures are ignored.
-  function applySavedTheme() {
-    try {
-      var t = localStorage.getItem("devin2api-theme");
-      if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
-    } catch (e) { /* storage unavailable */ }
+  // The page follows the OS theme ("system") until the user picks light or
+  // dark; the choice is a per-browser convenience, so storage failures are
+  // ignored.
+  function applyTheme(choice) {
+    var root = document.documentElement;
+    if (choice === "light" || choice === "dark") root.setAttribute("data-theme", choice);
+    else { choice = "system"; root.removeAttribute("data-theme"); }
+    var opts = document.querySelectorAll(".theme-opt");
+    for (var i = 0; i < opts.length; i++) {
+      var on = opts[i].getAttribute("data-theme-choice") === choice;
+      opts[i].classList.toggle("active", on);
+      opts[i].setAttribute("aria-checked", on ? "true" : "false");
+    }
   }
 
-  function toggleTheme() {
-    var root = document.documentElement;
-    var cur = root.getAttribute("data-theme");
-    if (!cur) cur = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-    var next = cur === "dark" ? "light" : "dark";
-    root.setAttribute("data-theme", next);
-    try { localStorage.setItem("devin2api-theme", next); } catch (e) { /* storage unavailable */ }
+  function setupTheme() {
+    var saved = "system";
+    try { saved = localStorage.getItem("devin2api-theme") || "system"; } catch (e) { /* storage unavailable */ }
+    applyTheme(saved);
+    var opts = document.querySelectorAll(".theme-opt");
+    for (var i = 0; i < opts.length; i++) {
+      opts[i].onclick = function () {
+        var choice = this.getAttribute("data-theme-choice");
+        applyTheme(choice);
+        try { localStorage.setItem("devin2api-theme", choice); } catch (e) { /* storage unavailable */ }
+      };
+    }
+  }
+
+  // setNavCount shows a small count next to a sidebar item, or nothing.
+  function setNavCount(id, n) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = n > 0 ? String(n) : "";
   }
 
   // emptyRow fills a table body with one centered message row.
@@ -150,7 +167,25 @@
         });
         g.appendChild(c);
       });
-    }).catch(function (e) { console.warn("loadStats:", e.message); });
+      setNavCount("nav-count-accounts", d.accounts);
+      document.getElementById("status-accounts").textContent =
+        (d.enabled != null ? d.enabled : d.accounts) + " of " + d.accounts + " accounts enabled";
+      setServerOnline(true);
+    }).catch(function (e) {
+      console.warn("loadStats:", e.message);
+      if (!e.status) setServerOnline(false); // network error: server unreachable
+    });
+  }
+
+  function setServerOnline(on) {
+    document.querySelector(".status-card").classList.toggle("offline", !on);
+    document.querySelector(".status-line strong").textContent = on ? "Server online" : "Server unreachable";
+  }
+
+  function loadVersion() {
+    apiGet("/admin/api/settings").then(function (s) {
+      document.getElementById("status-version").textContent = s.version || "";
+    }).catch(function () { /* shown elsewhere */ });
   }
 
   // ---- Tab navigation ----
@@ -542,6 +577,7 @@
   function renderTokens(toks) {
     var tbody = document.querySelector("#tok-table tbody");
     tbody.innerHTML = "";
+    setNavCount("nav-count-tokens", toks.length);
     if (!toks.length) emptyRow(tbody, 4, "No API keys. Without keys, only local clients may call /v1.");
     for (var i = 0; i < toks.length; i++) {
       var t = toks[i];
@@ -889,11 +925,12 @@
   function loadInitialData() {
     loadStats();
     loadAccounts();
+    loadTokens(); // for the sidebar count
+    loadVersion();
   }
 
   function boot() {
-    applySavedTheme();
-    document.getElementById("btn-theme").onclick = toggleTheme;
+    setupTheme();
     setupTabs();
     setupBulk();
     setupSettings();
