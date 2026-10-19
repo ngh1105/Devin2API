@@ -9,7 +9,18 @@
 <body id="app">
 <header>
   <span>Devin2API</span><span style="color:#6b7280;font-weight:400;margin-left:.5rem;">Admin Panel</span>
+  <button id="btn-logout" class="hidden" style="float:right">Log out</button>
 </header>
+
+<!-- Admin login (shown when DEVIN2API_ADMIN_PASSWORD is set) -->
+<div id="login-overlay" class="modal-overlay hidden">
+  <form class="modal" id="admin-login-form">
+    <h3>Admin login</h3>
+    <input id="admin-password" type="password" placeholder="Admin password" autocomplete="current-password" required>
+    <button type="submit">Log in</button>
+    <p id="admin-login-status" class="status-msg"></p>
+  </form>
+</div>
 
 <!-- Stats grid -->
 <div class="stats-grid" id="stats-grid"></div>

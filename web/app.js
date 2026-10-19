@@ -58,10 +58,45 @@
 
   function checkStatus(r) {
     if (r.ok) return r;
+    if (r.status === 401) showAdminLogin(); // session missing or expired
     return r.json().catch(function () { return { error: "HTTP " + r.status }; }).then(function (body) {
       var e = new Error(body.error || "request failed");
       e.status = r.status;
       throw e;
+    });
+  }
+
+  // ---- Admin login (only when the server has an admin password) ----
+
+  function showAdminLogin() {
+    document.getElementById("login-overlay").className = "modal-overlay";
+    document.getElementById("admin-password").focus();
+  }
+
+  function setupAdminLogin(onReady) {
+    var form = document.getElementById("admin-login-form");
+    var status = document.getElementById("admin-login-status");
+    form.onsubmit = function (ev) {
+      ev.preventDefault();
+      var pw = document.getElementById("admin-password").value;
+      apiPost("/admin/api/login", JSON.stringify({ password: pw })).then(function () {
+        document.getElementById("admin-password").value = "";
+        status.textContent = "";
+        document.getElementById("login-overlay").className = "modal-overlay hidden";
+        document.getElementById("btn-logout").className = "";
+        onReady();
+      }).catch(function (e) { status.textContent = e.message; });
+    };
+    document.getElementById("btn-logout").onclick = function () {
+      apiPost("/admin/api/logout", "").then(function () { location.reload(); });
+    };
+    return apiGet("/admin/api/session").then(function (s) {
+      if (s.auth_required) document.getElementById("btn-logout").className = "";
+      if (s.auth_required && !s.authenticated) {
+        showAdminLogin();
+        return false;
+      }
+      return true;
     });
   }
 
@@ -483,11 +518,17 @@
 
   // ---- Boot ----
 
-  function boot() {
-    setupTabs();
+  function loadInitialData() {
     loadStats();
     loadAccounts();
+  }
+
+  function boot() {
+    setupTabs();
     renderTokens([]); // placeholder until tab clicked
+    setupAdminLogin(loadInitialData).then(function (ready) {
+      if (ready) loadInitialData();
+    }).catch(function (e) { toast(e.message, "#f87171"); });
 
     // Buttons
     document.getElementById("btn-add-account").onclick = openModal;
