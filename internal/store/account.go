@@ -294,8 +294,14 @@ func (s *AccountStore) List() ([]*Account, error) {
 		cp := *a
 		out = append(out, &cp)
 	}
+	// Ties on created_at are common (accounts saved within one clock tick),
+	// so break them by id: callers such as chat round-robin rely on a
+	// stable order across calls.
 	sort.Slice(out, func(i, j int) bool {
-		return out[i].CreatedAt.Before(out[j].CreatedAt)
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
 	})
 	return out, nil
 }
