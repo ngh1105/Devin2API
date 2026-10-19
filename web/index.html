@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Devin2API Admin</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%232dd4bf'/%3E%3Cstop offset='1' stop-color='%230ea5e9'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Cpath d='M22 18v28M22 18h8a14 14 0 0 1 0 28h-8' fill='none' stroke='%23fff' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='31' cy='32' r='4' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128' width='128' height='128'%3E%3Cdefs%3E%3ClinearGradient id='d2a-bg' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%2314b8a6'/%3E%3Cstop offset='1' stop-color='%230369a1'/%3E%3C/linearGradient%3E%3ClinearGradient id='d2a-head' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23ffffff'/%3E%3Cstop offset='1' stop-color='%23d9f3ef'/%3E%3C/linearGradient%3E%3ClinearGradient id='d2a-visor' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%230b2f3a'/%3E%3Cstop offset='1' stop-color='%23061a22'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='128' height='128' rx='32' fill='url(%23d2a-bg)'/%3E%3Cpath d='M0 32a32 32 0 0 1 32-32h64a32 32 0 0 1 32 32v6c-20-10-44-14-64-14S20 28 0 38z' fill='%23fff' opacity='.1'/%3E%3Cpath d='M64 30V19' stroke='%23e6fffb' stroke-width='5' stroke-linecap='round'/%3E%3Ccircle cx='64' cy='15' r='7' fill='%2399f6e4' stroke='%23e6fffb' stroke-width='3'/%3E%3Crect x='17' y='54' width='10' height='24' rx='5' fill='%23cdeee8'/%3E%3Crect x='101' y='54' width='10' height='24' rx='5' fill='%23cdeee8'/%3E%3Crect x='24' y='30' width='80' height='70' rx='24' fill='url(%23d2a-head)'/%3E%3Crect x='33' y='45' width='62' height='36' rx='18' fill='url(%23d2a-visor)'/%3E%3Cg fill='none' stroke='%232dd4bf' stroke-width='5.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M52 55l-9 8 9 8'/%3E%3Cpath d='M76 55l9 8-9 8'/%3E%3C/g%3E%3Cpath d='M68 53l-8 20' stroke='%235eead4' stroke-width='4.5' stroke-linecap='round'/%3E%3Crect x='56' y='88' width='16' height='4.5' rx='2.25' fill='%2314b8a6' opacity='.55'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/web/styles.css">
 </head>
 <body id="app">
@@ -12,16 +12,36 @@
 <!-- Icon sprite: each icon is used by id (#i-name) from an svg use element.
      Icons: Phosphor Icons (duotone), https://phosphoricons.com, MIT License, Copyright (c) 2023 Phosphor Icons. -->
 <svg xmlns="http://www.w3.org/2000/svg" class="sprite" aria-hidden="true">
-  <!-- Devin2API mark (original artwork): a "D" gateway with a relay node. -->
-  <defs>
-    <linearGradient id="logo-grad" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#2dd4bf"/><stop offset="1" stop-color="#0ea5e9"/>
-    </linearGradient>
-  </defs>
-  <symbol id="logo" viewBox="0 0 64 64">
-    <rect width="64" height="64" rx="16" fill="url(#logo-grad)"/>
-    <path d="M22 18v28M22 18h8a14 14 0 0 1 0 28h-8" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-    <circle cx="31" cy="32" r="4" fill="#fff"/>
+  <!-- Devin2API logo (original artwork, also in assets/logo.svg). -->
+  <symbol id="logo" viewBox="0 0 128 128">
+    <defs>
+      <linearGradient id="d2a-bg" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#14b8a6"/>
+        <stop offset="1" stop-color="#0369a1"/>
+      </linearGradient>
+      <linearGradient id="d2a-head" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#ffffff"/>
+        <stop offset="1" stop-color="#d9f3ef"/>
+      </linearGradient>
+      <linearGradient id="d2a-visor" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#0b2f3a"/>
+        <stop offset="1" stop-color="#061a22"/>
+      </linearGradient>
+    </defs>
+    <rect width="128" height="128" rx="32" fill="url(#d2a-bg)"/>
+    <path d="M0 32a32 32 0 0 1 32-32h64a32 32 0 0 1 32 32v6c-20-10-44-14-64-14S20 28 0 38z" fill="#fff" opacity=".1"/>
+    <path d="M64 30V19" stroke="#e6fffb" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="64" cy="15" r="7" fill="#99f6e4" stroke="#e6fffb" stroke-width="3"/>
+    <rect x="17" y="54" width="10" height="24" rx="5" fill="#cdeee8"/>
+    <rect x="101" y="54" width="10" height="24" rx="5" fill="#cdeee8"/>
+    <rect x="24" y="30" width="80" height="70" rx="24" fill="url(#d2a-head)"/>
+    <rect x="33" y="45" width="62" height="36" rx="18" fill="url(#d2a-visor)"/>
+    <g fill="none" stroke="#2dd4bf" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M52 55l-9 8 9 8"/>
+      <path d="M76 55l9 8-9 8"/>
+    </g>
+    <path d="M68 53l-8 20" stroke="#5eead4" stroke-width="4.5" stroke-linecap="round"/>
+    <rect x="56" y="88" width="16" height="4.5" rx="2.25" fill="#14b8a6" opacity=".55"/>
   </symbol>
   <symbol id="i-users" viewBox="0 0 256 256"><path d="M168,144a40,40,0,1,1-40-40A40,40,0,0,1,168,144ZM64,56A32,32,0,1,0,96,88,32,32,0,0,0,64,56Zm128,0a32,32,0,1,0,32,32A32,32,0,0,0,192,56Z" opacity="0.2"/><path d="M244.8,150.4a8,8,0,0,1-11.2-1.6A51.6,51.6,0,0,0,192,128a8,8,0,0,1,0-16,24,24,0,1,0-23.24-30,8,8,0,1,1-15.5-4A40,40,0,1,1,219,117.51a67.94,67.94,0,0,1,27.43,21.68A8,8,0,0,1,244.8,150.4ZM190.92,212a8,8,0,1,1-13.85,8,57,57,0,0,0-98.15,0,8,8,0,1,1-13.84-8,72.06,72.06,0,0,1,33.74-29.92,48,48,0,1,1,58.36,0A72.06,72.06,0,0,1,190.92,212ZM128,176a32,32,0,1,0-32-32A32,32,0,0,0,128,176ZM72,120a8,8,0,0,0-8-8A24,24,0,1,1,87.24,82a8,8,0,1,0,15.5-4A40,40,0,1,0,37,117.51,67.94,67.94,0,0,0,9.6,139.19a8,8,0,1,0,12.8,9.61A51.6,51.6,0,0,1,64,128,8,8,0,0,0,72,120Z"/></symbol>
   <symbol id="i-key" viewBox="0 0 256 256"><path d="M232,98.36C230.73,136.92,198.67,168,160.09,168a71.68,71.68,0,0,1-26.92-5.17h0L120,176H96v24H72v24H40a8,8,0,0,1-8-8V187.31a8,8,0,0,1,2.34-5.65l58.83-58.83h0A71.68,71.68,0,0,1,88,95.91c0-38.58,31.08-70.64,69.64-71.87A72,72,0,0,1,232,98.36Z" opacity="0.2"/><path d="M216.57,39.43A80,80,0,0,0,83.91,120.78L28.69,176A15.86,15.86,0,0,0,24,187.31V216a16,16,0,0,0,16,16H72a8,8,0,0,0,8-8V208H96a8,8,0,0,0,8-8V184h16a8,8,0,0,0,5.66-2.34l9.56-9.57A79.73,79.73,0,0,0,160,176h.1A80,80,0,0,0,216.57,39.43ZM224,98.1c-1.09,34.09-29.75,61.86-63.89,61.9H160a63.7,63.7,0,0,1-23.65-4.51,8,8,0,0,0-8.84,1.68L116.69,168H96a8,8,0,0,0-8,8v16H72a8,8,0,0,0-8,8v16H40V187.31l58.83-58.82a8,8,0,0,0,1.68-8.84A63.72,63.72,0,0,1,96,95.92c0-34.14,27.81-62.8,61.9-63.89A64,64,0,0,1,224,98.1ZM192,76a12,12,0,1,1-12-12A12,12,0,0,1,192,76Z"/></symbol>
@@ -238,7 +258,7 @@
     <!-- Illustration (original artwork): clients on the left reach Devin
          accounts on the right through the gateway in the middle. -->
     <svg class="login-illustration" viewBox="0 0 640 800" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
-      <defs>
+    <defs>
         <linearGradient id="art-bg" x1="0" y1="0" x2="1" y2="1">
           <stop offset="0" stop-color="#04131a"/><stop offset=".55" stop-color="#062a2e"/><stop offset="1" stop-color="#081624"/>
         </linearGradient>
@@ -274,7 +294,7 @@
       </g>
       <circle cx="320" cy="330" r="66" fill="#082a2e" stroke="#2dd4bf" stroke-opacity=".5" stroke-width="1.5"/>
       <circle cx="320" cy="330" r="84" fill="none" stroke="#2dd4bf" stroke-opacity=".18" stroke-width="1.5"/>
-      <use href="#logo" x="284" y="294" width="72" height="72"/>
+      <use href="#logo" x="276" y="286" width="88" height="88"/>
     </svg>
     <div class="login-copy">
       <h2>One gateway for all your Devin accounts</h2>
