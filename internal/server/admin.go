@@ -61,6 +61,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.handleLogin(w, r)
 	case prefix == "/logout":
 		s.handleLogout(w, r)
+	case prefix == "/models":
+		s.handleAdminModels(w, r)
 	case prefix == "/logs":
 		s.handleLogs(w, r)
 	case prefix == "/login/start":

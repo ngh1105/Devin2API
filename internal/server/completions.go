@@ -74,7 +74,7 @@ func (s *Server) completions(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if status, msg := s.checkModel(&dreq, req.Model); status != 0 {
+	if status, msg := s.checkModel(r.Context(), &dreq, req.Model); status != 0 {
 		openai.WriteError(w, status, msg)
 		return
 	}

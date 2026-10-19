@@ -52,24 +52,21 @@ func modelAllowed(ctx context.Context, names ...string) bool {
 	return false
 }
 
-// modelNotAllowedError rejects a model outside the API key's allow list.
-type modelNotAllowedError struct{ model string }
-
-func (e *modelNotAllowedError) Error() string {
-	return fmt.Sprintf("this API key is not allowed to use model %q", e.model)
-}
-
-// checkModel returns a modelNotAllowedError when the key behind ctx may
-// not use the requested model.
-func checkModel(ctx context.Context, requested string) error {
-	resolved := devin.ResolveModel(requested)
-	if modelAllowed(ctx, requested, resolved) {
-		return nil
+// keyModelCheck refuses, with 403, a model outside the allow list of the
+// request's API key; names are the ones the model goes by (as requested,
+// matched to the catalog, resolved upstream). The refused request does not
+// use quota. A zero status means the request may proceed.
+func (s *Server) keyModelCheck(ctx context.Context, requested string, names ...string) (int, string) {
+	if modelAllowed(ctx, append(names, requested)...) {
+		return 0, ""
+	}
+	if k, ok := apiKeyFrom(ctx); ok {
+		s.tokens.Refund(k.ID)
 	}
 	if requested == "" {
-		requested = resolved
+		requested = "devin"
 	}
-	return &modelNotAllowedError{model: requested}
+	return http.StatusForbidden, fmt.Sprintf("this API key is not allowed to use model %q", requested)
 }
 
 // counted reports whether a /v1 request uses the API key's request quota:
@@ -166,4 +163,22 @@ func writeTokenErr(w http.ResponseWriter, err error) {
 	default:
 		writeErr(w, http.StatusBadRequest, err.Error())
 	}
+}
+
+// handleAdminModels serves GET /admin/api/models: the model catalog, for
+// picking the models an API key may use.
+func (s *Server) handleAdminModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	type model struct {
+		ID    string `json:"id"`
+		Label string `json:"label,omitempty"`
+	}
+	out := []model{}
+	for _, m := range s.fetchModels(r.Context()) {
+		out = append(out, model{ID: m.UID, Label: m.Label})
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{"default": devin.DefaultModel, "models": out})
 }

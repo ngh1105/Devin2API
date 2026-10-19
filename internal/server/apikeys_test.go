@@ -56,6 +56,9 @@ func TestAPIKeyLimits(t *testing.T) {
 	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "not allowed to use model") {
 		t.Errorf("model outside allow list: %d %s", rec.Code, rec.Body)
 	}
+	if m, _ := srv.tokens.Match(key.Token); m.Requests != 0 {
+		t.Errorf("refused model used quota: %d requests", m.Requests)
+	}
 	if rec := keyPost(srv, key.Token, "/v1/chat/completions", `{"model":"gpt-5-4-medium","messages":[{"role":"user","content":"hi"}]}`); rec.Code != 200 {
 		t.Errorf("allowed model: %d %s", rec.Code, rec.Body)
 	}
@@ -111,5 +114,13 @@ func TestAdminTokenOptions(t *testing.T) {
 	body := rec.Body.String()
 	if strings.Contains(body, created.Token) || strings.Contains(body, `"hash"`) || !strings.Contains(body, created.Hint) {
 		t.Errorf("list leaks or lacks the hint: %s", body)
+	}
+}
+
+func TestAdminModels(t *testing.T) {
+	srv := chatTestServer(t, &fakeDevin{}, "eyJtok1")
+	rec := adminDo(srv, http.MethodGet, "/admin/api/models", "", nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"id":"gpt-5-4-medium"`) || !strings.Contains(rec.Body.String(), `"default"`) {
+		t.Errorf("models: %d %s", rec.Code, rec.Body)
 	}
 }

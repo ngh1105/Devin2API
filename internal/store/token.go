@@ -246,6 +246,20 @@ func (s *TokenStore) Use(id string, counted bool) (Token, error) {
 	return t, nil
 }
 
+// Refund takes back a request Use counted, for a request that was then
+// refused before reaching upstream.
+func (s *TokenStore) Refund(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.tokens[id]
+	if !ok || t.Requests == 0 {
+		return
+	}
+	t.Requests--
+	s.tokens[id] = t
+	s.scheduleSave()
+}
+
 // scheduleSave writes the index after tokenSaveDelay unless a write is
 // already scheduled. Caller must hold s.mu.
 func (s *TokenStore) scheduleSave() {

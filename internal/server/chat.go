@@ -194,13 +194,17 @@ func readBody(r *http.Request) ([]byte, int, string) {
 }
 
 // checkModel maps dreq.Model onto the cached catalog ("gpt-5-4" ->
-// "gpt-5-4-medium") and rejects unknown models and images sent to text-only
-// models. It uses the cache only, so a cold cache never delays a request;
+// "gpt-5-4-medium") and rejects models the API key may not use, unknown
+// models, and images sent to text-only models. It uses the cache only, so a
+// cold cache never delays a request;
 // requested is the client's model name for error messages. A zero status
 // means the request may proceed.
-func (s *Server) checkModel(dreq *devin.ChatRequest, requested string) (int, string) {
+func (s *Server) checkModel(ctx context.Context, dreq *devin.ChatRequest, requested string) (int, string) {
 	catalog := s.cachedModels()
 	dreq.Model = devin.MatchModel(dreq.Model, catalog)
+	if status, msg := s.keyModelCheck(ctx, requested, dreq.Model, devin.ResolveModel(dreq.Model)); status != 0 {
+		return status, msg
+	}
 	if len(catalog) == 0 {
 		return 0, ""
 	}
@@ -255,9 +259,6 @@ func failoverable(err error) bool {
 // Each account is tried on every configured endpoint in turn while the
 // failure is the endpoint's (see endpointFailure) and nothing was output.
 func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, onDelta func(devin.Delta) error) (*devin.ChatResult, error) {
-	if err := checkModel(ctx, req.Model); err != nil {
-		return nil, err
-	}
 	model := devin.ResolveModel(req.Model)
 	accs := s.chatAccounts(model)
 	if len(accs) == 0 {
@@ -455,10 +456,7 @@ func setRetryAfter(w http.ResponseWriter, status int, err error) {
 // such as Claude Code tell the user their API key is wrong.
 func upstreamStatus(err error) (int, string) {
 	var ue *devin.UpstreamError
-	var mna *modelNotAllowedError
 	switch {
-	case errors.As(err, &mna):
-		return http.StatusForbidden, err.Error()
 	case errors.Is(err, errNoAccount):
 		return http.StatusServiceUnavailable, err.Error()
 	case errors.As(err, &ue):
@@ -506,7 +504,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if status, msg := s.checkModel(&dreq, req.Model); status != 0 {
+	if status, msg := s.checkModel(r.Context(), &dreq, req.Model); status != 0 {
 		openai.WriteError(w, status, msg)
 		return
 	}
