@@ -223,7 +223,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.stats.requests.Add(1)
+	ctx, tr := s.startTrace(r, "/v1/messages", req.Model, dreq, req.Stream)
 	model := req.Model
 	if model == "" {
 		model = "devin"
@@ -234,9 +234,9 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	}
 	seg := newSegmenter(mw, req.Thinking.Enabled())
 
-	res, err := s.streamWithFailover(r.Context(), dreq, seg.feed)
+	res, err := s.streamWithFailover(ctx, dreq, seg.feed)
+	s.finishTrace(ctx, tr, res, err)
 	if err != nil {
-		s.stats.failed.Add(1)
 		status, msg := upstreamStatus(err)
 		if mw.sse == nil || !mw.sse.started {
 			setRetryAfter(w, status, err)

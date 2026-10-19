@@ -18,6 +18,7 @@
 <nav class="tab-nav">
   <button class="tab active" data-tab="accounts">Accounts</button>
   <button class="tab" data-tab="tokens">API Keys</button>
+  <button class="tab" data-tab="logs">Logs</button>
   <button class="tab" data-tab="settings">Settings</button>
   <button class="tab" data-tab="api">API</button>
 </nav>
@@ -54,6 +55,20 @@
     <table id="tok-table">
       <thead>
         <tr><th>ID</th><th>Created</th><th>Last used</th><th>Revoke</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- Logs tab -->
+  <section id="tab-logs" class="tab-panel">
+    <div class="toolbar">
+      <button id="btn-refresh-logs">Refresh</button>
+    </div>
+    <p class="note">Last 200 chat requests since the server started. Metadata only: no prompts or outputs are recorded.</p>
+    <table id="log-table">
+      <thead>
+        <tr><th>Time</th><th>Endpoint</th><th>Model</th><th>Account</th><th>Status</th><th>Duration</th><th>Tokens in/out</th><th>Detail</th></tr>
       </thead>
       <tbody></tbody>
     </table>

@@ -57,6 +57,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 	case prefix == "/stats":
 		s.handleStats(w, r)
+	case prefix == "/logs":
+		s.handleLogs(w, r)
 	case prefix == "/login/start":
 		s.handleLoginStart(w, r)
 	case prefix == "/login/status":

@@ -110,6 +110,7 @@ type Server struct {
 
 	chatRR atomic.Uint64 // round-robin cursor over chat accounts
 	models modelCache    // upstream model catalog
+	reqLog requestLog    // recent chat requests for the panel
 	stats  struct {
 		requests, failed atomic.Int64 // chat completions since start
 	}

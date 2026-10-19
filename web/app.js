@@ -98,25 +98,82 @@
 
   // ---- Tab navigation ----
 
+  // Tabs and panels are paired by name: <button data-tab="x"> shows
+  // <section id="tab-x">.
+  var tabLoaders = {
+    accounts: function () { loadAccounts(); },
+    tokens: function () { loadTokens(); },
+    logs: function () { loadLogs(); },
+    settings: function () { loadSettings(); }
+  };
+
   function setupTabs() {
     var tabs = document.querySelectorAll(".tab");
     var panels = document.querySelectorAll(".tab-panel");
     for (var i = 0; i < tabs.length; i++) {
-      tabs[i].onclick = (function (tabIdx) {
+      tabs[i].onclick = (function (tab) {
         return function () {
-          for (var j = 0; j < tabs.length; j++) {
-            tabs[j].className = "tab";
-            panels[j].className = "tab-panel";
+          var name = tab.getAttribute("data-tab");
+          for (var j = 0; j < tabs.length; j++) tabs[j].className = "tab";
+          for (var k = 0; k < panels.length; k++) {
+            panels[k].className = panels[k].id === "tab-" + name ? "tab-panel active" : "tab-panel";
           }
-          tabIdx.className = "tab active";
-          panels[tabIdx].className = "tab-panel active";
-          // Load data for the now-visible panel.
-          if (tabIdx === 0) loadAccounts();
-          else if (tabIdx === 1) loadTokens();
-          else if (tabIdx === 2) loadSettings();
+          tab.className = "tab active";
+          if (tabLoaders[name]) tabLoaders[name]();
         };
-      })(i);
+      })(tabs[i]);
     }
+  }
+
+  // ---- Logs tab ----
+
+  function fmtMs(ms) {
+    if (ms == null) return "—";
+    return ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(1) + " s";
+  }
+
+  function loadLogs() {
+    apiGet("/admin/api/logs?limit=200").then(function (entries) {
+      var tbody = document.querySelector("#log-table tbody");
+      while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+      if (!entries.length) {
+        var tr = document.createElement("tr");
+        var td = document.createElement("td");
+        td.colSpan = 8;
+        td.className = "note";
+        td.appendChild(textNode("No chat requests yet."));
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+        return;
+      }
+      entries.forEach(function (e) {
+        var tr = document.createElement("tr");
+        var detail = [];
+        if (e.stream) detail.push("stream");
+        if (e.attempts > 1) detail.push(e.attempts + " attempts");
+        if (e.first_output_ms) detail.push("first output " + fmtMs(e.first_output_ms));
+        if (e.tool_calls) detail.push(e.tool_calls + " tool call" + (e.tool_calls > 1 ? "s" : ""));
+        if (e.finish && e.finish !== "stop") detail.push(e.finish);
+        if (e.error) detail.push(e.error);
+        var cells = [
+          new Date(e.time).toLocaleTimeString(),
+          e.endpoint,
+          e.model === e.upstream_model ? e.model : e.model + " → " + e.upstream_model,
+          e.account_label || e.account || "—",
+          String(e.status),
+          fmtMs(e.duration_ms),
+          (e.input_tokens || 0) + " / " + (e.output_tokens || 0),
+          detail.join(" · ")
+        ];
+        cells.forEach(function (c, i) {
+          var td = document.createElement("td");
+          td.appendChild(textNode(c));
+          if (i === 4) td.className = e.status === 200 ? "status-ok" : "status-err";
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+    }).catch(function (err) { toast(err.message, "#f87171"); });
   }
 
   // ---- Escape plan-end date helper ----
@@ -410,7 +467,8 @@
       ["/v1/messages", "POST", 'Anthropic Messages API (Claude Code, Anthropic SDKs)'],
       ["/v1/responses", "POST", 'OpenAI Responses API (stateless)'],
       ["/admin/api/accounts", "GET / POST", "List or import accounts"],
-      ["/admin/api/stats", "GET", 'Returns {accounts,enabled,requests,failed}']
+      ["/admin/api/stats", "GET", 'Returns {accounts,enabled,models,requests,failed}'],
+      ["/admin/api/logs", "GET", "Recent chat requests (metadata only), newest first"]
     ];
     for (var i = 0; i < entries.length; i++) {
       var dt = document.createElement("dt");
@@ -481,7 +539,7 @@
       });
       box.style.display = "";
     };
-    document.getElementById("btn-refresh-all").onclick = refreshAllUsage;
+    document.getElementById("btn-refresh-logs").onclick = loadLogs;
     renderApiTab();
   }
 
