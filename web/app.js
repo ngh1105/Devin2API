@@ -460,11 +460,9 @@
       ["/v1/models", "GET", "List available models (OpenAI-compatible)"],
       ["/v1/chat/completions", "POST", 'Chat completions via Devin (stream + non-stream, tool calls)'],
       ["/v1/messages", "POST", "Anthropic Messages API (Claude Code, Anthropic SDKs)"],
-      ["/v1/responses", "POST", "OpenAI Responses API (stateless)"],
-      ["/v1/messages", "POST", 'Anthropic Messages API (Claude Code, Anthropic SDKs)'],
-      ["/v1/responses", "POST", 'OpenAI Responses API (stateless)'],
+      ["/v1/responses", "POST", "OpenAI Responses API (previous_response_id kept 1 h in memory)"],
       ["/admin/api/accounts", "GET / POST", "List or import accounts"],
-      ["/admin/api/stats", "GET", 'Returns {accounts,enabled,models,requests,failed}'],
+      ["/admin/api/stats", "GET", 'Returns {accounts,enabled,models,requests,failed,since}'],
       ["/admin/api/logs", "GET", "Recent chat requests (metadata only), newest first"]
     ];
     for (var i = 0; i < entries.length; i++) {

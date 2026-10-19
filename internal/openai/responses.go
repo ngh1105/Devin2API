@@ -17,9 +17,15 @@ type ResponsesRequest struct {
 	ToolChoice         json.RawMessage `json:"tool_choice,omitempty"`
 	MaxOutputTokens    *int64          `json:"max_output_tokens,omitempty"`
 	Temperature        *float64        `json:"temperature,omitempty"`
+	TopP               *float64        `json:"top_p,omitempty"`
 	PreviousResponseID string          `json:"previous_response_id,omitempty"`
+	Store              *bool           `json:"store,omitempty"` // default true
 	Reasoning          json.RawMessage `json:"reasoning,omitempty"`
 }
+
+// ShouldStore reports whether the response may be kept for a later
+// previous_response_id (the API default is to store).
+func (r ResponsesRequest) ShouldStore() bool { return r.Store == nil || *r.Store }
 
 // WantsReasoning reports whether the client set the reasoning option.
 func (r ResponsesRequest) WantsReasoning() bool {
