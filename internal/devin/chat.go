@@ -36,23 +36,66 @@ const (
 type PromptSource uint64
 
 const (
-	SourceUser      PromptSource = 1
-	SourceAssistant PromptSource = 2
+	SourceUser       PromptSource = 1
+	SourceAssistant  PromptSource = 2
+	SourceToolResult PromptSource = 4
 )
 
-// Prompt is one conversation turn.
-type Prompt struct {
-	Source PromptSource
-	Text   string
+// StopToolCalls is the stop reason upstream sends when the model ends its
+// turn to call tools.
+const StopToolCalls = 10
+
+// maxToolCalls caps tool calls accepted from one response.
+const maxToolCalls = 128
+
+// ToolCall is a function call made by the assistant.
+type ToolCall struct {
+	ID        string
+	Name      string
+	Arguments string // JSON text
 }
 
-// ChatRequest is a text-only chat call.
+// Tool is a function the model may call.
+type Tool struct {
+	Name        string
+	Description string
+	Parameters  []byte // JSON schema
+}
+
+// Prompt is one conversation turn. Assistant turns may carry ToolCalls;
+// tool results use SourceToolResult with the ToolCallID they answer.
+type Prompt struct {
+	Source     PromptSource
+	Text       string
+	ToolCalls  []ToolCall
+	ToolCallID string
+}
+
+// ChatRequest is a chat call.
 type ChatRequest struct {
 	Model       string // friendly name or upstream UID; empty = DefaultModel
 	System      string
 	Prompts     []Prompt
+	Tools       []Tool
 	MaxTokens   int
 	Temperature float64
+}
+
+// Delta is one streamed piece of output: answer text, thinking text, or a
+// fragment of a tool call.
+type Delta struct {
+	Text     string
+	Thinking string
+	ToolCall *ToolCallDelta
+}
+
+// ToolCallDelta is a fragment of one tool call. ID and Name are set on the
+// first fragment of a call; Arguments carries the next piece of its JSON.
+type ToolCallDelta struct {
+	Index     int // position of the call within this response
+	ID        string
+	Name      string
+	Arguments string
 }
 
 // ChatResult summarises a finished stream.
@@ -60,7 +103,8 @@ type ChatResult struct {
 	StopReason       uint64
 	PromptTokens     int
 	CompletionTokens int
-	Model            string // model name reported upstream
+	Model            string     // model name reported upstream
+	ToolCalls        []ToolCall // complete tool calls, in order
 }
 
 // UpstreamError is a failure reported by Devin, mapped to an HTTP status.
@@ -93,9 +137,10 @@ func ResolveModel(name string) string {
 //
 //	1  ClientMetadata
 //	2  system prompt (omitted when empty)
-//	3  repeated Prompt {1 id, 2 source, 3 text}
+//	3  repeated Prompt {1 id, 2 source, 3 text, 6 repeated ToolCall {1 id, 2 name, 3 args}, 7 tool call id}
 //	7  5 (constant)
 //	8  config {1:1, 2 max tokens, 3:400, 5 temperature (double), 7:40, 8 top_p 0.95 (double)}
+//	10 repeated Tool {1 name, 2 description, 3 JSON schema}
 //	15 session {1 session id, 3:4, 4:14 when the last prompt is from the user}
 //	16 cascade id (= session id)
 //	20 1 (constant)
@@ -110,6 +155,22 @@ func BuildChatRequest(sessionToken, fingerprint, sessionID string, req ChatReque
 		m = append(m, pwFieldString(1, newUUID())...)
 		m = append(m, pwFieldVarint(2, uint64(p.Source))...)
 		m = append(m, pwFieldString(3, p.Text)...)
+		for _, tc := range p.ToolCalls {
+			var c []byte
+			if tc.ID != "" {
+				c = append(c, pwFieldString(1, tc.ID)...)
+			}
+			if tc.Name != "" {
+				c = append(c, pwFieldString(2, tc.Name)...)
+			}
+			if tc.Arguments != "" {
+				c = append(c, pwFieldString(3, tc.Arguments)...)
+			}
+			m = append(m, PwFieldBytes(6, c)...)
+		}
+		if p.ToolCallID != "" {
+			m = append(m, pwFieldString(7, p.ToolCallID)...)
+		}
 		out = append(out, PwFieldBytes(3, m)...)
 	}
 	out = append(out, pwFieldVarint(7, 5)...)
@@ -122,6 +183,22 @@ func BuildChatRequest(sessionToken, fingerprint, sessionID string, req ChatReque
 	cfg = append(cfg, pwFieldVarint(7, 40)...)
 	cfg = append(cfg, PwFieldDouble(8, float64(float32(0.95)))...)
 	out = append(out, PwFieldBytes(8, cfg)...)
+
+	for _, t := range req.Tools {
+		if t.Name == "" {
+			continue
+		}
+		tb := pwFieldString(1, t.Name)
+		if t.Description != "" {
+			tb = append(tb, pwFieldString(2, t.Description)...)
+		}
+		params := t.Parameters
+		if len(params) == 0 {
+			params = []byte(`{"type":"object","properties":{}}`)
+		}
+		tb = append(tb, PwFieldBytes(3, params)...)
+		out = append(out, PwFieldBytes(10, tb)...)
+	}
 
 	sess := pwFieldString(1, sessionID)
 	sess = append(sess, pwFieldVarint(3, 4)...)
@@ -136,9 +213,9 @@ func BuildChatRequest(sessionToken, fingerprint, sessionID string, req ChatReque
 }
 
 // StreamChat runs one GetChatMessage call, invoking onDelta for each piece
-// of answer text or thinking text as it arrives. Deltas never split a UTF-8
-// character. A non-nil error from onDelta aborts the stream.
-func StreamChat(ctx context.Context, serverBase, sessionToken string, req ChatRequest, onDelta func(text, thinking string) error) (*ChatResult, error) {
+// of answer text, thinking text or tool call as it arrives. Deltas never
+// split a UTF-8 character. A non-nil error from onDelta aborts the stream.
+func StreamChat(ctx context.Context, serverBase, sessionToken string, req ChatRequest, onDelta func(Delta) error) (*ChatResult, error) {
 	if serverBase == "" {
 		serverBase = ServerBaseURL
 	}
@@ -168,6 +245,8 @@ func StreamChat(ctx context.Context, serverBase, sessionToken string, req ChatRe
 
 	res := &ChatResult{}
 	var text, thinking utf8Buffer
+	tools := newToolTracker()
+	defer func() { res.ToolCalls = tools.calls }()
 	for {
 		flag, frame, err := readFrame(resp.Body)
 		if err == io.EOF {
@@ -182,32 +261,51 @@ func StreamChat(ctx context.Context, serverBase, sessionToken string, req ChatRe
 			}
 			break
 		}
-		t, th := parseChatFrame(frame, res)
-		if err := emit(onDelta, text.feed(t), thinking.feed(th)); err != nil {
+		t, th, calls := parseChatFrame(frame, res)
+		if err := emit(onDelta, Delta{Text: text.feed(t), Thinking: thinking.feed(th)}); err != nil {
 			return res, err
 		}
+		for _, raw := range calls {
+			if d := tools.feed(raw); d != nil {
+				if err := onDelta(Delta{ToolCall: d}); err != nil {
+					return res, err
+				}
+			}
+		}
 	}
-	if err := emit(onDelta, text.flush(), thinking.flush()); err != nil {
+	if err := emit(onDelta, Delta{Text: text.flush(), Thinking: thinking.flush()}); err != nil {
 		return res, err
+	}
+	for _, d := range tools.flush() {
+		if err := onDelta(Delta{ToolCall: d}); err != nil {
+			return res, err
+		}
 	}
 	return res, nil
 }
 
-func emit(onDelta func(text, thinking string) error, text, thinking string) error {
-	if text == "" && thinking == "" {
+func emit(onDelta func(Delta) error, d Delta) error {
+	if d.Text == "" && d.Thinking == "" {
 		return nil
 	}
-	return onDelta(text, thinking)
+	return onDelta(d)
 }
 
-// parseChatFrame extracts the text (field 3) and thinking (field 9) deltas of
-// one response frame and records stop reason (5) and usage (7) into res.
-func parseChatFrame(frame []byte, res *ChatResult) (text, thinking []byte) {
+// rawToolDelta is response field 6 as sent upstream:
+// {1 id, 2 name, 3 arguments, 4 arguments when they are not valid JSON}.
+type rawToolDelta struct {
+	id, name, args, invalidArgs string
+}
+
+// parseChatFrame extracts the text (field 3), thinking (field 9) and tool
+// call (field 6) deltas of one response frame and records stop reason (5)
+// and usage (7) into res.
+func parseChatFrame(frame []byte, res *ChatResult) (text, thinking []byte, calls []rawToolDelta) {
 	r := &pwReader{data: frame}
 	for {
 		field, wire, val, v, ok := r.Next()
 		if !ok {
-			return text, thinking
+			return text, thinking, calls
 		}
 		switch {
 		case field == 3 && wire == wireBytes:
@@ -216,10 +314,118 @@ func parseChatFrame(frame []byte, res *ChatResult) (text, thinking []byte) {
 			thinking = append(thinking, val...)
 		case field == 5 && wire == wireVarint && v != 0:
 			res.StopReason = v
+		case field == 6 && wire == wireBytes:
+			calls = append(calls, parseToolDelta(val))
 		case field == 7 && wire == wireBytes:
 			parseChatUsage(val, res)
 		}
 	}
+}
+
+func parseToolDelta(data []byte) rawToolDelta {
+	var d rawToolDelta
+	r := &pwReader{data: data}
+	for {
+		field, wire, val, _, ok := r.Next()
+		if !ok {
+			return d
+		}
+		if wire != wireBytes {
+			continue
+		}
+		switch field {
+		case 1:
+			d.id = string(val)
+		case 2:
+			d.name = string(val)
+		case 3:
+			d.args = string(val)
+		case 4:
+			d.invalidArgs = string(val)
+		}
+	}
+}
+
+// toolTracker assembles streamed tool call fragments into calls. A fragment
+// names its call by upstream id; fragments without an id continue the most
+// recent call. Calls without an upstream id get a generated one, because
+// OpenAI clients need an id to answer the call.
+type toolTracker struct {
+	calls  []ToolCall
+	upIDs  []string       // upstream id per call ("" until seen)
+	byUpID map[string]int // upstream id -> call index
+	bufs   []utf8Buffer   // per-call argument buffer
+	active int            // index of the call that id-less fragments extend
+}
+
+func newToolTracker() *toolTracker {
+	return &toolTracker{byUpID: map[string]int{}, active: -1}
+}
+
+// feed records one fragment and returns what to forward downstream (nil
+// when the fragment adds nothing or the call limit is reached).
+func (t *toolTracker) feed(raw rawToolDelta) *ToolCallDelta {
+	idx := -1
+	switch {
+	case raw.id != "":
+		if i, ok := t.byUpID[raw.id]; ok {
+			idx = i
+		} else if t.active >= 0 && t.upIDs[t.active] == "" {
+			// The active call started without an id; this is its id.
+			idx = t.active
+			t.upIDs[idx] = raw.id
+			t.byUpID[raw.id] = idx
+		}
+	case t.active >= 0:
+		idx = t.active
+	}
+
+	out := &ToolCallDelta{}
+	if idx < 0 {
+		if len(t.calls) >= maxToolCalls {
+			return nil
+		}
+		idx = len(t.calls)
+		id := raw.id
+		if id == "" {
+			id = "call_" + randHex(12)
+		}
+		t.calls = append(t.calls, ToolCall{ID: id, Name: raw.name})
+		t.upIDs = append(t.upIDs, raw.id)
+		t.bufs = append(t.bufs, utf8Buffer{})
+		if raw.id != "" {
+			t.byUpID[raw.id] = idx
+		}
+		out.ID, out.Name = id, raw.name
+	} else if t.calls[idx].Name == "" && raw.name != "" {
+		t.calls[idx].Name = raw.name
+		out.Name = raw.name
+	}
+	t.active = idx
+	out.Index = idx
+
+	args := raw.args
+	if args == "" {
+		args = raw.invalidArgs
+	}
+	out.Arguments = t.bufs[idx].feed([]byte(args))
+	t.calls[idx].Arguments += out.Arguments
+	if out.ID == "" && out.Name == "" && out.Arguments == "" {
+		return nil
+	}
+	return out
+}
+
+// flush emits argument bytes still held back by the UTF-8 buffers.
+func (t *toolTracker) flush() []*ToolCallDelta {
+	var out []*ToolCallDelta
+	for i := range t.bufs {
+		if rest := t.bufs[i].flush(); rest != "" {
+			t.calls[i].Arguments += rest
+			out = append(out, &ToolCallDelta{Index: i, Arguments: rest})
+		}
+	}
+	return out
 }
 
 // parseChatUsage reads usage {2 prompt tokens, 3 completion tokens, 9 model}.

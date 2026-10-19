@@ -5,21 +5,52 @@ import (
 	"net/http"
 )
 
-// Message is a single chat message.
+// Message is a single chat message. Assistant messages may carry ToolCalls;
+// "tool" messages answer one call via ToolCallID.
 type Message struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content"`
+	ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Name       string          `json:"name,omitempty"`
 }
 
 // ChatRequest is the body of a /v1/chat/completions POST.
 type ChatRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Stream      bool      `json:"stream"`
-	Temperature *float64  `json:"temperature,omitempty"`
-	TopP        *float64  `json:"top_p,omitempty"`
-	MaxTokens   *int64    `json:"max_tokens,omitempty"`
-	Stop        []string  `json:"stop,omitempty"`
+	Model       string          `json:"model"`
+	Messages    []Message       `json:"messages"`
+	Stream      bool            `json:"stream"`
+	Temperature *float64        `json:"temperature,omitempty"`
+	TopP        *float64        `json:"top_p,omitempty"`
+	MaxTokens   *int64          `json:"max_tokens,omitempty"`
+	Stop        []string        `json:"stop,omitempty"`
+	Tools       []Tool          `json:"tools,omitempty"`
+	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
+}
+
+// Tool is a function the model may call.
+type Tool struct {
+	Type     string `json:"type"` // "function"
+	Function struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description,omitempty"`
+		Parameters  json.RawMessage `json:"parameters,omitempty"`
+	} `json:"function"`
+}
+
+// ToolCall is a function call made by the assistant. Index is only set in
+// streaming deltas, where it identifies which call a fragment extends.
+type ToolCall struct {
+	Index    *int         `json:"index,omitempty"`
+	ID       string       `json:"id,omitempty"`
+	Type     string       `json:"type,omitempty"`
+	Function FunctionCall `json:"function"`
+}
+
+// FunctionCall is the name and JSON arguments of a tool call.
+type FunctionCall struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments"`
 }
 
 // ErrorBody is the error object embedded in an Error response.

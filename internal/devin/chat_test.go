@@ -67,9 +67,9 @@ func TestStreamChatHappyPath(t *testing.T) {
 	res, err := StreamChat(context.Background(), srv.URL, "devin-session-token$tok", ChatRequest{
 		System:  "be brief",
 		Prompts: []Prompt{{Source: SourceUser, Text: "ping"}},
-	}, func(t, th string) error {
-		text.WriteString(t)
-		thinking.WriteString(th)
+	}, func(d Delta) error {
+		text.WriteString(d.Text)
+		thinking.WriteString(d.Thinking)
 		return nil
 	})
 	if err != nil {
@@ -129,8 +129,8 @@ func TestStreamChatTrailerErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		srv, _, _ := chatServer(t, frame(flagEndStream, []byte(tc.trailer)))
-		_, err := StreamChat(context.Background(), srv.URL, "tok", ChatRequest{Prompts: []Prompt{{SourceUser, "hi"}}},
-			func(string, string) error { return nil })
+		_, err := StreamChat(context.Background(), srv.URL, "tok", ChatRequest{Prompts: []Prompt{{Source: SourceUser, Text: "hi"}}},
+			func(Delta) error { return nil })
 		var ue *UpstreamError
 		if !errors.As(err, &ue) || ue.Status != tc.status {
 			t.Errorf("%s: got %v, want status %d", tc.trailer, err, tc.status)
@@ -143,8 +143,8 @@ func TestStreamChatHTTP401(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
-	_, err := StreamChat(context.Background(), srv.URL, "tok", ChatRequest{Prompts: []Prompt{{SourceUser, "hi"}}},
-		func(string, string) error { return nil })
+	_, err := StreamChat(context.Background(), srv.URL, "tok", ChatRequest{Prompts: []Prompt{{Source: SourceUser, Text: "hi"}}},
+		func(Delta) error { return nil })
 	var ue *UpstreamError
 	if !errors.As(err, &ue) || ue.Status != http.StatusUnauthorized {
 		t.Fatalf("got %v", err)
@@ -153,8 +153,8 @@ func TestStreamChatHTTP401(t *testing.T) {
 
 func TestStreamChatMissingTrailer(t *testing.T) {
 	srv, _, _ := chatServer(t, frame(0, pwFieldString(3, "partial")))
-	_, err := StreamChat(context.Background(), srv.URL, "tok", ChatRequest{Prompts: []Prompt{{SourceUser, "hi"}}},
-		func(string, string) error { return nil })
+	_, err := StreamChat(context.Background(), srv.URL, "tok", ChatRequest{Prompts: []Prompt{{Source: SourceUser, Text: "hi"}}},
+		func(Delta) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "end-of-stream") {
 		t.Fatalf("got %v", err)
 	}
@@ -163,8 +163,8 @@ func TestStreamChatMissingTrailer(t *testing.T) {
 func TestStreamChatCallbackAbort(t *testing.T) {
 	srv, _, _ := chatServer(t, frame(0, pwFieldString(3, "a")), frame(flagEndStream, []byte("{}")))
 	stop := errors.New("client gone")
-	_, err := StreamChat(context.Background(), srv.URL, "tok", ChatRequest{Prompts: []Prompt{{SourceUser, "hi"}}},
-		func(string, string) error { return stop })
+	_, err := StreamChat(context.Background(), srv.URL, "tok", ChatRequest{Prompts: []Prompt{{Source: SourceUser, Text: "hi"}}},
+		func(Delta) error { return stop })
 	if !errors.Is(err, stop) {
 		t.Fatalf("got %v", err)
 	}
@@ -206,5 +206,119 @@ func TestResolveModel(t *testing.T) {
 func TestReadFrameRejectsBadFlag(t *testing.T) {
 	if _, _, err := readFrame(bytes.NewReader(frame(0x08, nil))); err == nil {
 		t.Error("expected error for unknown flag")
+	}
+}
+
+// toolFrame encodes a response frame holding one tool call fragment.
+func toolFrame(id, name, args string) []byte {
+	var b []byte
+	if id != "" {
+		b = append(b, pwFieldString(1, id)...)
+	}
+	if name != "" {
+		b = append(b, pwFieldString(2, name)...)
+	}
+	if args != "" {
+		b = append(b, pwFieldString(3, args)...)
+	}
+	return frame(0, PwFieldBytes(6, b))
+}
+
+func TestStreamChatToolCalls(t *testing.T) {
+	srv, body, _ := chatServer(t,
+		toolFrame("up_1", "get_weather", `{"city":`),
+		toolFrame("", "", `"Hà Nội"}`), // id-less fragment continues the active call
+		toolFrame("up_2", "get_time", `{}`),
+		frame(0, pwFieldVarint(5, StopToolCalls)),
+		frame(flagEndStream, []byte("{}")),
+	)
+	var deltas []ToolCallDelta
+	res, err := StreamChat(context.Background(), srv.URL, "tok", ChatRequest{
+		Prompts: []Prompt{{Source: SourceUser, Text: "weather?"}},
+		Tools:   []Tool{{Name: "get_weather", Description: "Weather", Parameters: []byte(`{"type":"object"}`)}, {Name: "get_time"}},
+	}, func(d Delta) error {
+		if d.ToolCall != nil {
+			deltas = append(deltas, *d.ToolCall)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.ToolCalls) != 2 || res.StopReason != StopToolCalls {
+		t.Fatalf("result = %+v", res)
+	}
+	if c := res.ToolCalls[0]; c.ID != "up_1" || c.Name != "get_weather" || c.Arguments != `{"city":"Hà Nội"}` {
+		t.Errorf("call 0 = %+v", c)
+	}
+	if c := res.ToolCalls[1]; c.ID != "up_2" || c.Name != "get_time" || c.Arguments != `{}` {
+		t.Errorf("call 1 = %+v", c)
+	}
+	// First fragment per call carries id and name; continuation only args.
+	if deltas[0].ID != "up_1" || deltas[0].Name != "get_weather" || deltas[1].ID != "" || deltas[1].Index != 0 || deltas[2].Index != 1 {
+		t.Errorf("deltas = %+v", deltas)
+	}
+
+	// Request carries both tool definitions (field 10) with their schema.
+	var tools [][]byte
+	r := &pwReader{data: *body}
+	for {
+		f, wire, val, _, ok := r.Next()
+		if !ok {
+			break
+		}
+		if f == 10 && wire == wireBytes {
+			tools = append(tools, val)
+		}
+	}
+	if len(tools) != 2 || !bytes.Contains(tools[0], []byte(`{"type":"object"}`)) || !bytes.Contains(tools[1], []byte("get_time")) {
+		t.Errorf("tools in request = %q", tools)
+	}
+}
+
+func TestToolTrackerGeneratesIDAndAdoptsLateID(t *testing.T) {
+	tr := newToolTracker()
+	d := tr.feed(rawToolDelta{name: "f", args: `{"a":`})
+	if d == nil || d.ID == "" || d.Name != "f" {
+		t.Fatalf("first delta = %+v", d)
+	}
+	// Upstream id arriving later is adopted by the active call, not a new one.
+	tr.feed(rawToolDelta{id: "late", args: `1}`})
+	if len(tr.calls) != 1 || tr.calls[0].Arguments != `{"a":1}` {
+		t.Fatalf("calls = %+v", tr.calls)
+	}
+	// Invalid-JSON arguments (field 4) are still forwarded.
+	tr.feed(rawToolDelta{id: "x", name: "g", invalidArgs: `{bad`})
+	if len(tr.calls) != 2 || tr.calls[1].Arguments != `{bad` {
+		t.Errorf("calls = %+v", tr.calls)
+	}
+}
+
+func TestBuildChatRequestToolHistory(t *testing.T) {
+	b := BuildChatRequest("tok", "fp", "sess", ChatRequest{Prompts: []Prompt{
+		{Source: SourceUser, Text: "weather?"},
+		{Source: SourceAssistant, ToolCalls: []ToolCall{{ID: "call_1", Name: "get_weather", Arguments: `{"city":"Hue"}`}}},
+		{Source: SourceToolResult, Text: "sunny", ToolCallID: "call_1"},
+	}})
+	var prompts [][]byte
+	r := &pwReader{data: b}
+	for {
+		f, wire, val, _, ok := r.Next()
+		if !ok {
+			break
+		}
+		if f == 3 && wire == wireBytes {
+			prompts = append(prompts, val)
+		}
+	}
+	if len(prompts) != 3 {
+		t.Fatalf("got %d prompts", len(prompts))
+	}
+	if !bytes.Contains(prompts[1], []byte("get_weather")) || !bytes.Contains(prompts[1], []byte(`{"city":"Hue"}`)) {
+		t.Error("assistant tool call missing")
+	}
+	// Tool result: source 4 (tag 0x10 value 0x04) and tool_call_id in field 7 (tag 0x3a).
+	if !bytes.Contains(prompts[2], []byte{0x10, 0x04}) || !bytes.Contains(prompts[2], append([]byte{0x3a, 6}, "call_1"...)) {
+		t.Errorf("tool result prompt = %x", prompts[2])
 	}
 }

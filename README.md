@@ -201,7 +201,8 @@ How chat works:
 - `model` accepts the ids from `/v1/models`. A `devin/` prefix is dropped and dots become dashes (`claude-sonnet-4.6` → `claude-sonnet-4-6`). A family name without an effort level picks one from the catalog, trying medium, then high, then low (`gpt-5-4` → `gpt-5-4-medium`).
 - `system`/`developer` messages become the system prompt; `user` and `assistant` messages become the conversation. `max_tokens` (default 32000) and `temperature` are forwarded.
 - Thinking text, when the model produces it, is returned as `reasoning_content`.
-- Text only for now: `tool` messages, tool calls and image parts return 400.
+- Tool calling follows the OpenAI format: `tools` (function type) are forwarded with their JSON schema; the model's calls come back as `tool_calls` (streamed as indexed fragments) with `finish_reason: "tool_calls"`; send results back as `role: "tool"` messages with `tool_call_id`. `tool_choice: "none"` disables tools; other `tool_choice` values are left to the model.
+- Image content parts still return 400.
 - Errors use the OpenAI error shape. With no usable account the endpoint returns 503.
 
 ---
@@ -213,7 +214,7 @@ How chat works:
 | 1         | OAuth login (Auth0 PKCE), account persistence, web panel, `/v1` proxy stub | Done     |
 | 2         | Browser-link login (any IdP), usage/quota panel, CLI login, CLIProxyAPI JSON import, token-gated /v1 stub | Done |
 | 3         | Devin chat upstream (`GetChatMessage`) — `/v1/chat/completions` live, account failover | Done |
-| 4         | Live model list (done), tool calls, images | In progress |
+| 4         | Live model list, tool calls (done), images | In progress |
 
 ---
 

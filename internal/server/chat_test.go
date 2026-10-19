@@ -303,3 +303,147 @@ func TestModelsFetchIgnoresCallerCancel(t *testing.T) {
 		t.Fatal("cancelled caller left the catalog empty")
 	}
 }
+
+// toolUpstream answers GetChatMessage with one tool call split across two
+// frames, and records each raw request body.
+func toolUpstream(t *testing.T) (*Server, *[][]byte) {
+	t.Helper()
+	var mu sync.Mutex
+	var bodies [][]byte
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if strings.HasSuffix(r.URL.Path, "/GetCliModelConfigs") {
+			return
+		}
+		mu.Lock()
+		bodies = append(bodies, b)
+		mu.Unlock()
+		call := func(id, name, args string) []byte {
+			var c []byte
+			if id != "" {
+				c = append(c, devin.PwFieldString(1, id)...)
+			}
+			if name != "" {
+				c = append(c, devin.PwFieldString(2, name)...)
+			}
+			c = append(c, devin.PwFieldString(3, args)...)
+			return connectFrame(0, devin.PwFieldBytes(6, c))
+		}
+		w.Write(call("up_1", "get_weather", `{"city":`))
+		w.Write(call("", "", `"Hue"}`))
+		w.Write(connectFrame(0, devin.PwFieldVarint(5, devin.StopToolCalls)))
+		w.Write(connectFrame(2, []byte("{}")))
+	}))
+	t.Cleanup(up.Close)
+	accs := mustAccounts(t)
+	accs.Save(store.AccountFromLogin("u", "usr_tool", "org", "eyJtok", "", nil))
+	srv := New(config.Config{Listen: ":0"}, accs, mustTokens(t))
+	srv.loginServerBase = up.URL
+	return srv, &bodies
+}
+
+const weatherTools = `"tools":[{"type":"function","function":{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]`
+
+func TestChatToolCallNonStream(t *testing.T) {
+	srv, bodies := toolUpstream(t)
+	rec := postChat(srv, `{"messages":[{"role":"user","content":"weather in Hue?"}],`+weatherTools+`}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	var resp openai.ChatCompletion
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	c := resp.Choices[0]
+	if c.FinishReason != "tool_calls" || len(c.Message.ToolCalls) != 1 {
+		t.Fatalf("choice = %+v", c)
+	}
+	tc := c.Message.ToolCalls[0]
+	if tc.ID != "up_1" || tc.Type != "function" || tc.Function.Name != "get_weather" || tc.Function.Arguments != `{"city":"Hue"}` || tc.Index != nil {
+		t.Errorf("tool call = %+v", tc)
+	}
+	if !strings.Contains(string((*bodies)[0]), `"required":["city"]`) {
+		t.Error("tool schema not forwarded upstream")
+	}
+}
+
+func TestChatToolCallStream(t *testing.T) {
+	srv, _ := toolUpstream(t)
+	rec := postChat(srv, `{"stream":true,"messages":[{"role":"user","content":"weather?"}],`+weatherTools+`}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	var args strings.Builder
+	var id, name, finish string
+	fragments := 0
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok || data == "[DONE]" {
+			continue
+		}
+		var c openai.ChatChunk
+		if err := json.Unmarshal([]byte(data), &c); err != nil {
+			t.Fatalf("bad chunk %q", data)
+		}
+		ch := c.Choices[0]
+		for _, tc := range ch.Delta.ToolCalls {
+			fragments++
+			if tc.Index == nil || *tc.Index != 0 {
+				t.Errorf("fragment index = %v", tc.Index)
+			}
+			if tc.ID != "" {
+				id, name = tc.ID, tc.Function.Name
+			}
+			args.WriteString(tc.Function.Arguments)
+		}
+		if ch.FinishReason != nil {
+			finish = *ch.FinishReason
+		}
+	}
+	if fragments != 2 || id != "up_1" || name != "get_weather" || args.String() != `{"city":"Hue"}` || finish != "tool_calls" {
+		t.Errorf("fragments=%d id=%q name=%q args=%q finish=%q", fragments, id, name, args.String(), finish)
+	}
+}
+
+// TestChatToolHistoryForwarded: the second agent turn (assistant tool_calls
+// + tool result) reaches upstream with the call id intact.
+func TestChatToolHistoryForwarded(t *testing.T) {
+	srv, bodies := toolUpstream(t)
+	rec := postChat(srv, `{"messages":[
+		{"role":"user","content":"weather?"},
+		{"role":"assistant","content":null,"tool_calls":[{"id":"call_9","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Hue\"}"}}]},
+		{"role":"tool","tool_call_id":"call_9","content":"sunny, 31C"}],`+weatherTools+`}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	b := string((*bodies)[0])
+	for _, want := range []string{"call_9", `{"city":"Hue"}`, "sunny, 31C"} {
+		if !strings.Contains(b, want) {
+			t.Errorf("upstream request missing %q", want)
+		}
+	}
+}
+
+func TestChatToolChoiceNoneDropsTools(t *testing.T) {
+	srv, bodies := toolUpstream(t)
+	postChat(srv, `{"messages":[{"role":"user","content":"hi"}],"tool_choice":"none",`+weatherTools+`}`)
+	if strings.Contains(string((*bodies)[0]), "get_weather") {
+		t.Error("tools sent upstream despite tool_choice none")
+	}
+}
+
+func TestChatRejectsBadTools(t *testing.T) {
+	srv, bodies := toolUpstream(t)
+	for _, body := range []string{
+		`{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":""}}]}`,
+		`{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"retrieval","function":{"name":"x"}}]}`,
+		`{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"a"}},{"type":"function","function":{"name":"a"}}]}`,
+		`{"messages":[{"role":"user","content":"hi"},{"role":"tool","content":"x"}]}`,
+		`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","tool_calls":[{"type":"function","function":{"name":"a"}}]}]}`,
+	} {
+		if rec := postChat(srv, body); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", body, rec.Code)
+		}
+	}
+	if len(*bodies) != 0 {
+		t.Error("invalid request reached upstream")
+	}
+}
