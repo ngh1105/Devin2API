@@ -73,7 +73,7 @@
       g.innerHTML = "";
       var items = [
         { label: "Accounts", val: d.accounts, sub: (d.enabled != null ? (d.enabled + "/" + d.accounts) : "") },
-        { label: "Models", val: "—", sub: "" },
+        { label: "Models", val: (d.models ? d.models : "—"), sub: "" },
         { label: "Requests", val: (d.requests != null ? d.requests : 0), sub: "" },
         { label: "Failed", val: (d.failed != null ? d.failed : 0), sub: "" }
       ];

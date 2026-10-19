@@ -182,6 +182,9 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Map family names ("gpt-5-4") to a concrete catalog UID ("gpt-5-4-medium").
+	// Uses the cache only, so a cold cache never delays a chat request.
+	dreq.Model = devin.MatchModel(dreq.Model, s.cachedModels())
 
 	s.stats.requests.Add(1)
 	id := "chatcmpl-" + randID()

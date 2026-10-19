@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ngh1105/Devin2API/internal/devin"
 	"github.com/ngh1105/Devin2API/internal/openai"
 )
 
@@ -64,24 +65,24 @@ func (s *Server) v1Middleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// knownModels is the advertised model list. "devin" aliases the default
-// upstream model; any other upstream model UID is also accepted as-is.
-var knownModels = []string{
-	"devin", "swe-2-high", "swe-1-7", "swe-1-6",
-	"claude-sonnet-4-6", "claude-sonnet-4-6-thinking", "claude-opus-4-6", "claude-opus-4-6-thinking",
-	"gpt-5-4", "gpt-5-5", "gemini-3-1-pro-high", "kimi-k2-6", "glm-5-2",
-}
-
-// getModels returns the model list in the OpenAI API shape.
+// getModels returns the upstream model catalog in the OpenAI API shape,
+// led by the "devin" alias for the default model. Without a reachable
+// account it lists only the alias.
 func (s *Server) getModels(w http.ResponseWriter, r *http.Request) {
 	type model struct {
-		ID      string `json:"id"`
-		Object  string `json:"object"`
-		OwnedBy string `json:"owned_by"`
+		ID            string `json:"id"`
+		Object        string `json:"object"`
+		OwnedBy       string `json:"owned_by"`
+		DisplayName   string `json:"display_name,omitempty"`
+		ContextLength int    `json:"context_length,omitempty"`
+		Multimodal    bool   `json:"multimodal,omitempty"`
 	}
-	data := make([]model, len(knownModels))
-	for i, id := range knownModels {
-		data[i] = model{ID: id, Object: "model", OwnedBy: "devin"}
+	data := []model{{ID: "devin", Object: "model", OwnedBy: "devin", DisplayName: "Default (" + devin.DefaultModel + ")"}}
+	for _, m := range s.fetchModels(r.Context()) {
+		data = append(data, model{
+			ID: m.UID, Object: "model", OwnedBy: "devin",
+			DisplayName: m.Label, ContextLength: m.ContextLength, Multimodal: m.Multimodal,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }

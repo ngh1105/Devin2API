@@ -27,12 +27,60 @@ func connectFrame(flag byte, payload []byte) []byte {
 // trailers get that end-of-stream JSON, all others stream "pong".
 type fakeDevin struct {
 	mu       sync.Mutex
-	calls    []string // Authorization headers seen, in order
-	trailers map[string]string
+	calls      []string // chat Authorization headers seen, in order
+	modelCalls int
+	trailers   map[string]string
+}
+
+// TestModelsFromUpstream: /v1/models lists the live catalog after the
+// "devin" alias, caches it, and chat maps a family name onto a catalog UID.
+func TestModelsFromUpstream(t *testing.T) {
+	fake := &fakeDevin{}
+	srv := chatTestServer(t, fake, "eyJtok1")
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, v1Request(http.MethodGet, "/v1/models", nil))
+		var resp struct {
+			Data []struct {
+				ID            string `json:"id"`
+				ContextLength int    `json:"context_length"`
+			} `json:"data"`
+		}
+		json.Unmarshal(rec.Body.Bytes(), &resp)
+		if len(resp.Data) != 2 || resp.Data[0].ID != "devin" || resp.Data[1].ID != "gpt-5-4-medium" || resp.Data[1].ContextLength != 400000 {
+			t.Fatalf("models = %+v", resp.Data)
+		}
+	}
+	if fake.modelCalls != 1 {
+		t.Errorf("upstream catalog fetched %d times, want 1 (cached)", fake.modelCalls)
+	}
+	if got := devin.MatchModel("gpt-5.4", srv.cachedModels()); got != "gpt-5-4-medium" {
+		t.Errorf("MatchModel = %q", got)
+	}
+}
+
+// TestModelsWithoutAccount lists only the alias and never calls upstream.
+func TestModelsWithoutAccount(t *testing.T) {
+	fake := &fakeDevin{}
+	srv := chatTestServer(t, fake)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, v1Request(http.MethodGet, "/v1/models", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"devin"`) || fake.modelCalls != 0 {
+		t.Errorf("status %d body %s calls %d", rec.Code, rec.Body, fake.modelCalls)
+	}
 }
 
 func (f *fakeDevin) handler(w http.ResponseWriter, r *http.Request) {
 	io.Copy(io.Discard, r.Body)
+	if strings.HasSuffix(r.URL.Path, "/GetCliModelConfigs") {
+		f.mu.Lock()
+		f.modelCalls++
+		f.mu.Unlock()
+		cfg := append(devin.PwFieldString(1, "GPT-5.4 Medium"), devin.PwFieldVarint(18, 400000)...)
+		cfg = append(cfg, devin.PwFieldString(22, "gpt-5-4-medium")...)
+		w.Write(devin.PwFieldBytes(1, cfg))
+		return
+	}
 	auth := r.Header.Get("Authorization")
 	f.mu.Lock()
 	f.calls = append(f.calls, auth)

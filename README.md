@@ -191,14 +191,14 @@ If the token store is **empty** (no tokens created), `/v1/*` accepts requests wi
 | Endpoint                             | Method   | Current behavior                                      |
 |--------------------------------------|----------|-------------------------------------------------------|
 | `GET /healthz`                       | GET      | Returns `{"status":"ok"}`.                            |
-| `GET /v1/models`                     | GET      | Lists the advertised models. `devin` is an alias for `swe-2-high`. |
+| `GET /v1/models`                     | GET      | Lists the live model catalog from Devin (`GetCliModelConfigs`, cached 30 min) with display name, context length and multimodal flag. `devin` is an alias for `swe-2-high`. |
 | `POST /v1/chat/completions`          | POST     | Chat completion through Devin. Supports `stream: true` (SSE). |
 
 How chat works:
 
 - Each request goes to `server.codeium.com/exa.api_server_pb.ApiServerService/GetChatMessage` (Connect + protobuf) using the session token of an enabled account.
 - Accounts are used round-robin. If an account's token is rejected (401) or its quota is exhausted (429/403) before any output is sent, the next account is tried. A rejected token is flagged in the panel so you can re-login.
-- `model` accepts the names from `/v1/models` or any upstream model UID. A `devin/` prefix is dropped and dots become dashes (`claude-sonnet-4.6` → `claude-sonnet-4-6`).
+- `model` accepts the ids from `/v1/models`. A `devin/` prefix is dropped and dots become dashes (`claude-sonnet-4.6` → `claude-sonnet-4-6`). A family name without an effort level picks one from the catalog, trying medium, then high, then low (`gpt-5-4` → `gpt-5-4-medium`).
 - `system`/`developer` messages become the system prompt; `user` and `assistant` messages become the conversation. `max_tokens` (default 32000) and `temperature` are forwarded.
 - Thinking text, when the model produces it, is returned as `reasoning_content`.
 - Text only for now: `tool` messages, tool calls and image parts return 400.
@@ -213,7 +213,7 @@ How chat works:
 | 1         | OAuth login (Auth0 PKCE), account persistence, web panel, `/v1` proxy stub | Done     |
 | 2         | Browser-link login (any IdP), usage/quota panel, CLI login, CLIProxyAPI JSON import, token-gated /v1 stub | Done |
 | 3         | Devin chat upstream (`GetChatMessage`) — `/v1/chat/completions` live, account failover | Done |
-| 4         | Tool calls, images, live model list | Next |
+| 4         | Live model list (done), tool calls, images | In progress |
 
 ---
 
