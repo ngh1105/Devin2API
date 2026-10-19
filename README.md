@@ -22,7 +22,7 @@ docker run -d --name devin2api -p 127.0.0.1:8080:8080 -v devin2api-data:/data gh
 ```
 
 - Inside the container the server listens on `0.0.0.0:8080` and keeps data in the `/data` volume.
-- Publish the port on `127.0.0.1` as shown: the admin API and keyless `/v1` only answer loopback hosts.
+- Publish the port on `127.0.0.1` as shown: without an admin password, the admin API and keyless `/v1` only answer loopback hosts. To reach the panel from the LAN, add `-e DEVIN2API_ADMIN_PASSWORD=...`, publish on all interfaces and create API keys.
 - The browser login waits for a callback on a port inside the container, so it cannot finish there. Log in with the binary on the host and import the account JSON in the panel, or use the manual token login.
 
 **From source**:
@@ -47,14 +47,23 @@ DEVIN2API_LISTEN="127.0.0.1:8080" DEVIN2API_DATA="./data" ./devin2api
 |----------------|--------------------|------------------------------------------------|
 | `DEVIN2API_LISTEN` | `127.0.0.1:8080` | Address to bind the HTTP server.             |
 | `DEVIN2API_DATA`   | `./data`         | Root directory for accounts, tokens, config. |
+| `DEVIN2API_ADMIN_PASSWORD` | (unset) | Protects the panel and admin API with a login, and allows using them from other hosts (e.g. the LAN). |
 
 The server exposes:
 
-- **Web panel** — open <http://127.0.0.1:8080/> in a browser; single-page app at `/web/` with tab navigation (Accounts, API Keys, Settings, API).
+- **Web panel** — open <http://127.0.0.1:8080/> in a browser; single-page app at `/web/` with tabs (Accounts, API Keys, Logs, Settings, API).
 - **Health check** — `GET /healthz` → `{"status":"ok"}`.
 - **OpenAI-compatible `/v1/*` endpoints** — see [API status](#api-status).
 
-> **Warning about non-loopback binding.** Panel pages are unauthenticated. The admin API (`/admin/api/*`) only answers requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]`, rejects cross-origin requests, and requires an `X-Devin2API` header on state-changing calls (the panel sends it). Session tokens and API keys are masked in every admin response. Imported account `id` values may only contain letters, digits, `_` and `-`. Do not bind to `0.0.0.0` or any public interface without adding your own auth/gateway layer.
+> **Security.** The admin API (`/admin/api/*`) always rejects cross-origin requests and requires an `X-Devin2API` header on state-changing calls (the panel sends it). Session tokens and API keys are masked in every admin response. Imported account `id` values may only contain letters, digits, `_` and `-`.
+>
+> - **Without `DEVIN2API_ADMIN_PASSWORD`** (the default) the panel needs no login. The admin API then only answers requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]`, so keep the default `127.0.0.1` binding.
+> - **With `DEVIN2API_ADMIN_PASSWORD`** the panel asks for the password.
+>   - A login lasts 7 days, in an `HttpOnly`, `SameSite=Strict` cookie. Sessions are in memory, so a restart signs everyone out.
+>   - Failed logins are slowed down and capped at 10 per minute.
+>   - The admin API is then served on any host, so you can bind `0.0.0.0` and use the panel from the LAN.
+>   - Keyless `/v1` access stays loopback-only, so create API keys for other machines.
+>   - Traffic is plain HTTP: put a TLS reverse proxy in front before exposing it beyond a trusted network.
 
 ---
 

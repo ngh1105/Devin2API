@@ -112,6 +112,7 @@ type Server struct {
 	models          modelCache    // upstream model catalog
 	reqLog          requestLog    // recent chat requests for the panel
 	storedResponses responseStore // /v1/responses history for previous_response_id
+	auth            adminAuth     // optional admin password and sessions
 	cooldown        cooldowns     // accounts parked per model after a 429
 	stats           chatStats     // chat request totals, persisted in the data dir
 }
@@ -128,6 +129,7 @@ func New(cfg config.Config, accounts *store.AccountStore, tokens *store.TokenSto
 		loginMngr:       newLoginManager(),
 	}
 	s.stats.load(cfg.DataDir)
+	s.auth.password = cfg.AdminPassword
 	return s
 }
 
@@ -162,17 +164,19 @@ func (s *Server) Start(addr string) error {
 	return srv.ListenAndServe()
 }
 
-// adminRequestError guards the unauthenticated admin API against browser
-// attacks from other sites. It returns a non-empty reason to reject r.
+// adminRequestError guards the admin API against browser attacks from
+// other sites. It returns a non-empty reason to reject r.
 //
-//   - Host must be a loopback name/IP: defeats DNS rebinding, where an
-//     attacker domain resolves to 127.0.0.1 and reads responses.
+//   - Without an admin password, Host must be a loopback name/IP: defeats
+//     DNS rebinding, where an attacker domain resolves to 127.0.0.1 and
+//     reads responses. With a password, any Host is served: a rebinding
+//     page never holds the SameSite session cookie, so it gets 401.
 //   - Origin, when sent, must match Host: defeats cross-site requests.
 //   - State-changing requests must carry the X-Devin2API header, which a
 //     cross-site form or no-cors fetch cannot set without a preflight.
-func adminRequestError(r *http.Request) string {
-	if !isLoopbackHost(r.Host) {
-		return "admin API is only served on loopback hosts"
+func adminRequestError(r *http.Request, passwordSet bool) string {
+	if !passwordSet && !isLoopbackHost(r.Host) {
+		return "admin API is only served on loopback hosts (set DEVIN2API_ADMIN_PASSWORD to allow other hosts)"
 	}
 	if foreignOrigin(r) {
 		return "cross-origin request rejected"
@@ -247,8 +251,12 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strings.HasPrefix(path, "/admin/api/") {
-		if msg := adminRequestError(r); msg != "" {
+		if msg := adminRequestError(r, s.auth.enabled()); msg != "" {
 			writeErr(w, http.StatusForbidden, msg)
+			return
+		}
+		if !adminPublicPaths[path] && !s.auth.authenticated(r) {
+			writeErr(w, http.StatusUnauthorized, "login required")
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)

@@ -222,3 +222,6 @@ dl#api-dl dd { color: #cbd5e1; margin-left: 1rem; margin-bottom: .25rem; font-si
 td.status-ok { color: #34d399; }
 td.status-err { color: #f87171; }
 #log-table td { font-size: .82rem; }
+
+/* Admin login */
+#admin-login-form input { width: 100%; margin-bottom: .75rem; }
