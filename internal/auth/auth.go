@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"net/http"
+	"time"
 )
 
 const (
@@ -29,9 +30,8 @@ const defaultBaseURL = "https://" + AuthDomain
 
 // Client is an Auth0 client ready for the login flow.
 type Client struct {
-	baseURL  string
-	httpClt  *http.Client
-	clientID string // populated at init time via config
+	baseURL string
+	httpClt *http.Client
 }
 
 // Option sets a field on c during NewClient construction.
@@ -54,14 +54,19 @@ func NewClient(opts ...Option) *Client {
 		o(c)
 	}
 	if c.httpClt == nil {
-		c.httpClt = http.DefaultClient
+		c.httpClt = &http.Client{Timeout: defaultTimeout}
 	}
 	return c
 }
 
+// defaultTimeout bounds each Auth0 request when no client is supplied.
+const defaultTimeout = 30 * time.Second
+
 // randomState generates a 16-byte url-safe base64 state string.
 func randomState() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("auth: crypto/rand failed: " + err.Error())
+	}
 	return base64.RawURLEncoding.EncodeToString(b)
 }

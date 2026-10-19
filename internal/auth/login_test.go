@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -267,8 +268,100 @@ func TestLoginAuthorizeError(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *AuthError, got %T", err)
 	}
-	if aerr.Stage != "password" {
-		t.Errorf("stage=%q, want password", aerr.Stage)
+	if aerr.Stage != "authorize" {
+		t.Errorf("stage=%q, want authorize", aerr.Stage)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestLoginUniversalFlow mimics real Auth0 behaviour the simple mocks skip:
+// /authorize issues its own transaction state (different from the client
+// state), hidden inputs carry type= before name= and HTML entities, and the
+// password POST goes through /authorize/resume before reaching the callback.
+// ---------------------------------------------------------------------------
+
+func TestLoginUniversalFlow(t *testing.T) {
+	const txState = "hKFo2SB&amp;tx" // as rendered in HTML
+	const txStateRaw = "hKFo2SB&tx"  // after unescaping
+	var clientState string
+	var ts *httptest.Server
+	ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		switch {
+		case r.URL.Path == "/authorize":
+			clientState = r.URL.Query().Get("state")
+			http.SetCookie(w, &http.Cookie{Name: "auth0", Value: "sess", Path: "/"})
+			w.Header().Set("Location", "/u/login/identifier?state="+url.QueryEscape(txStateRaw))
+			w.WriteHeader(http.StatusFound)
+		case r.URL.Path == "/u/login/identifier" && r.Method == "GET":
+			if _, err := r.Cookie("auth0"); err != nil {
+				t.Error("session cookie not sent")
+			}
+			w.Write([]byte(`<form method="POST"><input type="hidden" name="state" value="` + txState + `"><input name="username"></form>`))
+		case r.URL.Path == "/u/login/identifier" && r.Method == "POST":
+			if r.PostForm.Get("state") != txStateRaw {
+				t.Errorf("identifier state=%q", r.PostForm.Get("state"))
+			}
+			w.Header().Set("Location", "/u/login/password?state="+url.QueryEscape(txStateRaw))
+			w.WriteHeader(http.StatusFound)
+		case r.URL.Path == "/u/login/password" && r.Method == "GET":
+			w.Write([]byte(`<form><input type="hidden" name="state" value="` + txState + `"></form>`))
+		case r.URL.Path == "/u/login/password" && r.Method == "POST":
+			if r.PostForm.Get("password") == "bad" {
+				w.WriteHeader(http.StatusBadRequest)
+				w.Write([]byte(`<span id="error-element-password" class="ulp-input-error-message">Wrong email or password</span>`))
+				return
+			}
+			w.Header().Set("Location", "/authorize/resume?state="+url.QueryEscape(txStateRaw))
+			w.WriteHeader(http.StatusFound)
+		case r.URL.Path == "/authorize/resume":
+			w.Header().Set("Location", RedirectURI+"?code=real-code&state="+url.QueryEscape(clientState))
+			w.WriteHeader(http.StatusFound)
+		case r.URL.Path == "/oauth/token":
+			if r.PostForm.Get("code") != "real-code" {
+				t.Errorf("code=%q", r.PostForm.Get("code"))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"access_token":"at","refresh_token":"rt","expires_in":60}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	c := NewClient(WithBaseURL(ts.URL))
+	tokens, err := c.Login(context.Background(), "u@test.io", "good")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(t, "AccessToken", tokens.AccessToken, "at")
+
+	_, err = c.Login(context.Background(), "u@test.io", "bad")
+	aerr, ok := err.(*AuthError)
+	if !ok {
+		t.Fatalf("expected *AuthError, got %T (%v)", err, err)
+	}
+	if aerr.Stage != "password" || aerr.Message != "Wrong email or password" {
+		t.Errorf("got %+v", aerr)
+	}
+}
+
+// TestLoginCallbackStateMismatch ensures a callback carrying a foreign state
+// is rejected instead of exchanging the code.
+func TestLoginCallbackStateMismatch(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/authorize" {
+			w.Header().Set("Location", RedirectURI+"?code=x&state=forged")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		t.Errorf("unexpected request to %s", r.URL.Path)
+	}))
+	defer ts.Close()
+
+	_, err := NewClient(WithBaseURL(ts.URL)).Login(context.Background(), "u", "p")
+	if err == nil || !strings.Contains(err.Error(), "state mismatch") {
+		t.Fatalf("expected state mismatch, got %v", err)
 	}
 }
 
