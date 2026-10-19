@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ngh1105/Devin2API/internal/buildinfo"
 	"github.com/ngh1105/Devin2API/internal/devin"
 	"github.com/ngh1105/Devin2API/internal/store"
 )
@@ -184,7 +185,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]string{
 		"listen":   s.listen,
 		"data_dir": s.dataDir,
-		"version":  "dev",
+		"version":  buildinfo.String(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

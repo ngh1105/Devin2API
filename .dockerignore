@@ -1,0 +1,9 @@
+# Keep secrets and local build output out of the build context.
+data/
+*.exe
+*.exe~
+devin2api
+.git/
+.github/
+.claude/
+.omc/
