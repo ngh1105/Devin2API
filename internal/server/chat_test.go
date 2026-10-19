@@ -612,3 +612,12 @@ func TestChatImageOnlyMessageAllowed(t *testing.T) {
 		t.Errorf("status %d: %s", rec.Code, rec.Body)
 	}
 }
+
+func TestChatBodyTooLarge(t *testing.T) {
+	srv, bodies := imageServer(t)
+	big := `{"messages":[{"role":"user","content":"` + strings.Repeat("a", maxV1BodyBytes+1) + `"}]}`
+	rec := postChat(srv, big)
+	if rec.Code != http.StatusRequestEntityTooLarge || len(*bodies) != 0 {
+		t.Errorf("status %d, upstream calls %d", rec.Code, len(*bodies))
+	}
+}

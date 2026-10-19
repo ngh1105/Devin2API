@@ -136,14 +136,22 @@ func parseDataURL(u string) (Image, error) {
 		return Image{}, errors.New("image data URL must be base64-encoded")
 	}
 	mime = strings.ToLower(strings.TrimSpace(mime))
+	if mime == "image/jpg" { // common non-standard spelling
+		mime = "image/jpeg"
+	}
 	if !allowedImageTypes[mime] {
 		return Image{}, fmt.Errorf("image type %q is not supported (png, jpeg, webp, gif)", mime)
 	}
 	data = strings.TrimSpace(data)
-	if _, err := base64.StdEncoding.DecodeString(data); err != nil || data == "" {
+	// Accept unpadded base64 too, but forward the padded standard form.
+	decoded, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(strings.TrimRight(data, "="))
+	}
+	if err != nil || len(decoded) == 0 {
 		return Image{}, errors.New("image data is not valid base64")
 	}
-	return Image{MimeType: mime, Base64: data}, nil
+	return Image{MimeType: mime, Base64: base64.StdEncoding.EncodeToString(decoded)}, nil
 }
 
 // TextContent flattens a message content value: a plain string, null, or an

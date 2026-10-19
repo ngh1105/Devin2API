@@ -297,6 +297,11 @@ func upstreamStatus(err error) (int, string) {
 func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			openai.WriteError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeds %d MB", tooBig.Limit>>20))
+			return
+		}
 		openai.WriteError(w, http.StatusBadRequest, "unable to read body")
 		return
 	}

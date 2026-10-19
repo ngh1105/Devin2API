@@ -35,3 +35,14 @@ func TestUserContentRejectsBadImages(t *testing.T) {
 		t.Errorf("audio part: %v", err)
 	}
 }
+
+func TestParseDataURLNormalises(t *testing.T) {
+	// image/jpg is mapped to image/jpeg; unpadded base64 is re-padded.
+	img, err := parseDataURL("data:image/jpg;base64,QUJDRA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.MimeType != "image/jpeg" || img.Base64 != "QUJDRA==" {
+		t.Errorf("got %+v", img)
+	}
+}
