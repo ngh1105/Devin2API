@@ -1,0 +1,11 @@
+# Build output
+/devin2api
+/devin2api.exe
+*.exe
+
+# Runtime data (contains OAuth tokens and API keys)
+/data/
+
+# Tool state
+/.omc/
+/.claude/
