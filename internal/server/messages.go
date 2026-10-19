@@ -27,7 +27,7 @@ func toDevinFromMessages(req anthropic.MessagesRequest) (devin.ChatRequest, erro
 	if req.TopP != nil {
 		out.TopP = *req.TopP
 	}
-	if out.Stop, err = stopList(req.StopSequences); err != nil {
+	if out.Stop, err = stopList(req.StopSequences, maxAnthropicStops); err != nil {
 		return out, err
 	}
 	system, err := anthropic.SystemText(req.System)

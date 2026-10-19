@@ -23,6 +23,7 @@ type chatStats struct {
 	path    string // "" disables persistence (tests)
 	mu      sync.Mutex
 	pending bool
+	writeMu sync.Mutex // one file write at a time
 }
 
 type statsFile struct {
@@ -72,6 +73,10 @@ func (c *chatStats) save() {
 	c.mu.Lock()
 	c.pending = false
 	c.mu.Unlock()
+	// A save scheduled while this one writes must not race it on the same
+	// temp file.
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	b, _ := json.MarshalIndent(statsFile{Requests: c.requests.Load(), Failed: c.failed.Load(), Since: c.since}, "", "  ")
 	tmp := c.path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {

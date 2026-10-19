@@ -43,7 +43,7 @@ func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
 	if err != nil {
 		return out, err
 	}
-	if out.Stop, err = stopList(stops); err != nil {
+	if out.Stop, err = stopList(stops, maxOpenAIStops); err != nil {
 		return out, err
 	}
 

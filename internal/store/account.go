@@ -39,38 +39,24 @@ type Usage struct {
 	CheckedAt              int64     `json:"checked_at"` // unix seconds
 }
 
-// v1Account captures legacy schema fields for deserialization + migration.
-type v1Account struct {
-	Schema    int64           `json:"schema"`
-	ID        string          `json:"id"`
-	Email     string          `json:"email"`
-	Sub       string          `json:"sub"`
-	OAuth     v1OAuth         `json:"oauth"`
-	Tokens    v1Tokens        `json:"tokens"`
-	Profile   v1Profile       `json:"profile"`
-	Usage     *any            `json:"usage"`
-	CreatedAt json.RawMessage `json:"created_at"`
-}
-
 // accountPlain is a field-identical shadow of Account with NO custom methods.
 // Used by UnmarshalJSON so that v2 records round-trip through plain JSON
 // without entering the v1 migration path.
 type accountPlain struct {
-	Schema               int64     `json:"schema"`
-	ID                   string    `json:"id"`
-	Email                string    `json:"email"`
-	UserName             string    `json:"user_name"`
-	UserID               string    `json:"user_id"`
-	OrgID                string    `json:"org_id"`
-	Plan                 string    `json:"plan"`
-	Nickname             string    `json:"nickname"`
-	Enabled              bool      `json:"enabled"`
-	AuthKind             string    `json:"auth_kind"`
-	CreatedAt            time.Time `json:"created_at"`
-	Tokens               Tokens    `json:"tokens"`
-	Usage                *Usage    `json:"usage"`
-	UsageErr             string    `json:"usage_error,omitempty"`
-	enabledExplicitlySet bool      `json:"-"`
+	Schema    int64     `json:"schema"`
+	ID        string    `json:"id"`
+	Email     string    `json:"email"`
+	UserName  string    `json:"user_name"`
+	UserID    string    `json:"user_id"`
+	OrgID     string    `json:"org_id"`
+	Plan      string    `json:"plan"`
+	Nickname  string    `json:"nickname"`
+	Enabled   bool      `json:"enabled"`
+	AuthKind  string    `json:"auth_kind"`
+	CreatedAt time.Time `json:"created_at"`
+	Tokens    Tokens    `json:"tokens"`
+	Usage     *Usage    `json:"usage"`
+	UsageErr  string    `json:"usage_error,omitempty"`
 }
 
 // hasV1TokenMarker reports whether raw JSON carries access_token in tokens,
@@ -199,26 +185,6 @@ func (a *Account) migrateFromV1(data []byte, parsed map[string]json.RawMessage) 
 	}
 
 	return nil
-}
-
-type v1OAuth struct {
-	ClientID    string `json:"client_id"`
-	Domain      string `json:"domain"`
-	Audience    string `json:"audience"`
-	RedirectURI string `json:"redirect_uri"`
-}
-
-type v1Tokens struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	IDToken      string `json:"id_token"`
-	ExpiresAt    int64  `json:"expires_at"`
-	Scope        string `json:"scope"`
-}
-
-type v1Profile struct {
-	Name    string `json:"name"`
-	Picture string `json:"picture"`
 }
 
 // Account matches schema v2: {"schema":2,"id":"acc_<8hex>",
@@ -499,28 +465,6 @@ func FormatSessionToken(value string) string {
 
 // ---------- import shapes ---------------------------------------------------
 
-var cliProxyDetectKeys = map[string]bool{
-	"api_key":       true,
-	"session_token": true,
-}
-
-var v2SchemaKeys = map[string]bool{
-	"schema":      true,
-	"id":          true,
-	"email":       true,
-	"user_name":   true,
-	"user_id":     true,
-	"org_id":      true,
-	"plan":        true,
-	"nickname":    true,
-	"auth_kind":   true,
-	"enabled":     true,
-	"created_at":  true,
-	"tokens":      true,
-	"usage":       true,
-	"usage_error": true,
-}
-
 var tokenBlobKeys = map[string]bool{
 	"access_token":  true,
 	"refresh_token": true,
@@ -536,29 +480,7 @@ func keysOf(m map[string]json.RawMessage) []string {
 }
 
 func keysToReason(keys []string) string {
-	s := make([]string, len(keys))
-	for i, k := range keys {
-		s[i] = k
-	}
-	return fmt.Sprintf("%v", s)
-}
-
-func hasAnyKey(m map[string]json.RawMessage, allowed map[string]bool) bool {
-	for k := range m {
-		if allowed[k] {
-			return true
-		}
-	}
-	return false
-}
-
-func isSubset(m map[string]json.RawMessage, allow map[string]bool) bool {
-	for k := range m {
-		if !allow[k] {
-			return false
-		}
-	}
-	return true
+	return fmt.Sprintf("%v", keys)
 }
 
 func hasBareEmailPass(m map[string]json.RawMessage) bool {
@@ -592,11 +514,6 @@ func isV2Schema(m map[string]json.RawMessage) bool {
 		}
 	}
 	return hasSchema || hasTokensObj
-}
-
-func hasKey(data []byte, key string) bool {
-	target := []byte(`"` + key + `":`)
-	return bytes.Contains(data, target)
 }
 
 func parseJSONRaw(raw json.RawMessage) (map[string]json.RawMessage, error) {

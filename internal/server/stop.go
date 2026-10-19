@@ -2,14 +2,19 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/ngh1105/Devin2API/internal/devin"
 )
 
-// maxStopSequences mirrors the OpenAI limit on stop sequences.
-const maxStopSequences = 4
+// Stop sequence limits: OpenAI documents 4; Anthropic sets no small limit,
+// so its cap only guards against abuse (each one is checked per delta).
+const (
+	maxOpenAIStops    = 4
+	maxAnthropicStops = 32
+)
 
 // errStopSequence aborts the upstream stream once a stop sequence appears.
 var errStopSequence = errors.New("stop sequence reached")
@@ -98,16 +103,16 @@ func (s *stopWatcher) safeLen(text string) int {
 	return cut
 }
 
-// stopList normalises a stop parameter given as a string or a string list.
-func stopList(stops []string) ([]string, error) {
+// stopList drops empty stop sequences and enforces the API's limit.
+func stopList(stops []string, limit int) ([]string, error) {
 	var out []string
 	for _, s := range stops {
 		if s != "" {
 			out = append(out, s)
 		}
 	}
-	if len(out) > maxStopSequences {
-		return nil, errors.New("at most 4 stop sequences are supported")
+	if len(out) > limit {
+		return nil, fmt.Errorf("at most %d stop sequences are supported", limit)
 	}
 	return out, nil
 }
