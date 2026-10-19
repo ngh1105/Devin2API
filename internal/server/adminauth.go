@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -12,8 +13,9 @@ import (
 const (
 	sessionCookie = "d2_admin"
 	sessionTTL    = 7 * 24 * time.Hour
-	// Failed logins are slowed down and capped per minute (server-wide), so
-	// a password exposed on the LAN cannot be brute-forced quickly.
+	// Failed logins are slowed down and capped per minute per client IP,
+	// so a password exposed on the LAN cannot be brute-forced quickly and
+	// one noisy client cannot lock everyone else out.
 	loginFailsPerMinute = 10
 )
 
@@ -26,10 +28,14 @@ var loginFailDelay = 500 * time.Millisecond
 type adminAuth struct {
 	password string // "" = no login required
 
-	mu        sync.Mutex
-	sessions  map[string]time.Time // token -> expiry
-	failWin   time.Time            // start of the current failure window
-	failCount int
+	mu       sync.Mutex
+	sessions map[string]time.Time  // token -> expiry
+	fails    map[string]failWindow // client IP -> failures this minute
+}
+
+type failWindow struct {
+	start time.Time
+	count int
 }
 
 func (a *adminAuth) enabled() bool { return a.password != "" }
@@ -40,20 +46,41 @@ func (a *adminAuth) checkPassword(p string) bool {
 	return subtle.ConstantTimeCompare(want[:], got[:]) == 1
 }
 
-// allowAttempt reports whether another login attempt is allowed now.
-func (a *adminAuth) allowAttempt() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if time.Since(a.failWin) > time.Minute {
-		a.failWin, a.failCount = time.Now(), 0
+// clientIP is the request's remote address without the port. Behind a
+// reverse proxy every client shares the proxy's IP, which only makes the
+// limit stricter.
+func clientIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
 	}
-	return a.failCount < loginFailsPerMinute
+	return r.RemoteAddr
 }
 
-func (a *adminAuth) recordFailure() {
+// allowAttempt reports whether ip may try another login now.
+func (a *adminAuth) allowAttempt(ip string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.failCount++
+	now := time.Now()
+	for k, w := range a.fails {
+		if now.Sub(w.start) > time.Minute {
+			delete(a.fails, k)
+		}
+	}
+	return a.fails[ip].count < loginFailsPerMinute
+}
+
+func (a *adminAuth) recordFailure(ip string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.fails == nil {
+		a.fails = map[string]failWindow{}
+	}
+	w := a.fails[ip]
+	if w.count == 0 {
+		w.start = time.Now()
+	}
+	w.count++
+	a.fails[ip] = w
 }
 
 func (a *adminAuth) newSession() string {
@@ -133,7 +160,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
 		return
 	}
-	if !s.auth.allowAttempt() {
+	ip := clientIP(r)
+	if !s.auth.allowAttempt(ip) {
 		writeErr(w, http.StatusTooManyRequests, "too many failed logins; try again in a minute")
 		return
 	}
@@ -145,7 +173,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.auth.checkPassword(body.Password) {
-		s.auth.recordFailure()
+		s.auth.recordFailure(ip)
 		time.Sleep(loginFailDelay)
 		writeErr(w, http.StatusUnauthorized, "wrong password")
 		return

@@ -20,30 +20,11 @@ func mustStore(t *testing.T) *AccountStore {
 	return s
 }
 
-func tokenStorePath(t *testing.T) string {
-	t.Helper()
-	ts, err := NewTokenStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewTokenStore: %v", err)
-	}
-	return filepath.Join(ts.dir, "tokens.json")
-}
-
 func mustTokenStore(t *testing.T) *TokenStore {
 	t.Helper()
 	s, err := NewTokenStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewTokenStore: %v", err)
-	}
-	return s
-}
-
-func mustTokenStoreFromPath(t *testing.T, idxPath string) *TokenStore {
-	t.Helper()
-	dir := filepath.Dir(idxPath)
-	s, err := NewTokenStore(dir)
-	if err != nil {
-		t.Fatalf("NewTokenStore from path: %v", err)
 	}
 	return s
 }

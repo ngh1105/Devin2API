@@ -139,6 +139,20 @@ func quotaExhausted(a *store.Account, now time.Time) bool {
 		(u.WeeklyRemainingPercent <= 0 && u.WeeklyResetAt.After(now))
 }
 
+// quotaResetAt is when an exhausted account gets quota back: the later
+// reset among the windows (daily, weekly) that are empty.
+func quotaResetAt(a *store.Account, now time.Time) time.Time {
+	u := a.Usage
+	var at time.Time
+	if u.DailyRemainingPercent <= 0 && u.DailyResetAt.After(now) {
+		at = u.DailyResetAt
+	}
+	if u.WeeklyRemainingPercent <= 0 && u.WeeklyResetAt.After(at) {
+		at = u.WeeklyResetAt
+	}
+	return at
+}
+
 // quotaBand buckets the remaining quota into tenths (0..10), using the
 // tighter of the daily and weekly limits. Unknown usage ranks highest so
 // fresh accounts get tried and their usage gets learned.
@@ -179,8 +193,8 @@ func (s *Server) chatAccounts(model string) []*store.Account {
 		}
 		if quotaExhausted(a, now) {
 			r.degraded = true
-			if a.Usage.DailyResetAt.After(r.readyAt) {
-				r.readyAt = a.Usage.DailyResetAt
+			if reset := quotaResetAt(a, now); reset.After(r.readyAt) {
+				r.readyAt = reset
 			}
 		}
 		if a.UsageErr == tokenExpiredMsg {

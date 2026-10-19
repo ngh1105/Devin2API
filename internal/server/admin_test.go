@@ -19,17 +19,6 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Wire type constant for protobuf helpers
-// ---------------------------------------------------------------------------
-
-const wireBytesVal = 2 // same as devin.WireTypeBytes
-
-func pwTag(field int, w byte) []byte       { return devin.PwTag(field, int(w)) }
-func pwVarint(v uint64) []byte             { return devin.PwVarint(v) }
-func pwString(f int, s string) []byte      { return devin.PwString(f, s) }
-func pwFieldVarint(f int, v uint64) []byte { return devin.PwFieldVarint(f, v) }
-
-// ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
