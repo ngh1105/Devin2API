@@ -756,3 +756,42 @@ func TestV1MigrationEnabledFalsePersists(t *testing.T) {
 		t.Errorf("session_token = %q; want %q", a.Tokens.SessionToken, wantTok)
 	}
 }
+
+func TestImportRejectsTraversalID(t *testing.T) {
+	store := mustStore(t)
+	for _, id := range []string{`../../evil`, `..\..\evil`, `a/b`, `x.json`} {
+		raw := `{"schema":2,"id":"` + id + `","tokens":{"session_token":"tok"}}`
+		if _, err := store.Import([]byte(raw)); err == nil {
+			t.Errorf("Import with id %q: expected error", id)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(store.dir), "evil.json")); err == nil {
+		t.Fatal("traversal id escaped the store directory")
+	}
+}
+
+func TestImportDoesNotMutateStoredRecord(t *testing.T) {
+	store := mustStore(t)
+	base := AccountFromLogin("orig", "usr_mut", "org", "tok1", "m@example.com", nil)
+	if err := store.Save(base); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	// Mutating the caller's pointer after Save must not leak into the store.
+	base.UserName = "leaked"
+	got, _ := store.Get(base.ID)
+	if got.UserName != "orig" {
+		t.Errorf("store shares caller pointer: user_name=%q", got.UserName)
+	}
+	imported, err := store.Import([]byte(`{"schema":2,"user_id":"usr_mut","user_name":"new","tokens":{"session_token":"tok2"}}`))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	imported.UserName = "leaked-again"
+	got, _ = store.Get(base.ID)
+	if got.UserName != "new" {
+		t.Errorf("user_name=%q, want new", got.UserName)
+	}
+	if !got.CreatedAt.Equal(base.CreatedAt) {
+		t.Errorf("created_at changed on upsert")
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -311,8 +312,38 @@ func (s *AccountStore) Get(id string) (*Account, error) {
 	return &cp, nil
 }
 
+// validID restricts account ids to a filename-safe charset so an imported id
+// can never escape the store directory (e.g. "../../x").
+var validID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// ValidID reports whether id is safe to use as an account file name.
+func ValidID(id string) bool { return validID.MatchString(id) }
+
 // Save atomically writes account to <id>.json in the store directory.
+// The store keeps its own copy, so later mutations of a do not leak in.
 func (s *AccountStore) Save(a *Account) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saveLocked(a)
+}
+
+// Upsert saves a, merging it into an existing account with the same user_id
+// (or email) instead of creating a duplicate. Returns a copy of the stored record.
+func (s *AccountStore) Upsert(a *Account) (*Account, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	merged := s.mergeExistingLocked(a)
+	if err := s.saveLocked(merged); err != nil {
+		return nil, err
+	}
+	cp := *merged
+	return &cp, nil
+}
+
+func (s *AccountStore) saveLocked(a *Account) error {
+	if !ValidID(a.ID) {
+		return fmt.Errorf("invalid account id %q", a.ID)
+	}
 	data, err := json.MarshalIndent(a, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal account %s: %w", a.ID, err)
@@ -326,14 +357,16 @@ func (s *AccountStore) Save(a *Account) error {
 		os.Remove(tmp)
 		return fmt.Errorf("rename %s → %s: %w", tmp, path, err)
 	}
-	s.mu.Lock()
-	s.accounts[a.ID] = a
-	s.mu.Unlock()
+	cp := *a
+	s.accounts[a.ID] = &cp
 	return nil
 }
 
 // Delete removes the file for id from disk and drops it from memory.
 func (s *AccountStore) Delete(id string) error {
+	if !ValidID(id) {
+		return os.ErrNotExist
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.accounts, id)
@@ -358,10 +391,10 @@ func (s *AccountStore) Import(raw json.RawMessage) (*Account, error) {
 		if err != nil {
 			return nil, err
 		}
-		return upsertByUserOrEmail(s, acct), nil
+		return s.Upsert(acct)
 	case isCLIProxyAPIShape(parsed):
 		acct := importCLIProxyAPI(parsed)
-		return upsertByUserOrEmail(s, acct), nil
+		return s.Upsert(acct)
 	default:
 		// Bare token blob — must have at least one token key.
 		// Identity/known keys are tolerated; truly unknown keys cause an error.
@@ -387,7 +420,7 @@ func (s *AccountStore) Import(raw json.RawMessage) (*Account, error) {
 			}
 		}
 		acct := importBareToken(parsed)
-		return upsertByUserOrEmail(s, acct), nil
+		return s.Upsert(acct)
 	}
 }
 
@@ -602,6 +635,9 @@ func importSchemaV2(m map[string]json.RawMessage) (*Account, error) {
 	}
 
 	setField("id", &acct.ID)
+	if acct.ID != "" && !ValidID(acct.ID) {
+		return nil, &ImportError{"invalid id: only letters, digits, '_' and '-' allowed"}
+	}
 	setField("email", &acct.Email)
 	setField("user_name", &acct.UserName)
 	setField("user_id", &acct.UserID)
@@ -682,20 +718,31 @@ func importCLIProxyAPI(m map[string]json.RawMessage) *Account {
 
 // ---------- upsert / merge --------------------------------------------------
 
-func upsertByUserOrEmail(store *AccountStore, newAcct *Account) *Account {
+// mergeExistingLocked returns newAcct merged onto a copy of the stored account
+// with the same user_id (falling back to email), keeping that account's id and
+// created_at. The stored record is never mutated in place. Caller holds s.mu.
+func (s *AccountStore) mergeExistingLocked(newAcct *Account) *Account {
+	find := func(match func(*Account) bool) *Account {
+		for _, a := range s.accounts {
+			if match(a) {
+				return a
+			}
+		}
+		return nil
+	}
+	var old *Account
 	if newAcct.UserID != "" {
-		if old := findIndex(store, func(a *Account) bool { return a.UserID == newAcct.UserID }); old != nil {
-			mergeOnlyExplicitFields(old, newAcct)
-			return old
-		}
+		old = find(func(a *Account) bool { return a.UserID == newAcct.UserID })
 	}
-	if newAcct.Email != "" {
-		if old := findIndex(store, func(a *Account) bool { return a.Email == newAcct.Email }); old != nil {
-			mergeOnlyExplicitFields(old, newAcct)
-			return old
-		}
+	if old == nil && newAcct.Email != "" {
+		old = find(func(a *Account) bool { return a.Email == newAcct.Email })
 	}
-	return newAcct
+	if old == nil {
+		return newAcct
+	}
+	merged := *old
+	mergeOnlyExplicitFields(&merged, newAcct)
+	return &merged
 }
 
 func mergeOnlyExplicitFields(dst, src *Account) {
@@ -743,17 +790,6 @@ func mergeOnlyExplicitFields(dst, src *Account) {
 	}
 }
 
-func findIndex(store *AccountStore, match func(*Account) bool) *Account {
-	store.mu.RLock()
-	defer store.mu.RUnlock()
-	for _, a := range store.accounts {
-		if match(a) {
-			return a
-		}
-	}
-	return nil
-}
-
 // ---------- disk loading / migration ----------------------------------------
 
 func genHex(prefix string, nbytes int) string {
@@ -784,7 +820,7 @@ func loadAllAccounts(path string) (map[string]*Account, error) {
 			continue
 		}
 		var acc Account
-		if err := json.Unmarshal(data, &acc); err != nil {
+		if err := json.Unmarshal(data, &acc); err != nil || !ValidID(acc.ID) {
 			continue
 		}
 		result[acc.ID] = &acc
