@@ -28,9 +28,12 @@
 
   // ---- API helpers ----
 
+  // X-Devin2API marks requests as coming from this panel; the server rejects
+  // state-changing admin calls without it (CSRF guard).
+
   function apiPost(path, body) {
     body = body || "";
-    return fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: body })
+    return fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Devin2API": "1" }, body: body })
       .then(checkStatus)
       .then(parseJSON);
   }
@@ -40,11 +43,11 @@
   }
 
   function apiDelete(path) {
-    return fetch(path, { method: "DELETE" }).then(checkStatus);
+    return fetch(path, { method: "DELETE", headers: { "X-Devin2API": "1" } }).then(checkStatus);
   }
 
   function apiPatch(path, body) {
-    return fetch(path, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: body })
+    return fetch(path, { method: "PATCH", headers: { "Content-Type": "application/json", "X-Devin2API": "1" }, body: body })
       .then(checkStatus)
       .then(parseJSON);
   }
@@ -457,7 +460,8 @@
       var codeEl = document.createElement("code");
       codeEl.title = "Click to copy";
       codeEl.onclick = function () {
-        navigator.clipboard.writeText(tok.token).then(function () { toast("Copied!", "#34d399"); });
+        // tok is scoped to the create callback below; copy what is displayed.
+        navigator.clipboard.writeText(codeEl.textContent).then(function () { toast("Copied!", "#34d399"); });
       };
       // Assemble fresh: clear any stale content first.
       while (box.firstChild) { box.removeChild(box.firstChild); }

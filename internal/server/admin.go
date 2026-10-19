@@ -17,9 +17,18 @@ import (
 
 // --- accountExpired wrapper for list -----------------------------------------
 
+// accountExpired is the admin API view of an Account. The session token is
+// masked: the panel only needs to know one exists, and returning it would let
+// any page that can read the API exfiltrate a live Devin credential.
 type accountExpired struct {
 	*store.Account
 	Expired bool `json:"expired"`
+}
+
+func viewAccount(a *store.Account) accountExpired {
+	cp := *a
+	cp.Tokens.SessionToken = store.MaskSecret(a.Tokens.SessionToken)
+	return accountExpired{Account: &cp, Expired: a.Expired()}
 }
 
 // ---------------------------------------------------------------------------
@@ -58,9 +67,17 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.handleLoginManual(w, r)
 	case strings.HasPrefix(prefix, "/accounts/") && strings.HasSuffix(prefix, "/usage/refresh"):
 		parts := strings.SplitN(strings.TrimPrefix(prefix, "/accounts/"), "/", 2)
+		if !store.ValidID(parts[0]) || parts[1] != "usage/refresh" {
+			writeErr(w, http.StatusNotFound, "not found")
+			return
+		}
 		s.usageRefresh(w, r, parts[0])
 	case strings.HasPrefix(prefix, "/accounts/"):
 		id := strings.TrimPrefix(prefix, "/accounts/")
+		if !store.ValidID(id) {
+			writeErr(w, http.StatusNotFound, "not found")
+			return
+		}
 		switch r.Method {
 		case http.MethodDelete:
 			s.deleteAccount(w, r, id)
@@ -130,9 +147,9 @@ func (s *Server) startLogin(ctx context.Context) (string, error) {
 		usage, _ = devin.FetchUserStatus(useCtx, s.loginServerBase, sessToken)
 		useDone()
 
-		acc := store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, usage)
-
-		if err := s.accounts.Save(acc); err != nil {
+		// Upsert: logging in again with the same Devin user updates it in place.
+		acc, err := s.accounts.Upsert(store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, usage))
+		if err != nil {
 			s.loginMngr.ResolveError(err.Error(), mgrGen)
 			return
 		}
@@ -154,11 +171,7 @@ func handleLoginManualDirect(s *Server, rawToken string) (*store.Account, error)
 	useCtx, useDone := context.WithTimeout(context.Background(), time.Second*120)
 	usage, _ = devin.FetchUserStatus(useCtx, s.loginServerBase, sessToken)
 	useDone()
-	acc := store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, usage)
-	if err := s.accounts.Save(acc); err != nil {
-		return nil, err
-	}
-	return acc, nil
+	return s.accounts.Upsert(store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, usage))
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +196,7 @@ func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]accountExpired, len(accs))
 	for i, a := range accs {
-		out[i] = accountExpired{Account: a, Expired: a.Expired()}
+		out[i] = viewAccount(a)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
@@ -202,16 +215,12 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, importErr.Reason)
 			return
 		}
-		writeErr(w, http.StatusInternalServerError, "import failed")
-		return
-	}
-	if err := s.accounts.Save(acct); err != nil {
 		writeErr(w, http.StatusInternalServerError, "unable to save account")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(acct)
+	json.NewEncoder(w).Encode(viewAccount(acct))
 }
 
 func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
@@ -236,6 +245,10 @@ func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "unable to list tokens")
 		return
 	}
+	// The plaintext value is only returned once, by createToken.
+	for i := range toks {
+		toks[i].Token = store.MaskSecret(toks[i].Token)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(toks)
 }
@@ -252,19 +265,11 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteToken(w http.ResponseWriter, r *http.Request, id string) {
-	toks, _ := s.tokens.List()
-	found := false
-	for _, t := range toks {
-		if t.ID == id {
-			found = true
-			break
-		}
-	}
-	if !found {
-		writeErr(w, http.StatusNotFound, "token not found")
-		return
-	}
 	if err := s.tokens.Delete(id); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeErr(w, http.StatusNotFound, "token not found")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "unable to delete token")
 		return
 	}
@@ -349,7 +354,7 @@ func (s *Server) handleLoginManual(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(acc)
+	json.NewEncoder(w).Encode(viewAccount(acc))
 }
 
 // ---------------------------------------------------------------------------
@@ -405,7 +410,7 @@ func (s *Server) usageRefresh(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(accountExpired{Account: acct, Expired: acct.Expired()})
+	json.NewEncoder(w).Encode(viewAccount(acct))
 }
 
 // ---------------------------------------------------------------------------
@@ -464,7 +469,7 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(accountExpired{Account: acct, Expired: acct.Expired()})
+	json.NewEncoder(w).Encode(viewAccount(acct))
 }
 
 // ---------------------------------------------------------------------------
@@ -497,6 +502,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 // writeErr writes a JSON {"error":"..."} response with status code and content-type.
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

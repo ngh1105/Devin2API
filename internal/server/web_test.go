@@ -20,7 +20,7 @@ func TestWebRoutesSpa(t *testing.T) {
 	srv := makeTestServer(t, tmp)
 
 	// 1) GET / → 302 to /web/.
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := adminRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -33,7 +33,7 @@ func TestWebRoutesSpa(t *testing.T) {
 	}
 
 	// 2) GET /web/ → 200, body contains id="app".
-	req = httptest.NewRequest(http.MethodGet, "/web/", nil)
+	req = adminRequest(http.MethodGet, "/web/", nil)
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -46,7 +46,7 @@ func TestWebRoutesSpa(t *testing.T) {
 	}
 
 	// 3) GET /web/index.html → 200.
-	req = httptest.NewRequest(http.MethodGet, "/web/index.html", nil)
+	req = adminRequest(http.MethodGet, "/web/index.html", nil)
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -55,7 +55,7 @@ func TestWebRoutesSpa(t *testing.T) {
 	}
 
 	// 4) GET /web/app.js → 200, content-type text/javascript.
-	req = httptest.NewRequest(http.MethodGet, "/web/app.js", nil)
+	req = adminRequest(http.MethodGet, "/web/app.js", nil)
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -68,7 +68,7 @@ func TestWebRoutesSpa(t *testing.T) {
 	}
 
 	// 5) GET /web/styles.css → 200, content-type text/css.
-	req = httptest.NewRequest(http.MethodGet, "/web/styles.css", nil)
+	req = adminRequest(http.MethodGet, "/web/styles.css", nil)
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -81,7 +81,7 @@ func TestWebRoutesSpa(t *testing.T) {
 	}
 
 	// 6) GET /web/accounts.html → 404 (old file removed).
-	req = httptest.NewRequest(http.MethodGet, "/web/accounts.html", nil)
+	req = adminRequest(http.MethodGet, "/web/accounts.html", nil)
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -90,7 +90,7 @@ func TestWebRoutesSpa(t *testing.T) {
 	}
 
 	// 7) GET /web/tokens.html → 404 (old file removed).
-	req = httptest.NewRequest(http.MethodGet, "/web/tokens.html", nil)
+	req = adminRequest(http.MethodGet, "/web/tokens.html", nil)
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -119,7 +119,7 @@ func TestAdminAPIWorks(t *testing.T) {
 	srv := makeTestServer(t, tmp)
 
 	// Settings endpoint should return correct JSON.
-	req := httptest.NewRequest(http.MethodGet, "/admin/api/settings", nil)
+	req := adminRequest(http.MethodGet, "/admin/api/settings", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 

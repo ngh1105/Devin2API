@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -71,7 +72,7 @@ func TestLoginStartReplaces(t *testing.T) {
 	srv := newTestServer(t, "", "")
 
 	// --- first start ---------------------------------------------------------
-	req1 := httptest.NewRequest(http.MethodPost, "/admin/api/login/start", nil)
+	req1 := adminRequest(http.MethodPost, "/admin/api/login/start", nil)
 	rec1 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec1, req1)
 	if rec1.Code != http.StatusOK {
@@ -85,7 +86,7 @@ func TestLoginStartReplaces(t *testing.T) {
 		t.Fatal("expected non-empty login_url")
 	}
 
-	stReq := httptest.NewRequest(http.MethodGet, "/admin/api/login/status", nil)
+	stReq := adminRequest(http.MethodGet, "/admin/api/login/status", nil)
 	stRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(stRec, stReq)
 	var stResp map[string]string
@@ -101,7 +102,7 @@ func TestLoginStartReplaces(t *testing.T) {
 	}
 
 	// --- second start replaces first -----------------------------------------
-	req2 := httptest.NewRequest(http.MethodPost, "/admin/api/login/start", nil)
+	req2 := adminRequest(http.MethodPost, "/admin/api/login/start", nil)
 	rec2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec2, req2)
 	var resp2 struct {
@@ -114,7 +115,7 @@ func TestLoginStartReplaces(t *testing.T) {
 
 	// --- Port closure assertion: dial captured port via net.DialTimeout --------
 	if firstPort > 0 {
-		cancelReq := httptest.NewRequest(http.MethodPost, "/admin/api/login/cancel", nil)
+		cancelReq := adminRequest(http.MethodPost, "/admin/api/login/cancel", nil)
 		cancelRec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(cancelRec, cancelReq)
 
@@ -129,7 +130,7 @@ func TestLoginStartReplaces(t *testing.T) {
 		}
 	}
 
-	checkIdle := httptest.NewRequest(http.MethodGet, "/admin/api/login/status", nil)
+	checkIdle := adminRequest(http.MethodGet, "/admin/api/login/status", nil)
 	checkRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(checkRec, checkIdle)
 	var idleSt map[string]string
@@ -197,7 +198,7 @@ func TestLoginLifecycleFull(t *testing.T) {
 	srv := newTestServer(t, apiSrv.URL, "")
 
 	// POST start — verifies StartLogin binds real loopback port.
-	startReq := httptest.NewRequest(http.MethodPost, "/admin/api/login/start", nil)
+	startReq := adminRequest(http.MethodPost, "/admin/api/login/start", nil)
 	startRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(startRec, startReq)
 	if startRec.Code != http.StatusOK {
@@ -237,7 +238,7 @@ func TestLoginLifecycleFull(t *testing.T) {
 	srv.loginMngr.ResolveComplete(acc.ID, curGen)
 
 	// Verify manager state transitioned to complete.
-	statusReq := httptest.NewRequest(http.MethodGet, "/admin/api/login/status", nil)
+	statusReq := adminRequest(http.MethodGet, "/admin/api/login/status", nil)
 	statusRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(statusRec, statusReq)
 	var finalStatus map[string]string
@@ -289,7 +290,7 @@ func TestUsageRefreshSuccess(t *testing.T) {
 	srv.accounts.Save(seedAccount)
 
 	urlStr := "/admin/api/accounts/" + seedAccount.ID + "/usage/refresh"
-	req := httptest.NewRequest(http.MethodPost, urlStr, nil)
+	req := adminRequest(http.MethodPost, urlStr, nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -346,7 +347,7 @@ func TestUsageRefreshNoSessionToken(t *testing.T) {
 	srv.accounts.Save(base)
 
 	urlStr := "/admin/api/accounts/" + base.ID + "/usage/refresh"
-	req := httptest.NewRequest(http.MethodPost, urlStr, nil)
+	req := adminRequest(http.MethodPost, urlStr, nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -383,7 +384,7 @@ func TestUsageRefresh401(t *testing.T) {
 	srv.accounts.Save(acc)
 
 	urlStr := "/admin/api/accounts/" + acc.ID + "/usage/refresh"
-	req := httptest.NewRequest(http.MethodPost, urlStr, nil)
+	req := adminRequest(http.MethodPost, urlStr, nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -414,7 +415,7 @@ func TestPatchAccountNickname(t *testing.T) {
 	srv.accounts.Save(base)
 
 	body := `{"nickname": "New Nick"}`
-	req := httptest.NewRequest(http.MethodPatch, "/admin/api/accounts/"+base.ID, strings.NewReader(body))
+	req := adminRequest(http.MethodPatch, "/admin/api/accounts/"+base.ID, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -440,7 +441,7 @@ func TestPatchAccountEnabled(t *testing.T) {
 	srv.accounts.Save(base)
 
 	body := `{"enabled": false}`
-	req := httptest.NewRequest(http.MethodPatch, "/admin/api/accounts/"+base.ID, strings.NewReader(body))
+	req := adminRequest(http.MethodPatch, "/admin/api/accounts/"+base.ID, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -466,7 +467,7 @@ func TestPatchEmptyBody(t *testing.T) {
 	srv.accounts.Save(base)
 
 	body := `{}`
-	req := httptest.NewRequest(http.MethodPatch, "/admin/api/accounts/"+base.ID, strings.NewReader(body))
+	req := adminRequest(http.MethodPatch, "/admin/api/accounts/"+base.ID, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -488,7 +489,7 @@ func TestPatch404(t *testing.T) {
 	srv := newTestServer(t, "", "")
 
 	body := `{"nickname": "ghost"}`
-	req := httptest.NewRequest(http.MethodPatch, "/admin/api/accounts/nonexistent", strings.NewReader(body))
+	req := adminRequest(http.MethodPatch, "/admin/api/accounts/nonexistent", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -509,7 +510,7 @@ func TestStats(t *testing.T) {
 	srv.accounts.Save(a1)
 	srv.accounts.Save(a2)
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/api/stats", nil)
+	req := adminRequest(http.MethodGet, "/admin/api/stats", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -630,7 +631,7 @@ func TestAdminTokenLifecycle(t *testing.T) {
 	srv := newTestServer(t, "", "")
 
 	// Create a token.
-	createReq := httptest.NewRequest(http.MethodPost, "/admin/api/tokens", nil)
+	createReq := adminRequest(http.MethodPost, "/admin/api/tokens", nil)
 	createRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(createRec, createReq)
 	if createRec.Code != http.StatusCreated {
@@ -644,7 +645,7 @@ func TestAdminTokenLifecycle(t *testing.T) {
 	}
 
 	// List tokens — expect 1.
-	listReq := httptest.NewRequest(http.MethodGet, "/admin/api/tokens", nil)
+	listReq := adminRequest(http.MethodGet, "/admin/api/tokens", nil)
 	listRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(listRec, listReq)
 	if listRec.Code != http.StatusOK {
@@ -660,7 +661,7 @@ func TestAdminTokenLifecycle(t *testing.T) {
 	}
 
 	// Delete the token.
-	delReq := httptest.NewRequest(http.MethodDelete, "/admin/api/tokens/"+tokenID, nil)
+	delReq := adminRequest(http.MethodDelete, "/admin/api/tokens/"+tokenID, nil)
 	delRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(delRec, delReq)
 	if delRec.Code != http.StatusNoContent {
@@ -668,7 +669,7 @@ func TestAdminTokenLifecycle(t *testing.T) {
 	}
 
 	// List again — now empty.
-	listReq2 := httptest.NewRequest(http.MethodGet, "/admin/api/tokens", nil)
+	listReq2 := adminRequest(http.MethodGet, "/admin/api/tokens", nil)
 	listRec2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(listRec2, listReq2)
 	if listRec2.Code != http.StatusOK {
@@ -699,7 +700,7 @@ func TestLoginLifecycleAsync(t *testing.T) {
 	srv := newTestServer(t, apiSrv.URL, "")
 
 	// Start login via handler.
-	startReq := httptest.NewRequest(http.MethodPost, "/admin/api/login/start", nil)
+	startReq := adminRequest(http.MethodPost, "/admin/api/login/start", nil)
 	startRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(startRec, startReq)
 	if startRec.Code != http.StatusOK {
@@ -727,7 +728,7 @@ func TestLoginLifecycleAsync(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	for ctx.Err() == nil {
-		statusReq := httptest.NewRequest(http.MethodGet, "/admin/api/login/status", nil)
+		statusReq := adminRequest(http.MethodGet, "/admin/api/login/status", nil)
 		statusRec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(statusRec, statusReq)
 		var statusResp map[string]string
@@ -769,3 +770,90 @@ func TestLoginLifecycleAsync(t *testing.T) {
 }
 
 // ===================================================================
+
+// adminRequest builds a request the admin guard accepts: loopback Host and
+// the X-Devin2API marker header the panel sends.
+func adminRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("X-Devin2API", "1")
+	return req
+}
+
+// TestAdminGuards verifies the DNS-rebinding, cross-origin and CSRF checks.
+func TestAdminGuards(t *testing.T) {
+	srv := New(config.Config{Listen: ":0"}, mustAccounts(t), mustTokens(t))
+	cases := []struct {
+		name   string
+		method string
+		mutate func(r *http.Request)
+		want   int
+	}{
+		{"rebinding host", http.MethodGet, func(r *http.Request) { r.Host = "evil.example:8080" }, http.StatusForbidden},
+		{"cross origin", http.MethodGet, func(r *http.Request) { r.Header.Set("Origin", "https://evil.example") }, http.StatusForbidden},
+		{"post without marker", http.MethodPost, func(r *http.Request) { r.Header.Del("X-Devin2API") }, http.StatusForbidden},
+		{"same origin ok", http.MethodGet, func(r *http.Request) { r.Header.Set("Origin", "http://127.0.0.1:8080") }, http.StatusOK},
+		{"localhost ok", http.MethodGet, func(r *http.Request) { r.Host = "localhost:8080" }, http.StatusOK},
+		{"ipv6 loopback ok", http.MethodGet, func(r *http.Request) { r.Host = "[::1]:8080" }, http.StatusOK},
+	}
+	for _, tc := range cases {
+		req := adminRequest(tc.method, "/admin/api/tokens", nil)
+		tc.mutate(req)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, rec.Code, tc.want)
+		}
+	}
+}
+
+// TestAdminMasksSecrets verifies list responses never carry plaintext
+// session tokens or API keys.
+func TestAdminMasksSecrets(t *testing.T) {
+	accs := mustAccounts(t)
+	srv := New(config.Config{Listen: ":0"}, accs, mustTokens(t))
+	acc := store.AccountFromLogin("u", "usr_mask", "org", "eyJsecret.session.value", "m@x.io", nil)
+	if err := accs.Save(acc); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := srv.tokens.Create()
+
+	for _, path := range []string{"/admin/api/accounts", "/admin/api/tokens"} {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, adminRequest(http.MethodGet, path, nil))
+		body := rec.Body.String()
+		if strings.Contains(body, "eyJsecret.session.value") || strings.Contains(body, tok.Token) {
+			t.Errorf("%s leaked a plaintext secret: %s", path, body)
+		}
+	}
+}
+
+// TestAdminRejectsTraversalID verifies ids that could escape the data dir 404.
+func TestAdminRejectsTraversalID(t *testing.T) {
+	srv := New(config.Config{Listen: ":0"}, mustAccounts(t), mustTokens(t))
+	for _, p := range []string{"/admin/api/accounts/..%2F..%2Fx", "/admin/api/accounts/a.b/usage/refresh"} {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, adminRequest(http.MethodDelete, p, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: got %d, want 404", p, rec.Code)
+		}
+	}
+}
+
+func mustAccounts(t *testing.T) *store.AccountStore {
+	t.Helper()
+	s, err := store.NewAccountStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func mustTokens(t *testing.T) *store.TokenStore {
+	t.Helper()
+	s, err := store.NewTokenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
