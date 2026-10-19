@@ -63,7 +63,7 @@
   // ---- Admin login (only when the server has an admin password) ----
 
   function showAdminLogin() {
-    document.getElementById("login-overlay").className = "modal-overlay";
+    document.getElementById("login-overlay").classList.remove("hidden");
     document.getElementById("admin-password").focus();
   }
 
@@ -76,7 +76,7 @@
       apiPost("/admin/api/login", JSON.stringify({ password: pw })).then(function () {
         document.getElementById("admin-password").value = "";
         status.textContent = "";
-        document.getElementById("login-overlay").className = "modal-overlay hidden";
+        document.getElementById("login-overlay").classList.add("hidden");
         document.getElementById("btn-logout").classList.remove("hidden");
         onReady();
       }).catch(function (e) { status.textContent = e.message; });
