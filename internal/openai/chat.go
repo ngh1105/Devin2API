@@ -30,11 +30,13 @@ type ChatChoice struct {
 	FinishReason string        `json:"finish_reason"`
 }
 
-// AssistantText is an assistant message with optional reasoning text.
+// AssistantText is an assistant message with optional reasoning text and
+// tool calls.
 type AssistantText struct {
-	Role             string `json:"role"`
-	Content          string `json:"content"`
-	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // ChatChunk is one SSE event of a streaming completion.
@@ -56,9 +58,10 @@ type ChunkChoice struct {
 
 // Delta is the incremental content of a streaming chunk.
 type Delta struct {
-	Role             string `json:"role,omitempty"`
-	Content          string `json:"content,omitempty"`
-	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Role             string     `json:"role,omitempty"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // ErrUnsupportedContent is returned by TextContent for non-text parts.

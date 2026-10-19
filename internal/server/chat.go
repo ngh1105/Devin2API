@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -22,8 +24,9 @@ const defaultMaxTokens = 32000
 var errNoAccount = errors.New("no enabled Devin account with a session token; add one in the panel")
 
 // toDevinRequest converts an OpenAI chat request into a Devin chat request.
-// system/developer messages become the system prompt; tool messages and
-// non-text content are rejected because this proxy is text-only for now.
+// system/developer messages become the system prompt; assistant tool_calls
+// and "tool" results are forwarded so multi-turn agents work. Non-text
+// content parts are rejected.
 func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
 	out := devin.ChatRequest{Model: req.Model, MaxTokens: defaultMaxTokens, Temperature: 1.0}
 	if req.MaxTokens != nil && *req.MaxTokens > 0 {
@@ -32,6 +35,13 @@ func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
 	if req.Temperature != nil {
 		out.Temperature = *req.Temperature
 	}
+
+	tools, err := toDevinTools(req.Tools, req.ToolChoice)
+	if err != nil {
+		return out, err
+	}
+	out.Tools = tools
+
 	var system []string
 	for i, m := range req.Messages {
 		text, err := openai.TextContent(m.Content)
@@ -46,21 +56,65 @@ func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
 		case "user":
 			out.Prompts = append(out.Prompts, devin.Prompt{Source: devin.SourceUser, Text: text})
 		case "assistant":
-			out.Prompts = append(out.Prompts, devin.Prompt{Source: devin.SourceAssistant, Text: text})
+			p := devin.Prompt{Source: devin.SourceAssistant, Text: text}
+			for j, tc := range m.ToolCalls {
+				if tc.ID == "" || tc.Function.Name == "" {
+					return out, fmt.Errorf("messages[%d].tool_calls[%d]: id and function.name are required", i, j)
+				}
+				p.ToolCalls = append(p.ToolCalls, devin.ToolCall{ID: decodeToolCallID(tc.ID), Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+			}
+			out.Prompts = append(out.Prompts, p)
+		case "tool":
+			if m.ToolCallID == "" {
+				return out, fmt.Errorf("messages[%d]: tool_call_id is required for role \"tool\"", i)
+			}
+			out.Prompts = append(out.Prompts, devin.Prompt{Source: devin.SourceToolResult, Text: text, ToolCallID: decodeToolCallID(m.ToolCallID)})
 		default:
 			return out, fmt.Errorf("messages[%d]: role %q is not supported", i, m.Role)
 		}
 	}
 	out.System = strings.Join(system, "\n\n")
-	hasUser := false
+
+	// Upstream needs something to answer: a user message or a tool result.
+	hasInput := false
 	for _, p := range out.Prompts {
-		if p.Source == devin.SourceUser && strings.TrimSpace(p.Text) != "" {
-			hasUser = true
+		if (p.Source == devin.SourceUser && strings.TrimSpace(p.Text) != "") || p.Source == devin.SourceToolResult {
+			hasInput = true
 			break
 		}
 	}
-	if !hasUser {
+	if !hasInput {
 		return out, errors.New("at least one non-empty user message is required")
+	}
+	return out, nil
+}
+
+// toDevinTools converts OpenAI tool definitions. tool_choice "none" drops
+// the tools so the model answers in text; other choices are left to the
+// model (upstream has no forced-choice option).
+func toDevinTools(tools []openai.Tool, choice json.RawMessage) ([]devin.Tool, error) {
+	if string(choice) == `"none"` {
+		return nil, nil
+	}
+	var out []devin.Tool
+	seen := map[string]bool{}
+	for i, t := range tools {
+		if t.Type != "" && t.Type != "function" {
+			return nil, fmt.Errorf("tools[%d]: type %q is not supported", i, t.Type)
+		}
+		name := t.Function.Name
+		if name == "" {
+			return nil, fmt.Errorf("tools[%d]: function.name is required", i)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("tools[%d]: duplicate function name %q", i, name)
+		}
+		seen[name] = true
+		params := []byte(t.Function.Parameters)
+		if len(params) > 0 && (!json.Valid(params) || !strings.HasPrefix(strings.TrimSpace(string(params)), "{")) {
+			return nil, fmt.Errorf("tools[%d]: parameters must be a JSON schema object", i)
+		}
+		out = append(out, devin.Tool{Name: name, Description: t.Function.Description, Parameters: params})
 	}
 	return out, nil
 }
@@ -101,7 +155,7 @@ func failoverable(err error) bool {
 
 // streamWithFailover runs the chat on each usable account in turn until one
 // succeeds, fails after producing output, or fails with a non-retryable error.
-func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, onDelta func(text, thinking string) error) (*devin.ChatResult, error) {
+func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, onDelta func(devin.Delta) error) (*devin.ChatResult, error) {
 	accs := s.chatAccounts()
 	if len(accs) == 0 {
 		return nil, errNoAccount
@@ -109,9 +163,9 @@ func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, 
 	var lastErr error
 	for _, acc := range accs {
 		started := false
-		res, err := devin.StreamChat(ctx, s.loginServerBase, acc.Tokens.SessionToken, req, func(t, th string) error {
+		res, err := devin.StreamChat(ctx, s.loginServerBase, acc.Tokens.SessionToken, req, func(d devin.Delta) error {
 			started = true
-			return onDelta(t, th)
+			return onDelta(d)
 		})
 		if err == nil {
 			return res, nil
@@ -139,9 +193,15 @@ func (s *Server) markTokenExpired(id string) {
 	_ = s.accounts.Save(acc)
 }
 
-// finishReason maps a Devin stop reason to an OpenAI finish_reason.
-func finishReason(stop uint64) string {
-	switch stop {
+// finishReason maps a finished Devin result to an OpenAI finish_reason.
+// Any tool call means the client must act, whatever stop code was sent.
+func finishReason(res *devin.ChatResult) string {
+	if len(res.ToolCalls) > 0 {
+		return "tool_calls"
+	}
+	switch res.StopReason {
+	case devin.StopToolCalls:
+		return "tool_calls"
 	case 1, 3:
 		return "length"
 	case 11:
@@ -213,10 +273,10 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var text, thinking strings.Builder
-	res, err := s.streamWithFailover(r.Context(), dreq, func(t, th string) error {
-		text.WriteString(t)
-		thinking.WriteString(th)
-		return nil
+	res, err := s.streamWithFailover(r.Context(), dreq, func(d devin.Delta) error {
+		text.WriteString(d.Text)
+		thinking.WriteString(d.Thinking)
+		return nil // tool calls are read whole from res.ToolCalls
 	})
 	if err != nil {
 		s.stats.failed.Add(1)
@@ -227,8 +287,11 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, openai.ChatCompletion{
 		ID: id, Object: "chat.completion", Created: created, Model: model,
 		Choices: []openai.ChatChoice{{
-			Message:      openai.AssistantText{Role: "assistant", Content: text.String(), ReasoningContent: thinking.String()},
-			FinishReason: finishReason(res.StopReason),
+			Message: openai.AssistantText{
+				Role: "assistant", Content: text.String(), ReasoningContent: thinking.String(),
+				ToolCalls: openAIToolCalls(res.ToolCalls),
+			},
+			FinishReason: finishReason(res),
 		}},
 		Usage: usageOf(res),
 	})
@@ -260,8 +323,18 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request, dreq d
 	}
 
 	first := true
-	res, err := s.streamWithFailover(r.Context(), dreq, func(t, th string) error {
-		d := openai.Delta{Content: t, ReasoningContent: th}
+	res, err := s.streamWithFailover(r.Context(), dreq, func(dd devin.Delta) error {
+		d := openai.Delta{Content: dd.Text, ReasoningContent: dd.Thinking}
+		if tc := dd.ToolCall; tc != nil {
+			// First fragment of a call carries id/type/name; later ones only
+			// append arguments, matched by index as OpenAI clients expect.
+			idx := tc.Index
+			call := openai.ToolCall{Index: &idx, Function: openai.FunctionCall{Name: tc.Name, Arguments: tc.Arguments}}
+			if tc.ID != "" {
+				call.ID, call.Type = encodeToolCallID(tc.ID), "function"
+			}
+			d.ToolCalls = []openai.ToolCall{call}
+		}
 		if first {
 			d.Role = "assistant"
 			first = false
@@ -283,7 +356,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request, dreq d
 		}
 		return
 	}
-	reason := finishReason(res.StopReason)
+	reason := finishReason(res)
 	if err := send(openai.ChatChunk{Choices: []openai.ChunkChoice{{Delta: openai.Delta{}, FinishReason: &reason}}, Usage: usageOf(res)}); err != nil {
 		return
 	}
@@ -291,6 +364,55 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request, dreq d
 	if flusher != nil {
 		flusher.Flush()
 	}
+}
+
+// Upstream tool call ids can contain '#' and ':' (e.g. "get_weather:0#ab12"),
+// which clients that require [A-Za-z0-9_-] ids (Anthropic-format bridges)
+// reject. Such ids are sent to clients as "dv_" + base64url(raw) and decoded
+// back when the client returns them, so upstream always sees its own id.
+const toolIDPrefix = "dv_"
+
+var safeToolID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// encodeToolCallID makes an upstream id safe for clients. Ids that are
+// already safe pass through unchanged, unless they could be mistaken for an
+// encoded id.
+func encodeToolCallID(raw string) string {
+	if safeToolID.MatchString(raw) && !strings.HasPrefix(raw, toolIDPrefix) {
+		return raw
+	}
+	return toolIDPrefix + base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+// decodeToolCallID reverses encodeToolCallID. Ids it did not produce are
+// returned unchanged.
+func decodeToolCallID(id string) string {
+	enc, ok := strings.CutPrefix(id, toolIDPrefix)
+	if !ok {
+		return id
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(enc)
+	if err != nil || len(raw) == 0 {
+		return id
+	}
+	return string(raw)
+}
+
+// openAIToolCalls converts complete upstream tool calls for a non-streaming
+// response.
+func openAIToolCalls(calls []devin.ToolCall) []openai.ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]openai.ToolCall, len(calls))
+	for i, c := range calls {
+		args := c.Arguments
+		if args == "" {
+			args = "{}"
+		}
+		out[i] = openai.ToolCall{ID: encodeToolCallID(c.ID), Type: "function", Function: openai.FunctionCall{Name: c.Name, Arguments: args}}
+	}
+	return out
 }
 
 func usageOf(res *devin.ChatResult) *openai.Usage {

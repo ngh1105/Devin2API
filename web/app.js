@@ -404,7 +404,7 @@
     var entries = [
       ["/healthz", "GET", 'Returns {"status":"ok"}'],
       ["/v1/models", "GET", "List available models (OpenAI-compatible)"],
-      ["/v1/chat/completions", "POST", 'Chat completions via Devin (stream + non-stream, text only)'],
+      ["/v1/chat/completions", "POST", 'Chat completions via Devin (stream + non-stream, tool calls)'],
       ["/admin/api/accounts", "GET / POST", "List or import accounts"],
       ["/admin/api/stats", "GET", 'Returns {accounts,enabled,requests,failed}']
     ];
