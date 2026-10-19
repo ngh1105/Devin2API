@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -539,20 +540,28 @@ func TestImportPreservesNonMatchingFields(t *testing.T) {
 
 // --- atomic Save on read-only dir -------------------------------------------
 
+// TestAtomicNoPartialOnBadDir: a Save that cannot write leaves neither a
+// stray temp file nor an in-memory record the disk does not have.
 func TestAtomicNoPartialOnBadDir(t *testing.T) {
-	badDir := t.TempDir()
-	if err := os.Chmod(badDir, 0o000); err != nil {
+	dir := t.TempDir()
+	store, err := NewAccountStore(dir)
+	if err != nil {
+		t.Fatalf("NewAccountStore: %v", err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Skip("chmod not supported")
 	}
-	defer os.Chmod(badDir, 0o755)
-	store, err := NewAccountStore(badDir)
-	if err != nil {
-		t.Fatalf("NewAccountStore should succeed (mkdir ok): %v", err)
-	}
+	defer os.Chmod(dir, 0o755)
 	a := &Account{Schema: 2, ID: "bad-id", Email: "x@y.z", CreatedAt: time.Now()}
-	err = store.Save(a)
-	if err == nil {
-		t.Log("save did not fail on read-only dir (expected on Windows)")
+	if err := store.Save(a); err == nil {
+		// Windows ignores directory mode bits, and root bypasses them.
+		t.Skip("directory is still writable on this platform")
+	}
+	if _, err := store.Get("bad-id"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("failed Save left an in-memory record: %v", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("failed Save left files: %v", entries)
 	}
 }
 
