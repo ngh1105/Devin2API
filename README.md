@@ -209,7 +209,12 @@ If the token store is **empty** (no tokens created), `/v1/*` accepts requests wi
 How chat works:
 
 - Each request goes to `server.codeium.com/exa.api_server_pb.ApiServerService/GetChatMessage` (Connect + protobuf) using the session token of an enabled account.
-- Accounts are used round-robin. If an account's token is rejected (401) or its quota is exhausted (429/403) before any output is sent, the next account is tried. A rejected token is flagged in the panel so you can re-login.
+- Account choice per request:
+  - Accounts with more quota left are tried first, using the tighter of the daily and weekly remaining percent in 10% bands. Accounts in the same band take turns (round-robin).
+  - Usage is refreshed in the background every 10 minutes (first run ~5 s after start), so this ranking stays current without pressing Refresh.
+  - After a 429, the account is parked for that model until the reset Devin states ("reset in 21 minutes"), or 1 minute if it states none. Free-model rate limits apply per model, so the account keeps serving other models.
+  - Accounts that are parked, out of daily or weekly quota, or whose token was rejected go last. They are still tried, so a request only fails when every account fails.
+- If an account's token is rejected (401) or it hits a limit (429/403) before any output is sent, the next account is tried. A rejected token is flagged in the panel so you can re-login.
 - `model` accepts the ids from `/v1/models`. A `devin/` prefix is dropped and dots become dashes (`claude-sonnet-4.6` → `claude-sonnet-4-6`). A family name without an effort level picks one from the catalog, trying medium, then high, then low (`gpt-5-4` → `gpt-5-4-medium`).
 - `system`/`developer` messages become the system prompt; `user` and `assistant` messages become the conversation. `max_tokens` (default 32000) and `temperature` are forwarded.
 - System prompts are cleaned before going upstream: Devin rejects prompts that carry another agent's identity (e.g. "You are Claude Code, ...") with a misleading 403, so such lines, Claude Code billing headers and a few related lines are dropped. This applies to all three chat endpoints.

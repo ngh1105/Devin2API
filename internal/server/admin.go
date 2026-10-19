@@ -385,34 +385,22 @@ func (s *Server) usageRefresh(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	ctx, done := context.WithTimeout(r.Context(), time.Second*120)
-	usage, err := devin.FetchUserStatus(ctx, s.loginServerBase, acct.Tokens.SessionToken)
+	updated, err := s.refreshUsage(ctx, id)
 	done()
-
-	if errors.Is(err, devin.ErrTokenExpired) {
-		acct.UsageErr = "token expired or revoked"
-		acct.Usage = nil
-		_ = s.accounts.Save(acct)
+	switch {
+	case errors.Is(err, devin.ErrTokenExpired):
 		writeErr(w, http.StatusBadGateway, "token expired or revoked")
 		return
-	}
-	if err != nil {
+	case errors.Is(err, os.ErrNotExist):
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	case err != nil:
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
 
-	acct.Usage = usage
-	acct.UsageErr = ""
-	now := time.Now().Unix()
-	if acct.Usage != nil {
-		acct.Usage.CheckedAt = now
-	}
-	if err := s.accounts.Save(acct); err != nil {
-		writeErr(w, http.StatusInternalServerError, "unable to save account")
-		return
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(viewAccount(acct))
+	json.NewEncoder(w).Encode(viewAccount(updated))
 }
 
 // ---------------------------------------------------------------------------
@@ -438,23 +426,15 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
-	acct, err := s.accounts.Get(id)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeErr(w, http.StatusNotFound, "account not found")
-			return
-		}
-		writeErr(w, http.StatusInternalServerError, "unable to get account")
-		return
-	}
-
+	var nickname *string
+	var enabled *bool
 	if v, ok := rawBody["nickname"]; ok && *v != nil && string(*v) != "null" {
 		var val string
 		if err := json.Unmarshal(*v, &val); err != nil {
 			writeErr(w, http.StatusBadRequest, "invalid nickname")
 			return
 		}
-		acct.Nickname = val
+		nickname = &val
 	}
 	if v, ok := rawBody["enabled"]; ok && *v != nil && string(*v) != "null" {
 		var val bool
@@ -462,11 +442,22 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request, id string)
 			writeErr(w, http.StatusBadRequest, "invalid enabled")
 			return
 		}
-		acct.Enabled = val
+		enabled = &val
 	}
 
-	if err := s.accounts.Save(acct); err != nil {
+	// Patch applies the change under the store lock, so a concurrent
+	// background usage refresh cannot overwrite it.
+	if err := s.accounts.Patch(id, nickname, enabled); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeErr(w, http.StatusNotFound, "account not found")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "unable to save account")
+		return
+	}
+	acct, err := s.accounts.Get(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "unable to get account")
 		return
 	}
 

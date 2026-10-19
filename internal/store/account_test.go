@@ -822,3 +822,37 @@ func TestListStableOnCreatedAtTie(t *testing.T) {
 		}
 	}
 }
+
+// TestPatchPersists: Patch used to change only the in-memory record.
+func TestPatchPersists(t *testing.T) {
+	s := mustStore(t)
+	a := AccountFromLogin("u", "usr_p", "org", "tok", "p@x.io", nil)
+	if err := s.Save(a); err != nil {
+		t.Fatal(err)
+	}
+	nick, off := "work", false
+	if err := s.Patch(a.ID, &nick, &off); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := NewAccountStore(s.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := reloaded.Get(a.ID)
+	if got.Nickname != "work" || got.Enabled {
+		t.Errorf("after reload: nickname %q enabled %v", got.Nickname, got.Enabled)
+	}
+}
+
+func TestMutateKeepsID(t *testing.T) {
+	s := mustStore(t)
+	a := AccountFromLogin("u", "usr_m", "org", "tok", "", nil)
+	s.Save(a)
+	got, err := s.Mutate(a.ID, func(x *Account) { x.ID = "acc_other"; x.Nickname = "n" })
+	if err != nil || got.ID != a.ID || got.Nickname != "n" {
+		t.Errorf("got %+v err %v", got, err)
+	}
+	if _, err := s.Mutate("acc_missing", func(*Account) {}); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("missing: %v", err)
+	}
+}
