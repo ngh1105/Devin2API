@@ -3,134 +3,205 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Devin2API — Admin</title>
+<title>Devin2API Admin</title>
 <link rel="stylesheet" href="/web/styles.css">
 </head>
 <body id="app">
-<header>
-  <span>Devin2API</span><span style="color:#6b7280;font-weight:400;margin-left:.5rem;">Admin Panel</span>
-  <button id="btn-logout" class="hidden" style="float:right">Log out</button>
-</header>
+
+<!-- Icon sprite: referenced with <svg><use href="#i-name"/></svg> -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+  <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+  <symbol id="i-paste" viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M10 13l-2 2 2 2M14 13l2 2-2 2"/></symbol>
+</svg>
+
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">D</span>
+      <span class="brand-text"><strong>Devin2API</strong><small>Admin</small></span>
+    </div>
+    <nav class="tab-nav">
+      <button class="tab active" data-tab="accounts"><svg class="icon"><use href="#i-users"/></svg><span>Accounts</span></button>
+      <button class="tab" data-tab="tokens"><svg class="icon"><use href="#i-key"/></svg><span>API Keys</span></button>
+      <button class="tab" data-tab="logs"><svg class="icon"><use href="#i-list"/></svg><span>Logs</span></button>
+      <button class="tab" data-tab="settings"><svg class="icon"><use href="#i-gear"/></svg><span>Settings</span></button>
+      <button class="tab" data-tab="api"><svg class="icon"><use href="#i-code"/></svg><span>API</span></button>
+    </nav>
+    <div class="sidebar-foot">
+      <button id="btn-theme" class="btn-ghost" title="Toggle light / dark"><svg class="icon"><use href="#i-moon"/></svg><span>Theme</span></button>
+      <button id="btn-logout" class="btn-ghost hidden"><svg class="icon"><use href="#i-logout"/></svg><span>Log out</span></button>
+    </div>
+  </aside>
+
+  <div class="content">
+    <!-- Stats grid -->
+    <div class="stats-grid" id="stats-grid"></div>
+
+    <main id="main-content">
+      <!-- Accounts tab -->
+      <section id="tab-accounts" class="tab-panel active">
+        <div class="panel-head">
+          <div>
+            <h1>Accounts</h1>
+            <p class="lead">Devin accounts the proxy rotates through, ranked by quota left.</p>
+          </div>
+          <div class="toolbar">
+            <button id="btn-refresh-all" class="btn-secondary"><svg class="icon"><use href="#i-refresh"/></svg>Refresh all</button>
+            <button id="btn-add-account"><svg class="icon"><use href="#i-plus"/></svg>Add account</button>
+          </div>
+        </div>
+        <div class="card table-card">
+          <table id="acct-table">
+            <thead>
+              <tr>
+                <th>Identity</th>
+                <th>Nickname</th>
+                <th>Plan</th>
+                <th>Status</th>
+                <th>Usage</th>
+                <th>Plan end</th>
+                <th class="col-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- API Keys tab -->
+      <section id="tab-tokens" class="tab-panel">
+        <div class="panel-head">
+          <div>
+            <h1>API Keys</h1>
+            <p class="lead">Keys clients send as <code>Authorization: Bearer</code> or <code>x-api-key</code>. With no keys, only local clients may call /v1.</p>
+          </div>
+          <div class="toolbar">
+            <button id="btn-create-token"><svg class="icon"><use href="#i-plus"/></svg>Create key</button>
+          </div>
+        </div>
+        <div id="new-token-box" class="new-token-box hidden"></div>
+        <div class="card table-card">
+          <table id="tok-table">
+            <thead>
+              <tr><th>ID</th><th>Created</th><th>Last used</th><th class="col-actions">Revoke</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Logs tab -->
+      <section id="tab-logs" class="tab-panel">
+        <div class="panel-head">
+          <div>
+            <h1>Logs</h1>
+            <p class="lead">Last 200 chat requests since the server started. Metadata only: no prompts or outputs are recorded.</p>
+          </div>
+          <div class="toolbar">
+            <button id="btn-refresh-logs" class="btn-secondary"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button>
+          </div>
+        </div>
+        <div class="card table-card">
+          <table id="log-table">
+            <thead>
+              <tr><th>Time</th><th>Endpoint</th><th>Model</th><th>Account</th><th>Status</th><th>Duration</th><th>Tokens in/out</th><th>Detail</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Settings tab -->
+      <section id="tab-settings" class="tab-panel">
+        <div class="panel-head">
+          <div>
+            <h1>Settings</h1>
+            <p class="lead">Changes to these values require environment variables and a restart.</p>
+          </div>
+        </div>
+        <div class="card">
+          <dl id="settings-dl" class="kv"></dl>
+        </div>
+      </section>
+
+      <!-- API tab -->
+      <section id="tab-api" class="tab-panel">
+        <div class="panel-head">
+          <div>
+            <h1>API</h1>
+            <p class="lead">OpenAI- and Anthropic-compatible endpoints served by this proxy.</p>
+          </div>
+        </div>
+        <div class="card">
+          <dl id="api-dl" class="endpoints"></dl>
+        </div>
+        <h2 class="section-title">Quick start</h2>
+        <pre id="curl-example" class="code-block"></pre>
+      </section>
+    </main>
+  </div>
+</div>
 
 <!-- Admin login (shown when DEVIN2API_ADMIN_PASSWORD is set) -->
 <div id="login-overlay" class="modal-overlay hidden">
-  <form class="modal" id="admin-login-form">
-    <h3>Admin login</h3>
+  <form class="modal modal-sm" id="admin-login-form">
+    <div class="brand brand-center">
+      <span class="brand-mark">D</span>
+      <span class="brand-text"><strong>Devin2API</strong><small>Admin login</small></span>
+    </div>
     <input id="admin-password" type="password" placeholder="Admin password" autocomplete="current-password" required>
-    <button type="submit">Log in</button>
+    <button type="submit" class="btn-block">Log in</button>
     <p id="admin-login-status" class="status-msg"></p>
   </form>
 </div>
 
-<!-- Stats grid -->
-<div class="stats-grid" id="stats-grid"></div>
-
-<!-- Tab navigation -->
-<nav class="tab-nav">
-  <button class="tab active" data-tab="accounts">Accounts</button>
-  <button class="tab" data-tab="tokens">API Keys</button>
-  <button class="tab" data-tab="logs">Logs</button>
-  <button class="tab" data-tab="settings">Settings</button>
-  <button class="tab" data-tab="api">API</button>
-</nav>
-
-<main id="main-content">
-  <!-- Accounts tab -->
-  <section id="tab-accounts" class="tab-panel active">
-    <div class="toolbar">
-      <button id="btn-add-account">Add account</button>
-      <button id="btn-refresh-all">Refresh all</button>
-    </div>
-    <table id="acct-table">
-      <thead>
-        <tr>
-          <th>Identity</th>
-          <th>Nickname</th>
-          <th>Plan</th>
-          <th>Status</th>
-          <th>Usage</th>
-          <th>Plan end</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </section>
-
-  <!-- API Keys tab -->
-  <section id="tab-tokens" class="tab-panel">
-    <div class="toolbar">
-      <button id="btn-create-token">Create key</button>
-    </div>
-    <div id="new-token-box" class="new-token-box hidden"></div>
-    <table id="tok-table">
-      <thead>
-        <tr><th>ID</th><th>Created</th><th>Last used</th><th>Revoke</th></tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </section>
-
-  <!-- Logs tab -->
-  <section id="tab-logs" class="tab-panel">
-    <div class="toolbar">
-      <button id="btn-refresh-logs">Refresh</button>
-    </div>
-    <p class="note">Last 200 chat requests since the server started. Metadata only: no prompts or outputs are recorded.</p>
-    <table id="log-table">
-      <thead>
-        <tr><th>Time</th><th>Endpoint</th><th>Model</th><th>Account</th><th>Status</th><th>Duration</th><th>Tokens in/out</th><th>Detail</th></tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </section>
-
-  <!-- Settings tab -->
-  <section id="tab-settings" class="tab-panel">
-    <h2>Server Settings</h2>
-    <dl id="settings-dl"></dl>
-    <p class="note">Changes to these values require environment variables and a restart.</p>
-  </section>
-
-  <!-- API tab -->
-  <section id="tab-api" class="tab-panel">
-    <h2>Developer Endpoints</h2>
-    <dl id="api-dl"></dl>
-    <pre id="curl-example" class="code-block"></pre>
-  </section>
-</main>
-
 <!-- Add-account modal -->
 <div id="modal-overlay" class="modal-overlay hidden">
   <div class="modal">
-    <h3>Add an account</h3>
+    <div class="modal-head">
+      <h3>Add an account</h3>
+      <button class="btn-icon close-modal" id="btn-modal-close" title="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+    </div>
     <div class="method-cards">
       <div class="method-card">
+        <div class="method-icon"><svg class="icon"><use href="#i-globe"/></svg></div>
         <h4>Login with browser</h4>
-        <p>Open a Devin CLI login URL in your browser and authenticate. The browser must run on the same machine as the server (the login redirects to a local port).</p>
-        <button id="btn-login-start">Start login</button>
+        <p>Open a Devin CLI login URL and sign in. The browser must run on the same machine as the server (the login redirects to a local port).</p>
+        <button id="btn-login-start" class="btn-block">Start login</button>
         <div id="login-area" class="login-area hidden">
-          <p id="login-status">Waiting…</p>
+          <p id="login-status" class="status-msg">Waiting…</p>
           <a id="login-link" href="#" target="_blank" rel="noopener"></a>
-          <button id="btn-login-cancel">Cancel</button>
+          <button id="btn-login-cancel" class="btn-secondary btn-block">Cancel</button>
         </div>
       </div>
       <div class="method-card">
+        <div class="method-icon"><svg class="icon"><use href="#i-paste"/></svg></div>
         <h4>Paste session token</h4>
-        <p>Paste a Devin session token (from another machine or the CLI). Its profile and usage are fetched automatically.</p>
+        <p>From another machine or the CLI. Profile and usage are fetched automatically.</p>
         <input id="manual-token" type="password" placeholder="devin-session-token$eyJ… or eyJ…" autocomplete="off">
-        <button id="btn-manual-token">Add token</button>
+        <button id="btn-manual-token" class="btn-block">Add token</button>
         <p id="manual-status" class="status-msg"></p>
       </div>
       <div class="method-card">
+        <div class="method-icon"><svg class="icon"><use href="#i-file"/></svg></div>
         <h4>Import JSON</h4>
-        <p>Paste raw account JSON from CLIProxyAPI or another exporter.</p>
-        <textarea id="import-ta" rows="6" placeholder='{"api_key":"eyJ...","email":"demo@x",...}'></textarea>
-        <button id="btn-import">Import</button>
+        <p>Raw account JSON from CLIProxyAPI or another exporter.</p>
+        <textarea id="import-ta" rows="4" placeholder='{"api_key":"eyJ...","email":"demo@x",...}'></textarea>
+        <button id="btn-import" class="btn-block">Import</button>
         <p id="import-status" class="status-msg"></p>
       </div>
     </div>
-    <button class="close-modal" id="btn-modal-close">Close</button>
   </div>
 </div>
 

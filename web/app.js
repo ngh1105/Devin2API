@@ -77,7 +77,7 @@
         document.getElementById("admin-password").value = "";
         status.textContent = "";
         document.getElementById("login-overlay").className = "modal-overlay hidden";
-        document.getElementById("btn-logout").className = "";
+        document.getElementById("btn-logout").classList.remove("hidden");
         onReady();
       }).catch(function (e) { status.textContent = e.message; });
     };
@@ -85,13 +85,44 @@
       apiPost("/admin/api/logout", "").then(function () { location.reload(); });
     };
     return apiGet("/admin/api/session").then(function (s) {
-      if (s.auth_required) document.getElementById("btn-logout").className = "";
+      if (s.auth_required) document.getElementById("btn-logout").classList.remove("hidden");
       if (s.auth_required && !s.authenticated) {
         showAdminLogin();
         return false;
       }
       return true;
     });
+  }
+
+  // ---- Theme ----
+
+  // The page follows the OS theme until the user picks one; the choice is a
+  // per-browser convenience, so storage failures are ignored.
+  function applySavedTheme() {
+    try {
+      var t = localStorage.getItem("devin2api-theme");
+      if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+    } catch (e) { /* storage unavailable */ }
+  }
+
+  function toggleTheme() {
+    var root = document.documentElement;
+    var cur = root.getAttribute("data-theme");
+    if (!cur) cur = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    var next = cur === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("devin2api-theme", next); } catch (e) { /* storage unavailable */ }
+  }
+
+  // emptyRow fills a table body with one centered message row.
+  function emptyRow(tbody, cols, msg) {
+    var tr = document.createElement("tr");
+    var td = document.createElement("td");
+    td.colSpan = cols;
+    td.className = "empty";
+    td.appendChild(textNode(msg));
+    tr.appendChild(td);
+    tbody.appendChild(tr);
   }
 
   // ---- Stats grid ----
@@ -163,13 +194,7 @@
       var tbody = document.querySelector("#log-table tbody");
       while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
       if (!entries.length) {
-        var tr = document.createElement("tr");
-        var td = document.createElement("td");
-        td.colSpan = 8;
-        td.className = "note";
-        td.appendChild(textNode("No chat requests yet."));
-        tr.appendChild(td);
-        tbody.appendChild(tr);
+        emptyRow(tbody, 8, "No chat requests yet.");
         return;
       }
       entries.forEach(function (e) {
@@ -225,12 +250,12 @@
     var daily = Number(a.usage.daily_remaining_percent);
     var weekly = Number(a.usage.weekly_remaining_percent);
     if (isFinite(daily) && isFinite(weekly)) {
-      var left = Math.min(daily, weekly); // the tighter limit decides
-      var usedPct = Math.max(0, Math.min(100 - left, 100));
+      // The bar shows quota left, matching the label; the tighter limit decides.
+      var left = Math.max(0, Math.min(Math.min(daily, weekly), 100));
       var barCls = "usage-bar";
-      if (usedPct > 90) barCls = "usage-bar critical";
-      else if (usedPct > 70) barCls = "usage-bar high";
-      return "<td><div class='usage-bar-track'><div class='" + barCls + "' style='width:" + usedPct + "%'></div></div><span>Daily " + daily + "% · weekly " + weekly + "% left</span></td>";
+      if (left < 10) barCls = "usage-bar critical";
+      else if (left < 30) barCls = "usage-bar high";
+      return "<td><div class='usage-bar-track'><div class='" + barCls + "' style='width:" + left + "%'></div></div><span>Daily " + daily + "% · weekly " + weekly + "% left</span></td>";
     }
     return "<td>—</td>";
   }
@@ -246,13 +271,32 @@
     acctCache = accs;
     var tbody = document.querySelector("#acct-table tbody");
     tbody.innerHTML = "";
+    if (!accs.length) emptyRow(tbody, 7, "No accounts yet. Use \"Add account\" to log in or import one.");
     for (var i = 0; i < accs.length; i++) {
       var a = accs[i];
       var tr = document.createElement("tr");
 
-      // Identity
+      // Identity: initial avatar, name, and the account id underneath.
       var tdId = document.createElement("td");
-      tdId.appendChild(textNode(identityCell(a)));
+      var ident = document.createElement("div");
+      ident.className = "ident";
+      var avatar = document.createElement("span");
+      avatar.className = "avatar";
+      avatar.appendChild(textNode(identityCell(a).charAt(0) || "?"));
+      var identText = document.createElement("div");
+      identText.className = "ident-text";
+      var main = document.createElement("span");
+      main.className = "ident-main";
+      main.title = identityCell(a);
+      main.appendChild(textNode(identityCell(a)));
+      var sub = document.createElement("span");
+      sub.className = "ident-sub";
+      sub.appendChild(textNode(a.id));
+      identText.appendChild(main);
+      identText.appendChild(sub);
+      ident.appendChild(avatar);
+      ident.appendChild(identText);
+      tdId.appendChild(ident);
       tr.appendChild(tdId);
 
       // Nickname
@@ -365,6 +409,7 @@
   function renderTokens(toks) {
     var tbody = document.querySelector("#tok-table tbody");
     tbody.innerHTML = "";
+    if (!toks.length) emptyRow(tbody, 4, "No API keys. Without keys, only local clients may call /v1.");
     for (var i = 0; i < toks.length; i++) {
       var t = toks[i];
       var tr = document.createElement("tr");
@@ -520,15 +565,20 @@
     ];
     for (var i = 0; i < entries.length; i++) {
       var dt = document.createElement("dt");
-      dt.appendChild(textNode(entries[i][1] + " " + entries[i][0]));
+      var method = document.createElement("span");
+      method.className = entries[i][1].indexOf("POST") === 0 ? "method post" : "method";
+      method.appendChild(textNode(entries[i][1]));
+      dt.appendChild(method);
+      dt.appendChild(textNode(entries[i][0]));
       dl.appendChild(dt);
       var dd = document.createElement("dd");
       dd.appendChild(textNode(entries[i][2]));
       dl.appendChild(dd);
     }
+    var base = location.origin;
     var codeEl = document.getElementById("curl-example");
-    codeEl.textContent = 'curl http://localhost:8080/v1/models\n'
-      + 'curl -X POST http://localhost:8080/v1/chat/completions \\\n'
+    codeEl.textContent = 'curl ' + base + '/v1/models\n\n'
+      + 'curl -X POST ' + base + '/v1/chat/completions \\\n'
       + '  -H "Authorization: Bearer YOUR_KEY" \\\n'
       + '  -H "Content-Type: application/json" \\\n'
       + '  -d \'{"model":"devin","messages":[{"role":"user","content":"hi"}]}\'';
@@ -542,6 +592,8 @@
   }
 
   function boot() {
+    applySavedTheme();
+    document.getElementById("btn-theme").onclick = toggleTheme;
     setupTabs();
     renderTokens([]); // placeholder until tab clicked
     setupAdminLogin(loadInitialData).then(function (ready) {
