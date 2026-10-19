@@ -3,7 +3,7 @@ package web
 
 import "embed"
 
-//go:embed accounts.html tokens.html settings.html app.js styles.css
+//go:embed index.html app.js styles.css
 
 // FS contains all embedded web assets.
 var FS embed.FS

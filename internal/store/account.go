@@ -2,6 +2,7 @@
 package store
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -12,65 +13,248 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/ngh1105/Devin2API/internal/auth"
 )
 
-// validID restricts account ids to a filename-safe charset so an imported id
-// can never escape the store directory (e.g. "../../x").
-var validID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+// ---------- types ----------------------------------------------------------
 
-// ValidID reports whether id is safe to use as an account file name.
-func ValidID(id string) bool { return validID.MatchString(id) }
+// Tokens holds v2 bearer credentials — session_token only.
+type Tokens struct {
+	SessionToken string `json:"session_token"`
+}
 
-// OAuth holds a single provider's connection credentials.
-type OAuth struct {
+// Usage tracks per-account quota and plan metadata.
+type Usage struct {
+	Email                  string    `json:"email"`
+	UserName               string    `json:"user_name"`
+	UserID                 string    `json:"user_id"`
+	OrgID                  string    `json:"org_id"`
+	OrgName                string    `json:"org_name"`
+	Plan                   string    `json:"plan"`
+	DailyRemainingPercent  int64     `json:"daily_remaining_percent"`
+	WeeklyRemainingPercent int64     `json:"weekly_remaining_percent"`
+	DailyResetAt           time.Time `json:"daily_reset_at"`
+	WeeklyResetAt          time.Time `json:"weekly_reset_at"`
+	PlanStart              time.Time `json:"plan_start"`
+	PlanEnd                time.Time `json:"plan_end"`
+	CheckedAt              int64     `json:"checked_at"` // unix seconds
+}
+
+// v1Account captures legacy schema fields for deserialization + migration.
+type v1Account struct {
+	Schema    int64           `json:"schema"`
+	ID        string          `json:"id"`
+	Email     string          `json:"email"`
+	Sub       string          `json:"sub"`
+	OAuth     v1OAuth         `json:"oauth"`
+	Tokens    v1Tokens        `json:"tokens"`
+	Profile   v1Profile       `json:"profile"`
+	Usage     *any            `json:"usage"`
+	CreatedAt json.RawMessage `json:"created_at"`
+}
+
+// accountPlain is a field-identical shadow of Account with NO custom methods.
+// Used by UnmarshalJSON so that v2 records round-trip through plain JSON
+// without entering the v1 migration path.
+type accountPlain struct {
+	Schema               int64     `json:"schema"`
+	ID                   string    `json:"id"`
+	Email                string    `json:"email"`
+	UserName             string    `json:"user_name"`
+	UserID               string    `json:"user_id"`
+	OrgID                string    `json:"org_id"`
+	Plan                 string    `json:"plan"`
+	Nickname             string    `json:"nickname"`
+	Enabled              bool      `json:"enabled"`
+	AuthKind             string    `json:"auth_kind"`
+	CreatedAt            time.Time `json:"created_at"`
+	Tokens               Tokens    `json:"tokens"`
+	Usage                *Usage    `json:"usage"`
+	UsageErr             string    `json:"usage_error,omitempty"`
+	enabledExplicitlySet bool      `json:"-"`
+}
+
+// hasV1TokenMarker reports whether raw JSON carries access_token in tokens,
+// which signals a v1 record even when schema key is absent.
+func hasV1TokenMarker(data []byte) bool {
+	return bytes.Contains(data, []byte(`"access_token"`))
+}
+
+func extractV1Field(m map[string]json.RawMessage, key string, dst *string) {
+	if raw, ok := m[key]; ok {
+		json.Unmarshal(raw, dst)
+	}
+}
+
+func loadV1CreatedAt(raw json.RawMessage) time.Time {
+	if len(raw) > 0 {
+		var t time.Time
+		json.Unmarshal(raw, &t) // RFC3339 or unix float → both parse into time.Time
+		return t
+	}
+	return time.Now()
+}
+
+func resolveSessionTokenFromParsed(parsed map[string]json.RawMessage, tok *Tokens) {
+	// 1. tokens.session_token (v2 nested object).
+	if tokRaw, ok := parsed["tokens"]; ok {
+		var nested map[string]json.RawMessage
+		json.Unmarshal(tokRaw, &nested)
+		if sTok, ok := nested["session_token"]; ok {
+			var val string
+			json.Unmarshal(sTok, &val)
+			tok.SessionToken = FormatSessionToken(val)
+			return
+		}
+	}
+	// 2. Top-level session_token or access_token (v1 top-level or bare-token paths).
+	for _, key := range []string{"session_token", "access_token"} {
+		if raw, ok := parsed[key]; ok {
+			var val string
+			json.Unmarshal(raw, &val)
+			tok.SessionToken = FormatSessionToken(val)
+			return
+		}
+	}
+	// 3. Fallthrough: tokens.access_token (legacy v1 shape).
+	//    The above nested lookup may not match if keys were trimmed; re-parse.
+	if tokRaw, ok := parsed["tokens"]; ok {
+		var nested map[string]json.RawMessage
+		json.Unmarshal(tokRaw, &nested)
+		if at, ok := nested["access_token"]; ok {
+			var val string
+			json.Unmarshal(at, &val)
+			tok.SessionToken = FormatSessionToken(val)
+			return
+		}
+	}
+}
+
+// UnmarshalJSON handles v1→v2 migration during load. v2 files are unmarshalled
+// via a field-identical shadow type (accountPlain) for a perfect round-trip;
+// only v1 records enter the migration path.
+func (a *Account) UnmarshalJSON(data []byte) error {
+	// Peek at top-level keys to decide path.
+	parsed, err := parseJSONRaw(data)
+	if err != nil {
+		return err
+	}
+
+	hasSchemaKey := false
+	schemaVer := int64(2) // default to v2 for unknown records
+	if raw, ok := parsed["schema"]; ok {
+		json.Unmarshal(raw, &schemaVer)
+		hasSchemaKey = true
+	}
+
+	isV1 := schemaVer < 2 || !hasSchemaKey || hasV1TokenMarker(data)
+
+	if isV1 {
+		return a.migrateFromV1(data, parsed)
+	}
+
+	// v2 path: use the accountPlain shadow type for a clean round-trip.
+	var p accountPlain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return fmt.Errorf("unmarshal v2 account: %w", err)
+	}
+
+	a.Schema = 2
+	a.ID = p.ID
+	a.Email = p.Email
+	a.UserName = p.UserName
+	a.UserID = p.UserID
+	a.OrgID = p.OrgID
+	a.Plan = p.Plan
+	a.Nickname = p.Nickname
+	a.Enabled = p.Enabled
+	a.AuthKind = p.AuthKind
+	a.CreatedAt = p.CreatedAt
+	a.Tokens = p.Tokens
+	a.Usage = p.Usage
+	a.UsageErr = p.UsageErr
+	return nil
+}
+
+// migrateFromV1 migrates a v1 JSON blob into an Account.
+func (a *Account) migrateFromV1(data []byte, parsed map[string]json.RawMessage) error {
+	a.Schema = 2
+	extractV1Field(parsed, "id", &a.ID)
+	extractV1Field(parsed, "email", &a.Email)
+	a.CreatedAt = loadV1CreatedAt(parsed["created_at"])
+
+	resolveSessionTokenFromParsed(parsed, &a.Tokens)
+
+	// Enabled: defaults true unless "enabled" key is explicitly present.
+	a.Enabled = true
+	if eRaw, ok := parsed["enabled"]; ok {
+		json.Unmarshal(eRaw, &a.Enabled)
+	}
+	a.AuthKind = "oauth"
+
+	if uRaw, ok := parsed["usage"]; ok && len(uRaw) > 0 && string(uRaw) != "null" {
+		var usage Usage
+		if err := json.Unmarshal(uRaw, &usage); err == nil {
+			a.Usage = &usage
+		}
+	}
+
+	return nil
+}
+
+type v1OAuth struct {
 	ClientID    string `json:"client_id"`
 	Domain      string `json:"domain"`
 	Audience    string `json:"audience"`
 	RedirectURI string `json:"redirect_uri"`
 }
 
-// Tokens holds bearer credentials persisted by schema version.
-type Tokens struct {
+type v1Tokens struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	IDToken      string `json:"id_token"`
-	ExpiresAt    int64  `json:"expires_at"` // unix seconds
+	ExpiresAt    int64  `json:"expires_at"`
 	Scope        string `json:"scope"`
 }
 
-// Profile is the userinfo payload — mirrors auth.Profile with JSON tag reuse.
-type Profile struct {
+type v1Profile struct {
 	Name    string `json:"name"`
 	Picture string `json:"picture"`
 }
 
-// Account matches schema v1: {"schema":1,"id":"acc_…","email":"…","sub":"…",
-// "created_at":"…","oauth":{...},"tokens":{...},"profile":{...},"usage":null}.
+// Account matches schema v2: {"schema":2,"id":"acc_<8hex>",
+// "email":"…","user_name":"…","user_id":"…","org_id":"…",
+// "plan":"…","nickname":"…","enabled":true/false,
+// "auth_kind":"oauth","created_at":"RFC3339",
+// "tokens":{"session_token":"…"},"usage":null}.
 type Account struct {
 	Schema    int64     `json:"schema"`
 	ID        string    `json:"id"`
 	Email     string    `json:"email"`
-	Sub       string    `json:"sub"`
+	UserName  string    `json:"user_name"`
+	UserID    string    `json:"user_id"`
+	OrgID     string    `json:"org_id"`
+	Plan      string    `json:"plan"`
+	Nickname  string    `json:"nickname"`
+	Enabled   bool      `json:"enabled"`
+	AuthKind  string    `json:"auth_kind"`
 	CreatedAt time.Time `json:"created_at"`
-	OAuth     OAuth     `json:"oauth"`
 	Tokens    Tokens    `json:"tokens"`
-	Profile   Profile   `json:"profile"`
-	Usage     *any      `json:"usage"`
+	Usage     *Usage    `json:"usage"`
+	UsageErr  string    `json:"usage_error,omitempty"`
+	// enabledExplicitlySet tracks whether Enabled was explicitly set in the
+	// import payload (used by mergeOnlyExplicitFields to preserve existing state).
+	enabledExplicitlySet bool `json:"-"`
 }
 
-// Expired reports whether this account's tokens have passed their expiration.
-// An account holding only a refresh token has no usable access token yet,
-// so it counts as expired until refreshed.
+// Expired reports whether this account's plan has ended (server-side expiry).
 func (a *Account) Expired() bool {
-	if a.Tokens.AccessToken == "" {
-		return true
-	}
-	if a.Tokens.ExpiresAt == 0 {
+	if a.Usage == nil {
 		return false
 	}
-	return time.Now().Unix() > a.Tokens.ExpiresAt
+	if a.Usage.PlanEnd.Unix() <= 0 {
+		return false
+	}
+	return time.Now().Unix() > a.Usage.PlanEnd.Unix()
 }
 
 // ImportError signals that raw input could not be normalised into an Account.
@@ -128,12 +312,32 @@ func (s *AccountStore) Get(id string) (*Account, error) {
 	return &cp, nil
 }
 
+// validID restricts account ids to a filename-safe charset so an imported id
+// can never escape the store directory (e.g. "../../x").
+var validID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// ValidID reports whether id is safe to use as an account file name.
+func ValidID(id string) bool { return validID.MatchString(id) }
+
 // Save atomically writes account to <id>.json in the store directory.
 // The store keeps its own copy, so later mutations of a do not leak in.
 func (s *AccountStore) Save(a *Account) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.saveLocked(a)
+}
+
+// Upsert saves a, merging it into an existing account with the same user_id
+// (or email) instead of creating a duplicate. Returns a copy of the stored record.
+func (s *AccountStore) Upsert(a *Account) (*Account, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	merged := s.mergeExistingLocked(a)
+	if err := s.saveLocked(merged); err != nil {
+		return nil, err
+	}
+	cp := *merged
+	return &cp, nil
 }
 
 func (s *AccountStore) saveLocked(a *Account) error {
@@ -170,50 +374,160 @@ func (s *AccountStore) Delete(id string) error {
 }
 
 // Import normalises raw JSON into an Account and saves it.
-// Handles three shapes: full schema, bare email+password blob, bare token blobs.
-// An import matching an existing account (same sub, or same token for bare
-// blobs) updates that account in place instead of creating a duplicate.
+// Accepts: (a) full v2 schema; (b) CLIProxyAPI shape (api_key/session_token present);
+// (c) bare token blobs {"token"|"access_token"|"refresh_token":"..."}.
+// Rejects email/password shapes with "run login flow instead".
 func (s *AccountStore) Import(raw json.RawMessage) (*Account, error) {
 	parsed, err := parseJSONRaw(raw)
 	if err != nil {
 		return nil, &ImportError{"malformed JSON"}
 	}
-	keys := keysOf(parsed)
-	sort.Strings(keys)
 
-	if hasBareEmailPass(parsed) {
+	switch {
+	case hasBareEmailPass(parsed):
 		return nil, &ImportError{"email/password found; run the login flow"}
+	case isV2Schema(parsed):
+		acct, err := importSchemaV2(parsed)
+		if err != nil {
+			return nil, err
+		}
+		return s.Upsert(acct)
+	case isCLIProxyAPIShape(parsed):
+		acct := importCLIProxyAPI(parsed)
+		return s.Upsert(acct)
+	default:
+		// Bare token blob — must have at least one token key.
+		// Identity/known keys are tolerated; truly unknown keys cause an error.
+		hasTokenKey := false
+		for k := range parsed {
+			if tokenBlobKeys[k] {
+				hasTokenKey = true
+				break
+			}
+		}
+		if !hasTokenKey {
+			return nil, &ImportError{"unexpected fields: " + keysToReason(keysOf(parsed))}
+		}
+		// Reject blobs with entirely unrecognized top-level keys.
+		bareAcceptableKeys := map[string]bool{
+			"access_token": true, "refresh_token": true, "token": true,
+			"user_id": true, "email": true, "user_name": true,
+			"org_id": true, "api_key": true, "session_token": true,
+		}
+		for k := range parsed {
+			if !bareAcceptableKeys[k] {
+				return nil, &ImportError{"unexpected fields: " + keysToReason(keysOf(parsed))}
+			}
+		}
+		acct := importBareToken(parsed)
+		return s.Upsert(acct)
 	}
-	acct, err := importSchemaOrTokens(parsed, keys)
-	if err != nil {
-		return nil, err
-	}
-	return s.Upsert(acct)
 }
 
-// Upsert saves acct, merging it into an existing account that matches by sub
-// (or by token when sub is unknown) instead of creating a duplicate.
-// Returns a copy of the stored record.
-func (s *AccountStore) Upsert(acct *Account) (*Account, error) {
+// AccountFromLogin builds an Account from a Devin CLI login event.
+func AccountFromLogin(userName, userID, orgID, sessionToken, email string, u *Usage) *Account {
+	return &Account{
+		Schema:    2,
+		ID:        genHex("acc_", 8),
+		Email:     email,
+		UserName:  userName,
+		UserID:    userID,
+		OrgID:     orgID,
+		AuthKind:  "oauth",
+		Enabled:   true,
+		CreatedAt: time.Now(),
+		Tokens:    Tokens{SessionToken: FormatSessionToken(sessionToken)},
+		Usage:     u,
+	}
+}
+
+// Patch partially updates an account: nickname and/or enabled.
+// Only non-nil fields are applied. Returns ErrNotFound if id is absent.
+func (s *AccountStore) Patch(id string, nickname *string, enabled *bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if old := s.findMatchLocked(acct); old != nil {
-		merged := *old
-		mergeInto(&merged, acct)
-		acct = &merged
+	a, ok := s.accounts[id]
+	if !ok {
+		return os.ErrNotExist
 	}
-	if err := s.saveLocked(acct); err != nil {
-		return nil, err
+	if nickname != nil {
+		a.Nickname = *nickname
 	}
-	cp := *acct
-	return &cp, nil
+	if enabled != nil {
+		a.Enabled = *enabled
+	}
+	return nil
 }
 
-// tokenBlobKeys are the only keys allowed in a bare token import blob.
+// ---------- token helpers ---------------------------------------------------
+
+// FormatSessionToken formats a raw token value for persistence in Tokens.SessionToken.
+// Values starting with "devin-session-token$" are kept as-is.
+// All other non-empty values get the devin-session-token$ prefix.
+func FormatSessionToken(value string) string {
+	if value == "" {
+		return value
+	}
+	const prefix = "devin-session-token$"
+	if len(value) >= len(prefix) && value[:len(prefix)] == prefix {
+		return value
+	}
+	return prefix + value
+}
+
+// ---------- import shapes ---------------------------------------------------
+
+var cliProxyDetectKeys = map[string]bool{
+	"api_key":       true,
+	"session_token": true,
+}
+
+var v2SchemaKeys = map[string]bool{
+	"schema":      true,
+	"id":          true,
+	"email":       true,
+	"user_name":   true,
+	"user_id":     true,
+	"org_id":      true,
+	"plan":        true,
+	"nickname":    true,
+	"auth_kind":   true,
+	"enabled":     true,
+	"created_at":  true,
+	"tokens":      true,
+	"usage":       true,
+	"usage_error": true,
+}
+
 var tokenBlobKeys = map[string]bool{
 	"access_token":  true,
 	"refresh_token": true,
 	"token":         true,
+}
+
+func keysOf(m map[string]json.RawMessage) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func keysToReason(keys []string) string {
+	s := make([]string, len(keys))
+	for i, k := range keys {
+		s[i] = k
+	}
+	return fmt.Sprintf("%v", s)
+}
+
+func hasAnyKey(m map[string]json.RawMessage, allowed map[string]bool) bool {
+	for k := range m {
+		if allowed[k] {
+			return true
+		}
+	}
+	return false
 }
 
 func isSubset(m map[string]json.RawMessage, allow map[string]bool) bool {
@@ -225,59 +539,258 @@ func isSubset(m map[string]json.RawMessage, allow map[string]bool) bool {
 	return true
 }
 
-// UpdateTokens sets the token fields, computes expires_at from tok.ExpiresIn,
-// persists the account and returns a copy of the updated record.
-func (s *AccountStore) UpdateTokens(id string, tok auth.Tokens) (*Account, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	old, ok := s.accounts[id]
-	if !ok {
-		return nil, os.ErrNotExist
+func hasBareEmailPass(m map[string]json.RawMessage) bool {
+	hasEmail, hasPassword := false, false
+	for k := range m {
+		if k == "email" {
+			hasEmail = true
+		}
+		if k == "password" {
+			hasPassword = true
+		}
 	}
-	a := *old
-	a.Tokens.AccessToken = tok.AccessToken
-	a.Tokens.RefreshToken = tok.RefreshToken
-	a.Tokens.IDToken = tok.IDToken
-	a.Tokens.ExpiresAt = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix()
-	a.Tokens.Scope = tok.Scope
-	if err := s.saveLocked(&a); err != nil {
-		return nil, err
-	}
-	return &a, nil
+	return hasEmail && hasPassword
 }
 
-// AccountFromLogin builds an Account from auth login tokens and user info.
-// Fills the oauth block from auth constants, generates id + created_at,
-// sets expires_at using tok.ExpiresIn like UpdateTokens does.
-func AccountFromLogin(email string, tok auth.Tokens, p auth.Profile) *Account {
-	return &Account{
-		Schema:    1,
+func isCLIProxyAPIShape(m map[string]json.RawMessage) bool {
+	_, hasAPIKey := m["api_key"]
+	_, hasST := m["session_token"]
+	return hasAPIKey || hasST
+}
+
+func isV2Schema(m map[string]json.RawMessage) bool {
+	// A record is considered v2 schema when it explicitly carries a "schema" key
+	// or an inline "tokens" object — the definitive markers.
+	_, hasSchema := m["schema"]
+	hasTokensObj := false
+	if raw, ok := m["tokens"]; ok {
+		var nested json.RawMessage
+		if err := json.Unmarshal(raw, &nested); err == nil && len(nested) > 0 && nested[0] == '{' {
+			hasTokensObj = true
+		}
+	}
+	return hasSchema || hasTokensObj
+}
+
+func hasKey(data []byte, key string) bool {
+	target := []byte(`"` + key + `":`)
+	return bytes.Contains(data, target)
+}
+
+func parseJSONRaw(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("unmarshal: %w", err)
+	}
+	return m, nil
+}
+
+func getNested(m map[string]json.RawMessage, key string) map[string]json.RawMessage {
+	if raw, ok := m[key]; ok {
+		var nested map[string]json.RawMessage
+		json.Unmarshal(raw, &nested)
+		return nested
+	}
+	return nil
+}
+
+func importBareToken(m map[string]json.RawMessage) *Account {
+	var val string
+	if v, ok := m["access_token"]; ok {
+		json.Unmarshal(v, &val)
+	} else if v, ok := m["refresh_token"]; ok {
+		json.Unmarshal(v, &val)
+	} else if v, ok := m["token"]; ok {
+		json.Unmarshal(v, &val)
+	}
+	acct := &Account{
+		Schema:    2,
 		ID:        genHex("acc_", 8),
-		Email:     email,
-		Sub:       p.Sub,
+		Tokens:    Tokens{SessionToken: FormatSessionToken(val)},
 		CreatedAt: time.Now(),
-		OAuth: OAuth{
-			ClientID:    auth.ClientID,
-			Domain:      auth.AuthDomain,
-			Audience:    auth.Audience,
-			RedirectURI: auth.RedirectURI,
-		},
-		Tokens: Tokens{
-			AccessToken:  tok.AccessToken,
-			RefreshToken: tok.RefreshToken,
-			IDToken:      tok.IDToken,
-			ExpiresAt:    time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix(),
-			Scope:        tok.Scope,
-		},
-		Profile: Profile{
-			Name:    p.Name,
-			Picture: p.Picture,
-		},
-		Usage: nil,
+	}
+	// Also accept optional identity fields for upsert matching.
+	if raw, ok := m["user_id"]; ok {
+		json.Unmarshal(raw, &acct.UserID)
+	}
+	if raw, ok := m["email"]; ok {
+		json.Unmarshal(raw, &acct.Email)
+	}
+	if raw, ok := m["user_name"]; ok {
+		json.Unmarshal(raw, &acct.UserName)
+	}
+	if raw, ok := m["org_id"]; ok {
+		json.Unmarshal(raw, &acct.OrgID)
+	}
+	return acct
+}
+
+func importSchemaV2(m map[string]json.RawMessage) (*Account, error) {
+	acct := &Account{Schema: 2, Enabled: true, CreatedAt: time.Now(), enabledExplicitlySet: true}
+
+	setField := func(key string, dst *string) {
+		if raw, ok := m[key]; ok {
+			json.Unmarshal(raw, dst)
+		}
+	}
+
+	setField("id", &acct.ID)
+	if acct.ID != "" && !ValidID(acct.ID) {
+		return nil, &ImportError{"invalid id: only letters, digits, '_' and '-' allowed"}
+	}
+	setField("email", &acct.Email)
+	setField("user_name", &acct.UserName)
+	setField("user_id", &acct.UserID)
+	setField("org_id", &acct.OrgID)
+	setField("plan", &acct.Plan)
+	setField("nickname", &acct.Nickname)
+	setField("auth_kind", &acct.AuthKind)
+	setField("usage_error", &acct.UsageErr)
+
+	if raw, ok := m["enabled"]; ok {
+		json.Unmarshal(raw, &acct.Enabled)
+	}
+	if raw, ok := m["created_at"]; ok {
+		json.Unmarshal(raw, &acct.CreatedAt)
+	}
+
+	tokData := getNested(m, "tokens")
+	if raw, ok := tokData["session_token"]; ok {
+		json.Unmarshal(raw, &acct.Tokens.SessionToken)
+	}
+	// Top-level session_token overrides tokens.session_token.
+	if raw, ok := m["session_token"]; ok {
+		json.Unmarshal(raw, &acct.Tokens.SessionToken)
+	}
+
+	rawUsage := m["usage"]
+	if len(rawUsage) > 0 && string(rawUsage) != "null" {
+		var usage Usage
+		if err := json.Unmarshal(rawUsage, &usage); err == nil {
+			acct.Usage = &usage
+		}
+	}
+
+	if acct.ID == "" {
+		acct.ID = genHex("acc_", 8)
+	}
+	return acct, nil
+}
+
+func importCLIProxyAPI(m map[string]json.RawMessage) *Account {
+	acct := &Account{Schema: 2, AuthKind: "oauth", Enabled: true, CreatedAt: time.Now(), enabledExplicitlySet: true}
+
+	if raw, ok := m["api_key"]; ok {
+		var val string
+		json.Unmarshal(raw, &val)
+		acct.Tokens.SessionToken = FormatSessionToken(val)
+	}
+	if raw, ok := m["session_token"]; ok {
+		var val string
+		json.Unmarshal(raw, &val)
+		acct.Tokens.SessionToken = FormatSessionToken(val)
+	}
+
+	setIfPresent := func(key string, dst *string) {
+		if raw, ok := m[key]; ok {
+			json.Unmarshal(raw, dst)
+		}
+	}
+
+	setIfPresent("email", &acct.Email)
+	setIfPresent("user_name", &acct.UserName)
+	setIfPresent("user_id", &acct.UserID)
+	setIfPresent("org_id", &acct.OrgID)
+	setIfPresent("plan", &acct.Plan)
+	setIfPresent("auth_kind", &acct.AuthKind)
+
+	if raw, ok := m["disabled"]; ok {
+		var disabled bool
+		json.Unmarshal(raw, &disabled)
+		if disabled {
+			acct.Enabled = false
+		}
+	}
+
+	acct.ID = genHex("acc_", 8)
+	return acct
+}
+
+// ---------- upsert / merge --------------------------------------------------
+
+// mergeExistingLocked returns newAcct merged onto a copy of the stored account
+// with the same user_id (falling back to email), keeping that account's id and
+// created_at. The stored record is never mutated in place. Caller holds s.mu.
+func (s *AccountStore) mergeExistingLocked(newAcct *Account) *Account {
+	find := func(match func(*Account) bool) *Account {
+		for _, a := range s.accounts {
+			if match(a) {
+				return a
+			}
+		}
+		return nil
+	}
+	var old *Account
+	if newAcct.UserID != "" {
+		old = find(func(a *Account) bool { return a.UserID == newAcct.UserID })
+	}
+	if old == nil && newAcct.Email != "" {
+		old = find(func(a *Account) bool { return a.Email == newAcct.Email })
+	}
+	if old == nil {
+		return newAcct
+	}
+	merged := *old
+	mergeOnlyExplicitFields(&merged, newAcct)
+	return &merged
+}
+
+func mergeOnlyExplicitFields(dst, src *Account) {
+	// Schema always takes source value.
+	dst.Schema = src.Schema
+
+	// Token: only copy when the source actually carries one.
+	if src.Tokens.SessionToken != "" {
+		dst.Tokens.SessionToken = src.Tokens.SessionToken
+	}
+	// Identity fields: only overwrite when source has a non-empty value.
+	if src.Email != "" {
+		dst.Email = src.Email
+	}
+	if src.UserName != "" {
+		dst.UserName = src.UserName
+	}
+	if src.UserID != "" {
+		dst.UserID = src.UserID
+	}
+	if src.OrgID != "" {
+		dst.OrgID = src.OrgID
+	}
+	if src.Plan != "" {
+		dst.Plan = src.Plan
+	}
+	if src.Nickname != "" {
+		dst.Nickname = src.Nickname
+	}
+	// Enabled: only overwrite when the source explicitly carried an enabled value.
+	if src.enabledExplicitlySet {
+		dst.Enabled = src.Enabled
+	}
+	// AuthKind: only when explicitly set in source.
+	if src.AuthKind != "" {
+		dst.AuthKind = src.AuthKind
+	}
+	// Usage: only when the source carries one.
+	if src.Usage != nil {
+		dst.Usage = src.Usage
+	}
+	// UsageError: only when the source has one.
+	if src.UsageErr != "" {
+		dst.UsageErr = src.UsageErr
 	}
 }
 
-// --- internal helpers --------------------------------------------------------
+// ---------- disk loading / migration ----------------------------------------
 
 func genHex(prefix string, nbytes int) string {
 	b := make([]byte, nbytes)
@@ -313,212 +826,4 @@ func loadAllAccounts(path string) (map[string]*Account, error) {
 		result[acc.ID] = &acc
 	}
 	return result, nil
-}
-
-func parseJSONRaw(raw json.RawMessage) (map[string]json.RawMessage, error) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
-	}
-	return m, nil
-}
-
-func hasBareEmailPass(m map[string]json.RawMessage) bool {
-	hasEmail := false
-	hasPassword := false
-	for k := range m {
-		if k == "email" {
-			hasEmail = true
-		}
-		if k == "password" {
-			hasPassword = true
-		}
-	}
-	return hasEmail && hasPassword
-}
-
-func importFromTokenBlob(m map[string]json.RawMessage, key string) *Account {
-	var val string
-	if raw, ok := m[key]; ok {
-		json.Unmarshal(raw, &val)
-	}
-	toks := Tokens{AccessToken: val}
-	if key == "refresh_token" {
-		toks = Tokens{RefreshToken: val}
-	}
-	return &Account{
-		Schema:    1,
-		ID:        genHex("acc_", 8),
-		Tokens:    toks,
-		CreatedAt: time.Now(),
-	}
-}
-
-func importSchema(m map[string]json.RawMessage) (*Account, error) {
-	acct := &Account{Schema: 1, CreatedAt: time.Now()}
-
-	if raw, ok := m["email"]; ok {
-		json.Unmarshal(raw, &acct.Email)
-	}
-	if raw, ok := m["sub"]; ok {
-		json.Unmarshal(raw, &acct.Sub)
-	}
-	if raw, ok := m["id"]; ok {
-		json.Unmarshal(raw, &acct.ID)
-		if acct.ID != "" && !ValidID(acct.ID) {
-			return nil, &ImportError{"invalid id: only letters, digits, '_' and '-' allowed"}
-		}
-	}
-
-	tokData := getNested(m, "tokens")
-	if len(tokData) > 0 {
-		if v, ok := tokData["access_token"]; ok {
-			json.Unmarshal(v, &acct.Tokens.AccessToken)
-		}
-		if v, ok := tokData["refresh_token"]; ok {
-			json.Unmarshal(v, &acct.Tokens.RefreshToken)
-		}
-		if v, ok := tokData["id_token"]; ok {
-			json.Unmarshal(v, &acct.Tokens.IDToken)
-		}
-		if v, ok := tokData["expires_at"]; ok {
-			json.Unmarshal(v, &acct.Tokens.ExpiresAt)
-		}
-		if v, ok := tokData["scope"]; ok {
-			json.Unmarshal(v, &acct.Tokens.Scope)
-		}
-		if acct.Tokens.AccessToken == "" && acct.Tokens.RefreshToken == "" {
-			return nil, &ImportError{"neither access_token nor refresh_token provided"}
-		}
-	}
-
-	oauthData := getNested(m, "oauth")
-	if len(oauthData) > 0 {
-		if v, ok := oauthData["client_id"]; ok {
-			json.Unmarshal(v, &acct.OAuth.ClientID)
-		}
-		if v, ok := oauthData["domain"]; ok {
-			json.Unmarshal(v, &acct.OAuth.Domain)
-		}
-		if v, ok := oauthData["audience"]; ok {
-			json.Unmarshal(v, &acct.OAuth.Audience)
-		}
-		if v, ok := oauthData["redirect_uri"]; ok {
-			json.Unmarshal(v, &acct.OAuth.RedirectURI)
-		}
-	}
-
-	profData := getNested(m, "profile")
-	if len(profData) > 0 {
-		if v, ok := profData["name"]; ok {
-			json.Unmarshal(v, &acct.Profile.Name)
-		}
-		if v, ok := profData["picture"]; ok {
-			json.Unmarshal(v, &acct.Profile.Picture)
-		}
-	}
-
-	rawUsage := m["usage"]
-	if len(rawUsage) > 0 && string(rawUsage) != "null" {
-		var u any
-		if err := json.Unmarshal(rawUsage, &u); err == nil {
-			acct.Usage = &u
-		}
-	}
-
-	if acct.ID == "" {
-		acct.ID = genHex("acc_", 8)
-	}
-	return acct, nil
-}
-
-func getNested(m map[string]json.RawMessage, key string) map[string]json.RawMessage {
-	if raw, ok := m[key]; ok {
-		var nested map[string]json.RawMessage
-		json.Unmarshal(raw, &nested)
-		return nested
-	}
-	return nil
-}
-
-// findMatchLocked returns the stored account that newAcct should upsert into:
-// same sub when sub is known, otherwise the same access or refresh token.
-// Caller must hold s.mu.
-func (s *AccountStore) findMatchLocked(newAcct *Account) *Account {
-	for _, a := range s.accounts {
-		switch {
-		case newAcct.Sub != "":
-			if a.Sub == newAcct.Sub {
-				return a
-			}
-		case newAcct.Tokens.RefreshToken != "" && a.Tokens.RefreshToken == newAcct.Tokens.RefreshToken,
-			newAcct.Tokens.AccessToken != "" && a.Tokens.AccessToken == newAcct.Tokens.AccessToken:
-			return a
-		}
-	}
-	return nil
-}
-
-func importSchemaOrTokens(m map[string]json.RawMessage, keys []string) (*Account, error) {
-	// Full-schema import: dispatch when any known top-level key is present.
-	for _, k := range keys {
-		switch k {
-		case "schema", "id", "email", "sub", "created_at", "oauth", "tokens", "profile", "usage":
-			return importSchema(m)
-		}
-	}
-
-	// Bare token blob: keys must be a subset of {access_token, refresh_token, token}.
-	if isSubset(m, tokenBlobKeys) && len(keys) > 0 {
-		var tokenKey string
-		for k := range m {
-			if tokenBlobKeys[k] {
-				tokenKey = k
-				break
-			}
-		}
-		return importFromTokenBlob(m, tokenKey), nil
-	}
-
-	// Anything else: unexpected keys.
-	return nil, &ImportError{"unexpected fields: " + keysToReason(keys)}
-}
-
-// mergeInto copies imported data onto an existing account. ID and CreatedAt
-// stay with the existing record; empty imported identity fields don't wipe
-// known ones (bare token blobs carry no email/sub).
-func mergeInto(dst, src *Account) {
-	dst.Schema = src.Schema
-	if src.Email != "" {
-		dst.Email = src.Email
-	}
-	if src.Sub != "" {
-		dst.Sub = src.Sub
-	}
-	if src.OAuth != (OAuth{}) {
-		dst.OAuth = src.OAuth
-	}
-	dst.Tokens = src.Tokens
-	if src.Profile != (Profile{}) {
-		dst.Profile = src.Profile
-	}
-	if src.Usage != nil {
-		dst.Usage = src.Usage
-	}
-}
-
-func keysToReason(keys []string) string {
-	s := make([]string, len(keys))
-	for i, k := range keys {
-		s[i] = k
-	}
-	return fmt.Sprintf("%v", s)
-}
-
-func keysOf(m map[string]json.RawMessage) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
 }

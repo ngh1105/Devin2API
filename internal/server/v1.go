@@ -1,8 +1,9 @@
 package server
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
-	"io"
 	"net/http"
 	"strings"
 
@@ -35,6 +36,13 @@ func (s *Server) v1Middleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tokens, err := s.tokens.List()
 		if err != nil || len(tokens) == 0 {
+			// Keyless mode spends real Devin quota, so only local non-browser
+			// style callers are let in: loopback Host (blocks DNS rebinding)
+			// and no foreign Origin (blocks cross-site requests).
+			if !isLoopbackHost(r.Host) || foreignOrigin(r) {
+				openai.WriteError(w, http.StatusUnauthorized, "create an API key in the panel to use /v1 from this origin")
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -56,46 +64,40 @@ func (s *Server) v1Middleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// getModels returns a static model list matching the OpenAI API shape.
-func (s *Server) getModels(w http.ResponseWriter, r *http.Request) {
-	body := `{"object":"list","data":[{"id":"devin","object":"model","owned_by":"devin"}]}`
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(body))
+// knownModels is the advertised model list. "devin" aliases the default
+// upstream model; any other upstream model UID is also accepted as-is.
+var knownModels = []string{
+	"devin", "swe-2-high", "swe-1-7", "swe-1-6",
+	"claude-sonnet-4-6", "claude-sonnet-4-6-thinking", "claude-opus-4-6", "claude-opus-4-6-thinking",
+	"gpt-5-4", "gpt-5-5", "gemini-3-1-pro-high", "kimi-k2-6", "glm-5-2",
 }
 
-// chatCompletions handles /v1/chat/completions — stub returning 501.
-func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	var req openai.ChatRequest
-	raw, err := io.ReadAll(r.Body)
-	if err != nil {
-		openai.WriteError(w, http.StatusBadRequest, "unable to read body")
-		return
+// getModels returns the model list in the OpenAI API shape.
+func (s *Server) getModels(w http.ResponseWriter, r *http.Request) {
+	type model struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		OwnedBy string `json:"owned_by"`
 	}
-	if err := json.Unmarshal(raw, &req); err != nil {
-		openai.WriteError(w, http.StatusBadRequest, "invalid JSON")
-		return
+	data := make([]model, len(knownModels))
+	for i, id := range knownModels {
+		data[i] = model{ID: id, Object: "model", OwnedBy: "devin"}
 	}
-	if len(req.Messages) == 0 {
-		openai.WriteError(w, http.StatusBadRequest, "messages must not be empty")
-		return
-	}
+	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+}
 
-	msg := "upstream not implemented yet"
+// writeJSON writes v as a JSON response with status.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
 
-	if req.Stream {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		errResp := openai.Error{Error: openai.ErrorBody{Message: msg, Type: "devin2api_error"}}
-		payload, _ := json.Marshal(errResp)
-		io.WriteString(w, "data: ")
-		w.Write(payload)
-		io.WriteString(w, "\n\ndata: [DONE]\n\n")
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		return
+// randID returns 24 random hex characters for response ids.
+func randID() string {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
 	}
-
-	openai.WriteError(w, http.StatusNotImplemented, msg)
+	return hex.EncodeToString(b)
 }
