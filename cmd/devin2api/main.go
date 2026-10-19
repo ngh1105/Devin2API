@@ -66,6 +66,7 @@ func runLogin(ctx context.Context, stdout io.Writer, stdin io.Reader, cfg config
 
 	// --- password ------------------------------------------------------------
 	var password string
+	fmt.Fprint(stdout, "Password: ")
 	if t, ok := stdin.(*os.File); ok && term.IsTerminal(int(t.Fd())) {
 		pw, err := term.ReadPassword(int(t.Fd()))
 		if err != nil {
@@ -74,7 +75,6 @@ func runLogin(ctx context.Context, stdout io.Writer, stdin io.Reader, cfg config
 		password = string(pw)
 	} else {
 		// Non-TTY: read a line (e.g. piped input in tests / CI).
-		fmt.Fprintln(stdout, "") // echo nothing; move to next line
 		if !scanner.Scan() {
 			return fmt.Errorf("login: no password from stdin")
 		}
@@ -101,8 +101,9 @@ func runLogin(ctx context.Context, stdout io.Writer, stdin io.Reader, cfg config
 		return fmt.Errorf("account store: %w", err)
 	}
 
-	acct := store.AccountFromLogin(email, tokens, profile)
-	if err := accounts.Save(acct); err != nil {
+	// Upsert: logging in again with the same account updates it in place.
+	acct, err := accounts.Upsert(store.AccountFromLogin(email, tokens, profile))
+	if err != nil {
 		return fmt.Errorf("save account: %w", err)
 	}
 
