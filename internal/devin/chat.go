@@ -156,8 +156,8 @@ func ResolveModel(name string) string {
 //	21 model UID
 func BuildChatRequest(sessionToken, fingerprint, sessionID string, req ChatRequest) []byte {
 	out := PwFieldBytes(1, clientMetadata(sessionToken, fingerprint))
-	if req.System != "" {
-		out = append(out, pwFieldString(2, req.System)...)
+	if system := SanitizeSystemPrompt(req.System); system != "" {
+		out = append(out, pwFieldString(2, system)...)
 	}
 	for _, p := range req.Prompts {
 		var m []byte

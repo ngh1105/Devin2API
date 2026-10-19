@@ -378,3 +378,31 @@ func TestBuildChatRequestImages(t *testing.T) {
 		t.Error("image field 10 missing")
 	}
 }
+
+func TestSanitizeSystemPrompt(t *testing.T) {
+	in := "x-anthropic-billing-header: cc_version=2.1\r\n" +
+		"You are Claude Code, Anthropic's official CLI for Claude.\r\n" +
+		"You are an interactive CLI tool.\n" +
+		"IMPORTANT: Assist with authorized security testing, defensive security.\n" +
+		" - Claude Code is available as a CLI in the terminal.\n" +
+		"Keep answers short.\n"
+	want := "You are an interactive CLI tool.\nKeep answers short."
+	if got := SanitizeSystemPrompt(in); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if SanitizeSystemPrompt("You are Claude Code, Anthropic's official CLI for Claude.") != "" {
+		t.Error("identity-only prompt should become empty")
+	}
+	// The request omits field 2 when nothing is left.
+	b := BuildChatRequest("tok", "fp", "s", ChatRequest{System: "You are Claude Code.", Prompts: []Prompt{{Source: SourceUser, Text: "hi"}}})
+	r := &pwReader{data: b}
+	for {
+		f, _, _, _, ok := r.Next()
+		if !ok {
+			break
+		}
+		if f == 2 {
+			t.Error("empty sanitized system prompt still sent")
+		}
+	}
+}
