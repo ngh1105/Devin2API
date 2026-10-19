@@ -152,6 +152,39 @@ func TestV1AcceptsCreatedToken(t *testing.T) {
 	}
 }
 
+// TestV1RejectsWrongScheme ensures only "Bearer" is accepted, and an empty
+// bearer value never authenticates.
+func TestV1RejectsWrongScheme(t *testing.T) {
+	srv := makeTestServer(t, t.TempDir())
+	tok, _ := srv.tokens.Create()
+	for _, h := range []string{"Basic " + tok.Token, "Bearer ", "Bearer", "XXXXXXX" + tok.Token} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", h)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("Authorization %q: got %d, want 401", h, rec.Code)
+		}
+	}
+}
+
+// TestV1TouchesToken ensures a successful request records last_used.
+func TestV1TouchesToken(t *testing.T) {
+	srv := makeTestServer(t, t.TempDir())
+	tok, _ := srv.tokens.Create()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "bearer "+tok.Token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	list, _ := srv.tokens.List()
+	if list[0].LastUsed == nil {
+		t.Error("last_used not set")
+	}
+}
+
 // TestChatCompletionsBadBody verifies 400 for invalid JSON.
 func TestChatCompletionsBadBody(t *testing.T) {
 	tmp := t.TempDir()

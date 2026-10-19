@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/ngh1105/Devin2API/internal/openai"
 )
@@ -38,27 +39,19 @@ func (s *Server) v1Middleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
+		var id string
 		authed := false
-		if authHeader := r.Header.Get("Authorization"); authHeader != "" {
-			const prefix = "Bearer "
-			if len(authHeader) >= len(prefix) {
-				token := authHeader[len(prefix):]
-				if ok, _ := s.tokens.Verify(token); ok {
-					authed = true
-				}
-			}
+		if scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " "); ok && strings.EqualFold(scheme, "Bearer") {
+			id, authed = s.tokens.Match(strings.TrimSpace(token))
 		}
 		if !authed {
-			if apiKey := r.Header.Get("X-Api-Key"); apiKey != "" {
-				if ok, _ := s.tokens.Verify(apiKey); ok {
-					authed = true
-				}
-			}
+			id, authed = s.tokens.Match(r.Header.Get("X-Api-Key"))
 		}
 		if !authed {
 			openai.WriteError(w, http.StatusUnauthorized, "invalid or missing token")
 			return
 		}
+		s.tokens.Touch(id)
 		next.ServeHTTP(w, r)
 	}
 }

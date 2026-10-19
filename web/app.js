@@ -7,8 +7,12 @@
   /* ------------------------------------------------------------------ */
 
   // apiPost POSTs body (string) to path and returns the parsed JSON value.
+  // ADMIN_HEADERS marks requests as coming from this panel; the server rejects
+  // state-changing admin calls without it (CSRF guard).
+  var ADMIN_HEADERS = { "X-Devin2API": "1" };
+
   function apiPost(path, body) {
-    return fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: body })
+    return fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Devin2API": "1" }, body: body })
       .then(checkStatus)
       .then(function (r) { return r.json(); });
   }
@@ -20,7 +24,7 @@
 
   // apiDelete DELETEs path; resolves on success or rejects with the error body.
   function apiDelete(path) {
-    return fetch(path, { method: "DELETE" }).then(checkStatus);
+    return fetch(path, { method: "DELETE", headers: ADMIN_HEADERS }).then(checkStatus);
   }
 
   // checkStatus throws on non-2xx responses.
@@ -100,7 +104,8 @@
     // Login button handler.
     document.getElementById("login-btn").onclick = function () {
       var email = document.getElementById("login-email").value.trim();
-      var pass = document.getElementById("login-pass").value.trim();
+      // Passwords may legitimately start or end with spaces; don't trim.
+      var pass = document.getElementById("login-pass").value;
       if (!email || !pass) return setStatus(statusEl, "fill both fields", false);
       apiPost("/admin/api/accounts", JSON.stringify({ email: email, password: pass }))
         .then(loadAccounts)

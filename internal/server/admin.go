@@ -7,84 +7,90 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/ngh1105/Devin2API/internal/auth"
 	"github.com/ngh1105/Devin2API/internal/store"
 )
 
-// accountExpired wraps an Account with an expired bool for the admin API response.
-type accountExpired struct {
+// accountView is the admin API representation of an Account. Token values
+// are masked: the panel never needs them, and returning them would let any
+// page that can read the API exfiltrate live Devin credentials.
+type accountView struct {
 	*store.Account
 	Expired bool `json:"expired"`
 }
 
+func viewAccount(a *store.Account) accountView {
+	cp := *a
+	cp.Tokens.AccessToken = store.MaskSecret(a.Tokens.AccessToken)
+	cp.Tokens.RefreshToken = store.MaskSecret(a.Tokens.RefreshToken)
+	cp.Tokens.IDToken = store.MaskSecret(a.Tokens.IDToken)
+	return accountView{Account: &cp, Expired: a.Expired()}
+}
+
 func (s *Server) adminHandler(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	prefix := strings.TrimPrefix(path, "/admin/api")
+	path := strings.TrimPrefix(r.URL.Path, "/admin/api")
 
 	switch {
-	case prefix == "/settings":
+	case path == "/settings":
 		if r.Method != http.MethodGet {
 			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		s.handleSettings(w, r)
-	case prefix == "/accounts":
-		if r.Method == http.MethodGet {
+	case path == "/accounts":
+		switch r.Method {
+		case http.MethodGet:
 			s.listAccounts(w, r)
-			return
-		}
-		if r.Method == http.MethodPost {
+		case http.MethodPost:
 			s.createAccount(w, r)
-			return
+		default:
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-	case strings.HasSuffix(prefix, "/refresh"):
-		id := strings.TrimPrefix(prefix, "/accounts/")
-		id = strings.TrimSuffix(id, "/refresh")
-		s.refreshAccount(w, r, id)
-	case strings.HasPrefix(prefix, "/accounts/"):
-		id := strings.TrimPrefix(prefix, "/accounts/")
-		if len(strings.Split(id, "/")) > 1 {
+	case strings.HasPrefix(path, "/accounts/"):
+		rest := strings.TrimPrefix(path, "/accounts/")
+		id, action, _ := strings.Cut(rest, "/")
+		if !store.ValidID(id) {
 			writeErr(w, http.StatusNotFound, "not found")
 			return
 		}
-		if r.Method == http.MethodDelete {
+		switch {
+		case action == "" && r.Method == http.MethodDelete:
 			s.deleteAccount(w, r, id)
-			return
+		case action == "refresh" && r.Method == http.MethodPost:
+			s.refreshAccount(w, r, id)
+		case action == "" || action == "refresh":
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		default:
+			writeErr(w, http.StatusNotFound, "not found")
 		}
-		writeErr(w, http.StatusNotFound, "not found")
-	case prefix == "/tokens":
-		if r.Method == http.MethodGet {
+	case path == "/tokens":
+		switch r.Method {
+		case http.MethodGet:
 			s.listTokens(w, r)
-			return
-		}
-		if r.Method == http.MethodPost {
+		case http.MethodPost:
 			s.createToken(w, r)
+		default:
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	case strings.HasPrefix(path, "/tokens/"):
+		id := strings.TrimPrefix(path, "/tokens/")
+		if r.Method != http.MethodDelete {
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-	case strings.HasPrefix(prefix, "/tokens/"):
-		id := strings.TrimPrefix(prefix, "/tokens/")
-		if r.Method == http.MethodDelete {
-			s.deleteToken(w, r, id)
-			return
-		}
-		writeErr(w, http.StatusNotFound, "not found")
+		s.deleteToken(w, r, id)
 	default:
 		writeErr(w, http.StatusNotFound, "not found")
 	}
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]string{
+	writeJSON(w, http.StatusOK, map[string]string{
 		"listen":   s.listen,
 		"data_dir": s.dataDir,
 		"version":  "dev",
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	})
 }
 
 func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
@@ -93,12 +99,11 @@ func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "unable to list accounts")
 		return
 	}
-	out := make([]accountExpired, len(accs))
+	out := make([]accountView, len(accs))
 	for i, a := range accs {
-		out[i] = accountExpired{Account: a, Expired: a.Expired()}
+		out[i] = viewAccount(a)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(out)
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
@@ -108,25 +113,16 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var parsed map[string]json.RawMessage
-	if err := json.Unmarshal(rawBody, &parsed); err != nil {
+	var creds struct {
+		Email    *string `json:"email"`
+		Password *string `json:"password"`
+	}
+	if err := json.Unmarshal(rawBody, &creds); err != nil {
 		writeErr(w, http.StatusBadRequest, "malformed JSON")
 		return
 	}
-
-	hasEmail := false
-	hasPassword := false
-	for k := range parsed {
-		if k == "email" {
-			hasEmail = true
-		}
-		if k == "password" {
-			hasPassword = true
-		}
-	}
-
-	if hasEmail && hasPassword {
-		s.handleLoginFlow(w, r, rawBody)
+	if creds.Email != nil && creds.Password != nil {
+		s.handleLoginFlow(w, r, *creds.Email, *creds.Password)
 		return
 	}
 
@@ -137,68 +133,39 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, importErr.Reason)
 			return
 		}
-		writeErr(w, http.StatusInternalServerError, "import failed")
-		return
-	}
-
-	if err := s.accounts.Save(acc); err != nil {
 		writeErr(w, http.StatusInternalServerError, "unable to save account")
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(acc)
+	writeJSON(w, http.StatusCreated, viewAccount(acc))
 }
 
-func (s *Server) handleLoginFlow(w http.ResponseWriter, r *http.Request, rawBody []byte) {
+func (s *Server) handleLoginFlow(w http.ResponseWriter, r *http.Request, email, password string) {
 	if s.auth == nil {
 		writeErr(w, http.StatusServiceUnavailable, "auth client not configured")
 		return
 	}
-	var parsed map[string]json.RawMessage
-	json.Unmarshal(rawBody, &parsed)
-
-	var email, password string
-	if v, ok := parsed["email"]; ok {
-		json.Unmarshal(v, &email)
-	}
-	if v, ok := parsed["password"]; ok {
-		json.Unmarshal(v, &password)
+	if email == "" || password == "" {
+		writeErr(w, http.StatusBadRequest, "email and password are required")
+		return
 	}
 
 	tokens, err := s.auth.Login(r.Context(), email, password)
 	if err != nil {
-		var authErr *auth.AuthError
-		if errors.As(err, &authErr) {
-			writeErr(w, http.StatusBadGateway, authErr.Error())
-			return
-		}
-		writeErr(w, http.StatusBadGateway, "login failed")
+		writeAuthErr(w, err, "login failed")
 		return
 	}
-
 	profile, err := s.auth.UserInfo(r.Context(), tokens.AccessToken)
 	if err != nil {
-		var authErr *auth.AuthError
-		if errors.As(err, &authErr) {
-			writeErr(w, http.StatusBadGateway, authErr.Error())
-			return
-		}
-		writeErr(w, http.StatusBadGateway, "userinfo failed")
+		writeAuthErr(w, err, "userinfo failed")
 		return
 	}
 
-	acct := store.AccountFromLogin(email, tokens, profile)
-
-	if err := s.accounts.Save(acct); err != nil {
+	acct, err := s.accounts.Upsert(store.AccountFromLogin(email, tokens, profile))
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "unable to save account")
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(acct)
+	writeJSON(w, http.StatusCreated, viewAccount(acct))
 }
 
 func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
@@ -231,7 +198,6 @@ func (s *Server) refreshAccount(w http.ResponseWriter, r *http.Request, id strin
 		writeErr(w, http.StatusInternalServerError, "unable to get account")
 		return
 	}
-
 	if acc.Tokens.RefreshToken == "" {
 		writeErr(w, http.StatusBadRequest, "no refresh token")
 		return
@@ -239,29 +205,15 @@ func (s *Server) refreshAccount(w http.ResponseWriter, r *http.Request, id strin
 
 	newTokens, err := s.auth.Refresh(r.Context(), acc.Tokens.RefreshToken)
 	if err != nil {
-		var authErr *auth.AuthError
-		if errors.As(err, &authErr) {
-			writeErr(w, http.StatusBadGateway, authErr.Error())
-			return
-		}
-		writeErr(w, http.StatusBadGateway, "refresh failed")
+		writeAuthErr(w, err, "refresh failed")
 		return
 	}
-
-	// Mutate directly (same pointer as Get returns; Save persists it back).
-	acc.Tokens.AccessToken = newTokens.AccessToken
-	acc.Tokens.RefreshToken = newTokens.RefreshToken
-	acc.Tokens.IDToken = newTokens.IDToken
-	acc.Tokens.ExpiresAt = time.Now().Add(time.Duration(newTokens.ExpiresIn) * time.Second).Unix()
-	acc.Tokens.Scope = newTokens.Scope
-
-	if err := s.accounts.Save(acc); err != nil {
+	updated, err := s.accounts.UpdateTokens(id, newTokens)
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "save failed")
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(acc)
+	writeJSON(w, http.StatusOK, viewAccount(updated))
 }
 
 func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {
@@ -270,8 +222,11 @@ func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "unable to list tokens")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(toks)
+	// The plaintext value is only returned once, by createToken.
+	for i := range toks {
+		toks[i].Token = store.MaskSecret(toks[i].Token)
+	}
+	writeJSON(w, http.StatusOK, toks)
 }
 
 func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
@@ -280,34 +235,39 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "unable to create token")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(tok)
+	writeJSON(w, http.StatusCreated, tok)
 }
 
 func (s *Server) deleteToken(w http.ResponseWriter, r *http.Request, id string) {
-	toks, _ := s.tokens.List()
-	found := false
-	for _, t := range toks {
-		if t.ID == id {
-			found = true
-			break
-		}
-	}
-	if !found {
-		writeErr(w, http.StatusNotFound, "token not found")
-		return
-	}
 	if err := s.tokens.Delete(id); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeErr(w, http.StatusNotFound, "token not found")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "unable to delete token")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// writeAuthErr maps an auth failure to 502, exposing AuthError details only.
+func writeAuthErr(w http.ResponseWriter, err error, fallback string) {
+	var authErr *auth.AuthError
+	if errors.As(err, &authErr) {
+		writeErr(w, http.StatusBadGateway, authErr.Error())
+		return
+	}
+	writeErr(w, http.StatusBadGateway, fallback)
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
 // writeErr writes a JSON {"error":"..."} response with status code and content-type.
 func writeErr(w http.ResponseWriter, status int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	writeJSON(w, status, map[string]string{"error": msg})
 }

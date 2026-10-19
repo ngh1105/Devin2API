@@ -13,7 +13,7 @@ func TestWebRoutes(t *testing.T) {
 	srv := makeTestServerWithAuth(t, tmp, nil)
 
 	// 1) GET / → 302 to /web/accounts.html.
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := adminRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -26,7 +26,7 @@ func TestWebRoutes(t *testing.T) {
 	}
 
 	// 2) GET /web/accounts.html → 200, contains data-page="accounts".
-	req = httptest.NewRequest(http.MethodGet, "/web/accounts.html", nil)
+	req = adminRequest(http.MethodGet, "/web/accounts.html", nil)
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -39,7 +39,7 @@ func TestWebRoutes(t *testing.T) {
 	}
 
 	// 3) GET /web/tokens.html → 200, contains data-page="tokens".
-	req = httptest.NewRequest(http.MethodGet, "/web/tokens.html", nil)
+	req = adminRequest(http.MethodGet, "/web/tokens.html", nil)
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -52,7 +52,7 @@ func TestWebRoutes(t *testing.T) {
 	}
 
 	// 4) GET /web/settings.html → 200, contains data-page="settings".
-	req = httptest.NewRequest(http.MethodGet, "/web/settings.html", nil)
+	req = adminRequest(http.MethodGet, "/web/settings.html", nil)
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -65,7 +65,7 @@ func TestWebRoutes(t *testing.T) {
 	}
 
 	// 5) GET /web/app.js → 200 content-type text/javascript.
-	req = httptest.NewRequest(http.MethodGet, "/web/app.js", nil)
+	req = adminRequest(http.MethodGet, "/web/app.js", nil)
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -78,7 +78,7 @@ func TestWebRoutes(t *testing.T) {
 	}
 
 	// 6) GET /web/styles.css → 200 content-type text/css.
-	req = httptest.NewRequest(http.MethodGet, "/web/styles.css", nil)
+	req = adminRequest(http.MethodGet, "/web/styles.css", nil)
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -97,7 +97,7 @@ func TestAdminAPIWorks(t *testing.T) {
 	srv := makeTestServerWithAuth(t, tmp, nil)
 
 	// Settings endpoint should return correct JSON.
-	req := httptest.NewRequest(http.MethodGet, "/admin/api/settings", nil)
+	req := adminRequest(http.MethodGet, "/admin/api/settings", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 

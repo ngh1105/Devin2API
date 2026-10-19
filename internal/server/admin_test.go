@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -194,7 +195,7 @@ func TestAdminImportAccount(t *testing.T) {
 	srv := makeTestServerWithAuth(t, tmp, nil)
 
 	body := `{"access_token":"tok_test_abc","refresh_token":"rt_test_def"}`
-	req := httptest.NewRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body))
+	req := adminRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -211,7 +212,7 @@ func TestAdminImportAccount(t *testing.T) {
 		t.Errorf("account has no id")
 	}
 
-	req2 := httptest.NewRequest(http.MethodGet, "/admin/api/accounts", nil)
+	req2 := adminRequest(http.MethodGet, "/admin/api/accounts", nil)
 	rec2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec2, req2)
 
@@ -230,7 +231,7 @@ func TestAdminImportMalformed(t *testing.T) {
 	tmp := t.TempDir()
 	srv := makeTestServerWithAuth(t, tmp, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader("{bad json"))
+	req := adminRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader("{bad json"))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -251,7 +252,7 @@ func TestAdminDeleteAccount(t *testing.T) {
 	srv := makeTestServerWithAuth(t, tmp, nil)
 	acc := makeTestAccount(t, srv)
 
-	req := httptest.NewRequest(http.MethodDelete, "/admin/api/accounts/"+acc.ID, nil)
+	req := adminRequest(http.MethodDelete, "/admin/api/accounts/"+acc.ID, nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -259,10 +260,10 @@ func TestAdminDeleteAccount(t *testing.T) {
 		t.Fatalf("delete status: got %d, want %d", rec.Code, http.StatusNoContent)
 	}
 
-	req2 := httptest.NewRequest(http.MethodGet, "/admin/api/accounts", nil)
+	req2 := adminRequest(http.MethodGet, "/admin/api/accounts", nil)
 	rec2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec2, req2)
-	var list []*accountExpired
+	var list []*accountView
 	json.Unmarshal(rec2.Body.Bytes(), &list)
 	for _, a := range list {
 		if a.ID == acc.ID {
@@ -270,7 +271,7 @@ func TestAdminDeleteAccount(t *testing.T) {
 		}
 	}
 
-	req3 := httptest.NewRequest(http.MethodDelete, "/admin/api/accounts/nonexistent", nil)
+	req3 := adminRequest(http.MethodDelete, "/admin/api/accounts/nonexistent", nil)
 	rec3 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec3, req3)
 	if rec3.Code != http.StatusNotFound {
@@ -289,7 +290,7 @@ func TestAdminRefreshAccount(t *testing.T) {
 	srv := makeTestServerWithAuth(t, tmp, authC)
 	acc := makeTestAccount(t, srv)
 
-	req := httptest.NewRequest(http.MethodPost, "/admin/api/accounts/"+acc.ID+"/refresh", nil)
+	req := adminRequest(http.MethodPost, "/admin/api/accounts/"+acc.ID+"/refresh", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -300,8 +301,15 @@ func TestAdminRefreshAccount(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &refreshed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if refreshed.Tokens.AccessToken != "eynew_access" {
-		t.Errorf("refresh token wrong: got %q", refreshed.Tokens.AccessToken)
+	if refreshed.Tokens.AccessToken == "eynew_access" {
+		t.Error("response leaked the plaintext access token")
+	}
+	stored, _ := srv.accounts.Get(acc.ID)
+	if stored.Tokens.AccessToken != "eynew_access" {
+		t.Errorf("stored access token wrong: got %q", stored.Tokens.AccessToken)
+	}
+	if stored.Tokens.RefreshToken != "rt_new_67890" {
+		t.Errorf("stored refresh token wrong: got %q", stored.Tokens.RefreshToken)
 	}
 }
 
@@ -324,7 +332,7 @@ func TestAdminRefreshNoToken(t *testing.T) {
 	}
 	srv.accounts.Save(acct)
 
-	req := httptest.NewRequest(http.MethodPost, "/admin/api/accounts/no-refresh-id/refresh", nil)
+	req := adminRequest(http.MethodPost, "/admin/api/accounts/no-refresh-id/refresh", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -342,7 +350,7 @@ func TestAdminTokenLifecycle(t *testing.T) {
 	tmp := t.TempDir()
 	srv := makeTestServerWithAuth(t, tmp, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/admin/api/tokens", nil)
+	req := adminRequest(http.MethodPost, "/admin/api/tokens", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -354,7 +362,7 @@ func TestAdminTokenLifecycle(t *testing.T) {
 		t.Fatalf("unmarshal created token: %v", err)
 	}
 
-	req2 := httptest.NewRequest(http.MethodGet, "/admin/api/tokens", nil)
+	req2 := adminRequest(http.MethodGet, "/admin/api/tokens", nil)
 	rec2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec2, req2)
 	var toks []store.Token
@@ -363,14 +371,14 @@ func TestAdminTokenLifecycle(t *testing.T) {
 		t.Fatalf("list count: got %d, want 1", len(toks))
 	}
 
-	req3 := httptest.NewRequest(http.MethodDelete, "/admin/api/tokens/"+tok.ID, nil)
+	req3 := adminRequest(http.MethodDelete, "/admin/api/tokens/"+tok.ID, nil)
 	rec3 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec3, req3)
 	if rec3.Code != http.StatusNoContent {
 		t.Fatalf("delete status: got %d, want %d", rec3.Code, http.StatusNoContent)
 	}
 
-	req4 := httptest.NewRequest(http.MethodGet, "/admin/api/tokens", nil)
+	req4 := adminRequest(http.MethodGet, "/admin/api/tokens", nil)
 	rec4 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec4, req4)
 	json.Unmarshal(rec4.Body.Bytes(), &toks)
@@ -384,7 +392,7 @@ func TestAdminSettings(t *testing.T) {
 	tmp := t.TempDir()
 	srv := makeTestServerWithAuth(t, tmp, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/api/settings", nil)
+	req := adminRequest(http.MethodGet, "/admin/api/settings", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -407,7 +415,7 @@ func TestAdminSettingsPOSTVerbs(t *testing.T) {
 	srv := makeTestServerWithAuth(t, tmp, nil)
 
 	for _, method := range []string{http.MethodPut, http.MethodPost} {
-		req := httptest.NewRequest(method, "/admin/api/settings", strings.NewReader(`{}`))
+		req := adminRequest(method, "/admin/api/settings", strings.NewReader(`{}`))
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
 		if rec.Code != http.StatusMethodNotAllowed {
@@ -435,7 +443,7 @@ func TestAdminLoginFlow(t *testing.T) {
 	srv := makeTestServerWithAuth(t, tmp, authC)
 
 	body := `{"email":"user@test.com","password":"secret"}`
-	req := httptest.NewRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body))
+	req := adminRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -450,8 +458,79 @@ func TestAdminLoginFlow(t *testing.T) {
 	if acc.Sub != "auth0|userinfo-sub" {
 		t.Errorf("sub: got %q, want auth0|userinfo-sub", acc.Sub)
 	}
-	if acc.Tokens.AccessToken != "eylogin_access" {
-		t.Errorf("access token: got %q", acc.Tokens.AccessToken)
+	stored, err := srv.accounts.Get(acc.ID)
+	if err != nil {
+		t.Fatalf("get stored: %v", err)
+	}
+	if stored.Tokens.AccessToken != "eylogin_access" {
+		t.Errorf("access token: got %q", stored.Tokens.AccessToken)
+	}
+	if strings.Contains(rec.Body.String(), "eylogin_access") || strings.Contains(rec.Body.String(), "rt_login_refresh") {
+		t.Error("login response leaked plaintext tokens")
+	}
+}
+
+// TestAdminGuards verifies the DNS-rebinding, cross-origin and CSRF checks.
+func TestAdminGuards(t *testing.T) {
+	srv := makeTestServerWithAuth(t, t.TempDir(), nil)
+	cases := []struct {
+		name   string
+		mutate func(r *http.Request)
+		method string
+		want   int
+	}{
+		{"rebinding host", func(r *http.Request) { r.Host = "evil.example:8080" }, http.MethodGet, http.StatusForbidden},
+		{"cross origin", func(r *http.Request) { r.Header.Set("Origin", "https://evil.example") }, http.MethodGet, http.StatusForbidden},
+		{"post without marker", func(r *http.Request) { r.Header.Del("X-Devin2API") }, http.MethodPost, http.StatusForbidden},
+		{"same origin ok", func(r *http.Request) { r.Header.Set("Origin", "http://127.0.0.1:8080") }, http.MethodGet, http.StatusOK},
+		{"localhost ok", func(r *http.Request) { r.Host = "localhost:8080" }, http.MethodGet, http.StatusOK},
+		{"ipv6 loopback ok", func(r *http.Request) { r.Host = "[::1]:8080" }, http.MethodGet, http.StatusOK},
+	}
+	for _, tc := range cases {
+		req := adminRequest(tc.method, "/admin/api/tokens", nil)
+		tc.mutate(req)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, rec.Code, tc.want)
+		}
+	}
+}
+
+// TestAdminTokenListMasked verifies list never returns plaintext token values.
+func TestAdminTokenListMasked(t *testing.T) {
+	srv := makeTestServerWithAuth(t, t.TempDir(), nil)
+	tok, _ := srv.tokens.Create()
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, adminRequest(http.MethodGet, "/admin/api/tokens", nil))
+	if strings.Contains(rec.Body.String(), tok.Token) {
+		t.Errorf("token list leaked plaintext value: %s", rec.Body.String())
+	}
+}
+
+// TestAdminRefreshRequiresPOST verifies GET on /refresh is rejected.
+func TestAdminRefreshRequiresPOST(t *testing.T) {
+	srv := makeTestServerWithAuth(t, t.TempDir(), nil)
+	acc := makeTestAccount(t, srv)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, adminRequest(http.MethodGet, "/admin/api/accounts/"+acc.ID+"/refresh", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("got %d, want 405", rec.Code)
+	}
+}
+
+// TestAdminImportTraversalID verifies an id escaping the data dir is rejected.
+func TestAdminImportTraversalID(t *testing.T) {
+	tmp := t.TempDir()
+	srv := makeTestServerWithAuth(t, filepath.Join(tmp, "accounts"), nil)
+	body := `{"id":"../../pwned","tokens":{"access_token":"x"}}`
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, adminRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("got %d, want 400", rec.Code)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(tmp), "pwned.json")); err == nil {
+		t.Fatal("traversal wrote outside the store")
 	}
 }
 
@@ -467,7 +546,7 @@ func TestAdminLoginError(t *testing.T) {
 	srv := makeTestServerWithAuth(t, tmp, authC)
 
 	body := `{"email":"x@x.com","password":"x"}`
-	req := httptest.NewRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body))
+	req := adminRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -486,7 +565,7 @@ func TestAdminRefreshMissingAccount(t *testing.T) {
 	authC := auth.NewClient(auth.WithBaseURL(fakeSrv.URL), auth.WithHTTPClient(fakeSrv.Client()))
 	srv := makeTestServerWithAuth(t, tmp, authC)
 
-	req := httptest.NewRequest(http.MethodPost, "/admin/api/accounts/gone-id/refresh", nil)
+	req := adminRequest(http.MethodPost, "/admin/api/accounts/gone-id/refresh", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -511,7 +590,7 @@ func TestAdminLoginFlowGeneratesID(t *testing.T) {
 	srv := makeTestServerWithAuth(t, tmp, authC)
 
 	body := `{"email":"user@test.com","password":"secret"}`
-	req := httptest.NewRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body))
+	req := adminRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -534,7 +613,7 @@ func TestAdminLoginFlowGeneratesID(t *testing.T) {
 	}
 
 	// Also verify via GET listing that the account appears.
-	req2 := httptest.NewRequest(http.MethodGet, "/admin/api/accounts", nil)
+	req2 := adminRequest(http.MethodGet, "/admin/api/accounts", nil)
 	rec2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusOK {
@@ -547,4 +626,13 @@ func TestAdminLoginFlowGeneratesID(t *testing.T) {
 	if len(list) != 1 {
 		t.Errorf("expected 1 account in list, got %d", len(list))
 	}
+}
+
+// adminRequest builds a request the admin guard accepts: loopback Host and
+// the X-Devin2API marker header the panel sends.
+func adminRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("X-Devin2API", "1")
+	return req
 }
