@@ -26,10 +26,17 @@ type responseStore struct {
 	bytes int      // total size of stored histories
 }
 
-type storedResponse struct {
+// conversation is what a stored response continues: the system text from
+// input items and the prompts, ending with the assistant's reply.
+type conversation struct {
+	system  string
 	prompts []devin.Prompt
-	at      time.Time
-	size    int
+}
+
+type storedResponse struct {
+	conv conversation
+	at   time.Time
+	size int
 }
 
 // promptsSize approximates a history's memory use by its text payloads.
@@ -48,8 +55,8 @@ func promptsSize(prompts []devin.Prompt) int {
 }
 
 // put stores a history; one larger than the whole budget is not kept.
-func (s *responseStore) put(id string, prompts []devin.Prompt) {
-	size := promptsSize(prompts)
+func (s *responseStore) put(id string, conv conversation) {
+	size := len(conv.system) + promptsSize(conv.prompts)
 	if size > responseStoreBytes {
 		return
 	}
@@ -58,7 +65,7 @@ func (s *responseStore) put(id string, prompts []devin.Prompt) {
 	if s.items == nil {
 		s.items = map[string]storedResponse{}
 	}
-	s.items[id] = storedResponse{prompts: prompts, at: time.Now(), size: size}
+	s.items[id] = storedResponse{conv: conv, at: time.Now(), size: size}
 	s.order = append(s.order, id)
 	s.bytes += size
 	// Drop expired entries and the oldest beyond the count or size cap.
@@ -78,14 +85,14 @@ func (s *responseStore) put(id string, prompts []devin.Prompt) {
 }
 
 // get returns a copy of the stored conversation, if still kept.
-func (s *responseStore) get(id string) ([]devin.Prompt, bool) {
+func (s *responseStore) get(id string) (conversation, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	it, ok := s.items[id]
 	if !ok || time.Since(it.at) > responseTTL {
-		return nil, false
+		return conversation{}, false
 	}
-	return append([]devin.Prompt(nil), it.prompts...), true
+	return conversation{system: it.conv.system, prompts: append([]devin.Prompt(nil), it.conv.prompts...)}, true
 }
 
 // assistantTurn rebuilds the assistant prompt from a finished response:

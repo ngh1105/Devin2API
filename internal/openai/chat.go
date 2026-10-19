@@ -35,8 +35,10 @@ type ChatChoice struct {
 // AssistantText is an assistant message with optional reasoning text and
 // tool calls.
 type AssistantText struct {
-	Role             string     `json:"role"`
-	Content          string     `json:"content"`
+	Role string `json:"role"`
+	// Content is null (nil) when the reply is only tool calls, as in the
+	// OpenAI API.
+	Content          *string    `json:"content"`
 	ReasoningContent string     `json:"reasoning_content,omitempty"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }

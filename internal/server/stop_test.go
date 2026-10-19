@@ -51,7 +51,7 @@ func TestChatStopSequence(t *testing.T) {
 	rec := postChat(srv, `{"messages":[{"role":"user","content":"hi"}],"stop":"ng"}`)
 	var resp openai.ChatCompletion
 	json.Unmarshal(rec.Body.Bytes(), &resp)
-	if rec.Code != 200 || resp.Choices[0].Message.Content != "po" || resp.Choices[0].FinishReason != "stop" {
+	if rec.Code != 200 || strOf(resp.Choices[0].Message.Content) != "po" || resp.Choices[0].FinishReason != "stop" {
 		t.Errorf("status %d body %s", rec.Code, rec.Body)
 	}
 	for _, body := range []string{
@@ -147,7 +147,8 @@ func TestResponsesPreviousResponseID(t *testing.T) {
 	}
 
 	// The stored conversation is the first exchange plus the new turn.
-	prompts, ok := srv.storedResponses.get(second.ID)
+	conv, ok := srv.storedResponses.get(second.ID)
+	prompts := conv.prompts
 	want := []string{"first question", "pong", "second question", "pong"}
 	if !ok || len(prompts) != len(want) {
 		t.Fatalf("stored %d prompts", len(prompts))
@@ -170,7 +171,7 @@ func TestResponsesPreviousResponseID(t *testing.T) {
 func TestResponseStoreEviction(t *testing.T) {
 	var s responseStore
 	for i := 0; i < responseStoreSize+10; i++ {
-		s.put(fmt.Sprintf("resp_%d", i), nil)
+		s.put(fmt.Sprintf("resp_%d", i), conversation{})
 	}
 	if len(s.items) != responseStoreSize {
 		t.Errorf("store holds %d, cap %d", len(s.items), responseStoreSize)

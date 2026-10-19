@@ -18,15 +18,36 @@ type Message struct {
 
 // ChatRequest is the body of a /v1/chat/completions POST.
 type ChatRequest struct {
-	Model       string          `json:"model"`
-	Messages    []Message       `json:"messages"`
-	Stream      bool            `json:"stream"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	TopP        *float64        `json:"top_p,omitempty"`
-	MaxTokens   *int64          `json:"max_tokens,omitempty"`
-	Stop        json.RawMessage `json:"stop,omitempty"` // string or list of strings
-	Tools       []Tool          `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
+	Model       string    `json:"model"`
+	Messages    []Message `json:"messages"`
+	Stream      bool      `json:"stream"`
+	Temperature *float64  `json:"temperature,omitempty"`
+	TopP        *float64  `json:"top_p,omitempty"`
+	MaxTokens   *int64    `json:"max_tokens,omitempty"`
+	// MaxCompletionTokens replaces the deprecated max_tokens in current
+	// OpenAI SDKs; it wins when both are set.
+	MaxCompletionTokens *int64          `json:"max_completion_tokens,omitempty"`
+	Stop                json.RawMessage `json:"stop,omitempty"` // string or list of strings
+	Tools               []Tool          `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
+	StreamOptions       *struct {
+		IncludeUsage bool `json:"include_usage"`
+	} `json:"stream_options,omitempty"`
+}
+
+// OutputLimit returns the requested output token cap, or 0 if unset.
+func (r ChatRequest) OutputLimit() int64 {
+	for _, p := range []*int64{r.MaxCompletionTokens, r.MaxTokens} {
+		if p != nil && *p > 0 {
+			return *p
+		}
+	}
+	return 0
+}
+
+// IncludeUsage reports whether a streaming client asked for the usage chunk.
+func (r ChatRequest) IncludeUsage() bool {
+	return r.StreamOptions != nil && r.StreamOptions.IncludeUsage
 }
 
 // StopSequences decodes the stop parameter, given as a string or a list.
@@ -88,6 +109,27 @@ func WriteError(w http.ResponseWriter, status int, msg string) {
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(Error{Error: ErrorBody{
 		Message: msg,
-		Type:    "devin2api_error",
+		Type:    ErrorType(status),
 	}})
+}
+
+// ErrorType maps an HTTP status to the OpenAI error type SDKs classify on.
+func ErrorType(status int) string {
+	switch status {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge:
+		return "invalid_request_error"
+	case http.StatusUnauthorized:
+		return "authentication_error"
+	case http.StatusForbidden:
+		return "permission_error"
+	case http.StatusNotFound:
+		return "not_found_error"
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	default:
+		if status >= 500 {
+			return "server_error"
+		}
+		return "invalid_request_error"
+	}
 }

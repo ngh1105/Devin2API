@@ -243,7 +243,7 @@ How chat works:
   - Accounts that are parked, out of daily or weekly quota, or whose token was rejected go last. They are still tried, so a request only fails when every account fails.
 - If an account's token is rejected (401) or it hits a limit (429/403) before any output is sent, the next account is tried. A rejected token is flagged in the panel so you can re-login.
 - `model` accepts the ids from `/v1/models`. A `devin/` prefix is dropped and dots become dashes (`claude-sonnet-4.6` → `claude-sonnet-4-6`). A family name without an effort level picks one from the catalog, trying medium, then high, then low (`gpt-5-4` → `gpt-5-4-medium`).
-- `system`/`developer` messages become the system prompt; `user` and `assistant` messages become the conversation. `max_tokens` (default 32000), `temperature` and `top_p` are forwarded.
+- `system`/`developer` messages become the system prompt; `user` and `assistant` messages become the conversation. `max_completion_tokens` (or the older `max_tokens`; default 32000), `temperature` and `top_p` are forwarded. Streams include usage only when `stream_options.include_usage` is set, in a final chunk with empty `choices`.
 - `stop` (a string or up to 4 strings) is applied by the proxy, since upstream has no stop option: the output is cut before the first match and the upstream stream is closed. `finish_reason` is `"stop"`. Only answer text is checked, not thinking or tool arguments.
 - System prompts are cleaned before going upstream: Devin rejects prompts that carry another agent's identity (e.g. "You are Claude Code, ...") with a misleading 403, so such lines, Claude Code billing headers and a few related lines are dropped. This applies to all three chat endpoints.
 - Thinking text, when the model produces it, is returned as `reasoning_content`.
@@ -251,7 +251,7 @@ How chat works:
 - `tool_choice`: `"none"` drops the tools; `"auto"` is the default. Upstream cannot force a tool call, so `"required"` and a named function are best effort: a named choice narrows the tools to that one, and both add an instruction to the system prompt telling the model to call a tool. Models follow it reliably in testing, but it is not guaranteed.
 - Images: user messages may include `image_url` parts with base64 data URLs (`data:image/png;base64,...`; png, jpeg, webp, gif). Remote image URLs are not fetched and return 400, as do images sent to a model without `"multimodal": true` in `/v1/models`. Request bodies on `/v1` may be up to 32 MB.
 - Rate limits: when Devin returns 429 with a stated wait ("reset in 22 minutes"), the response carries a matching `Retry-After` header (seconds).
-- Errors use the OpenAI error shape. With no usable account the endpoint returns 503.
+- Errors use the OpenAI error shape with a matching `type` (`invalid_request_error`, `rate_limit_error`, `server_error`, ...). With no usable account the endpoint returns 503. When Devin rejects the proxy's own account tokens (upstream 401/403), clients get 502 rather than 401, so they do not blame their API key; re-login the account in the panel.
 
 `/v1/messages` (Anthropic format):
 

@@ -13,11 +13,18 @@ import (
 )
 
 // toDevinFromResponses converts an OpenAI Responses request. prior holds the
-// conversation of previous_response_id (nil when not set); the new input
+// conversation of previous_response_id (empty when not set); the new input
 // continues it. Built-in tools (web_search, file_search...) are skipped
-// since they run on OpenAI's side.
-func toDevinFromResponses(req openai.ResponsesRequest, prior []devin.Prompt) (devin.ChatRequest, error) {
-	out := devin.ChatRequest{Model: req.Model, MaxTokens: defaultMaxTokens, Temperature: 1.0, Prompts: prior}
+// since they run on OpenAI's side. It also returns the conversation's
+// system text from input items (excluding top-level instructions, which
+// the API does not carry over to follow-ups) for storing with the history.
+func toDevinFromResponses(req openai.ResponsesRequest, prior conversation) (devin.ChatRequest, string, error) {
+	out := devin.ChatRequest{Model: req.Model, MaxTokens: defaultMaxTokens, Temperature: 1.0, Prompts: prior.prompts}
+	var convSystem []string
+	if prior.system != "" {
+		convSystem = append(convSystem, prior.system)
+	}
+	fail := func(err error) (devin.ChatRequest, string, error) { return out, "", err }
 	if req.MaxOutputTokens != nil && *req.MaxOutputTokens > 0 {
 		out.MaxTokens = int(*req.MaxOutputTokens)
 	}
@@ -33,16 +40,12 @@ func toDevinFromResponses(req openai.ResponsesRequest, prior []devin.Prompt) (de
 		}
 	}
 	if err := validateTools(out.Tools); err != nil {
-		return out, err
+		return fail(err)
 	}
 
 	items, err := openai.InputItems(req.Input)
 	if err != nil {
-		return out, err
-	}
-	var system []string
-	if req.Instructions != "" {
-		system = append(system, req.Instructions)
+		return fail(err)
 	}
 	for i, it := range items {
 		typ := it.Type
@@ -53,12 +56,12 @@ func toDevinFromResponses(req openai.ResponsesRequest, prior []devin.Prompt) (de
 		case "message":
 			text, images, err := openai.InputContent(it.Content)
 			if err != nil {
-				return out, fmt.Errorf("input[%d]: %w", i, err)
+				return fail(fmt.Errorf("input[%d]: %w", i, err))
 			}
 			switch it.Role {
 			case "system", "developer":
 				if text != "" {
-					system = append(system, text)
+					convSystem = append(convSystem, text)
 				}
 			case "user":
 				p := devin.Prompt{Source: devin.SourceUser, Text: text}
@@ -69,11 +72,11 @@ func toDevinFromResponses(req openai.ResponsesRequest, prior []devin.Prompt) (de
 			case "assistant":
 				out.Prompts = appendAssistantText(out.Prompts, text)
 			default:
-				return out, fmt.Errorf("input[%d]: role %q is not supported", i, it.Role)
+				return out, "", fmt.Errorf("input[%d]: role %q is not supported", i, it.Role)
 			}
 		case "function_call":
 			if it.CallID == "" || it.Name == "" {
-				return out, fmt.Errorf("input[%d]: function_call call_id and name are required", i)
+				return out, "", fmt.Errorf("input[%d]: function_call call_id and name are required", i)
 			}
 			args := it.Arguments
 			if args == "" {
@@ -82,11 +85,11 @@ func toDevinFromResponses(req openai.ResponsesRequest, prior []devin.Prompt) (de
 			out.Prompts = appendAssistantCall(out.Prompts, devin.ToolCall{ID: decodeToolCallID(it.CallID), Name: it.Name, Arguments: args})
 		case "function_call_output":
 			if it.CallID == "" {
-				return out, fmt.Errorf("input[%d]: function_call_output call_id is required", i)
+				return out, "", fmt.Errorf("input[%d]: function_call_output call_id is required", i)
 			}
 			text, images, err := openai.InputContent(it.Output)
 			if err != nil {
-				return out, fmt.Errorf("input[%d]: output: %w", i, err)
+				return out, "", fmt.Errorf("input[%d]: output: %w", i, err)
 			}
 			p := devin.Prompt{Source: devin.SourceToolResult, Text: text, ToolCallID: decodeToolCallID(it.CallID)}
 			for _, img := range images {
@@ -96,21 +99,25 @@ func toDevinFromResponses(req openai.ResponsesRequest, prior []devin.Prompt) (de
 		case "reasoning":
 			// Upstream takes no reasoning history.
 		default:
-			return out, fmt.Errorf("input[%d]: item type %q is not supported", i, typ)
+			return out, "", fmt.Errorf("input[%d]: item type %q is not supported", i, typ)
 		}
+	}
+	system := convSystem
+	if req.Instructions != "" {
+		system = append([]string{req.Instructions}, convSystem...)
 	}
 	out.System = strings.Join(system, "\n\n")
 	tc, err := responsesToolChoice(req.ToolChoice)
 	if err != nil {
-		return out, err
+		return out, "", err
 	}
 	if err := applyToolChoice(&out, tc); err != nil {
-		return out, err
+		return out, "", err
 	}
 	if !hasInput(out.Prompts) {
-		return out, errors.New("input needs at least one non-empty user message")
+		return out, "", errors.New("input needs at least one non-empty user message")
 	}
-	return out, nil
+	return out, strings.Join(convSystem, "\n\n"), nil
 }
 
 // appendAssistantText adds assistant text, merging into a directly
@@ -149,7 +156,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	var prior []devin.Prompt
+	var prior conversation
 	if req.PreviousResponseID != "" {
 		var ok bool
 		if prior, ok = s.storedResponses.get(req.PreviousResponseID); !ok {
@@ -157,7 +164,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	dreq, err := toDevinFromResponses(req, prior)
+	dreq, convSystem, err := toDevinFromResponses(req, prior)
 	if err != nil {
 		openai.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -197,12 +204,16 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ShouldStore() {
 		history := append(append([]devin.Prompt(nil), dreq.Prompts...), assistantTurn(seg.segs, res))
-		s.storedResponses.put(rw.id, history)
+		s.storedResponses.put(rw.id, conversation{system: convSystem, prompts: history})
 	}
-	statusStr := "completed"
-	if finishReason(res) == "length" {
-		statusStr = "incomplete"
+	statusStr, incompleteReason := "completed", ""
+	switch finishReason(res) {
+	case "length":
+		statusStr, incompleteReason = "incomplete", "max_output_tokens"
+	case "content_filter":
+		statusStr, incompleteReason = "incomplete", "content_filter"
 	}
+	rw.incompleteReason = incompleteReason
 	final := rw.object(seg.segs, statusStr, res)
 	if rw.sse == nil {
 		writeJSON(w, http.StatusOK, final)
@@ -221,12 +232,13 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 // becomes a reasoning item with a summary, text a message item, and each
 // tool call a function_call item.
 type responsesWriter struct {
-	id, model string
-	previous  string // previous_response_id echoed in the response object
-	created   int64
-	sse       *sseWriter
-	seq       int
-	itemIDs   []string
+	id, model        string
+	previous         string // previous_response_id echoed in the response object
+	incompleteReason string // set when the response ends incomplete
+	created          int64
+	sse              *sseWriter
+	seq              int
+	itemIDs          []string
 }
 
 func (rw *responsesWriter) emit(name string, fields map[string]any) error {
@@ -379,7 +391,7 @@ func (rw *responsesWriter) object(segs []*segment, status string, res *devin.Cha
 		"previous_response_id": nilIfEmpty(rw.previous),
 	}
 	if status == "incomplete" {
-		obj["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
+		obj["incomplete_details"] = map[string]any{"reason": rw.incompleteReason}
 	}
 	if res != nil {
 		obj["usage"] = map[string]int{

@@ -30,8 +30,8 @@ var errNoAccount = errors.New("no enabled Devin account with a session token; ad
 // content parts are rejected.
 func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
 	out := devin.ChatRequest{Model: req.Model, MaxTokens: defaultMaxTokens, Temperature: 1.0}
-	if req.MaxTokens != nil && *req.MaxTokens > 0 {
-		out.MaxTokens = int(*req.MaxTokens)
+	if n := req.OutputLimit(); n > 0 {
+		out.MaxTokens = int(n)
 	}
 	if req.Temperature != nil {
 		out.Temperature = *req.Temperature
@@ -355,10 +355,11 @@ func hasImages(req devin.ChatRequest) bool {
 }
 
 // resetInRe matches the wait Devin states in rate-limit messages, e.g.
-// "Your limit will reset in 22 minutes" or "reset in 1 hour and 5 minutes".
+// "Your limit will reset in 22 minutes", "resets in 1 hour and 5 minutes",
+// "reset in 5h 30m" or "resets in 2 days".
 var (
-	resetInRe   = regexp.MustCompile(`(?i)reset in ([^.(]+)`)
-	resetUnitRe = regexp.MustCompile(`(?i)(\d+)\s*(hour|minute|min|second|sec)`)
+	resetInRe   = regexp.MustCompile(`(?i)resets?\s+in\s+([^.(]+)`)
+	resetUnitRe = regexp.MustCompile(`(?i)(\d+)\s*(days?|d\b|hours?|hrs?|h\b|minutes?|mins?|m\b|seconds?|secs?|s\b)`)
 )
 
 // retryAfterSeconds extracts the stated wait from an upstream message, in
@@ -375,6 +376,8 @@ func retryAfterSeconds(msg string) int {
 			continue
 		}
 		switch strings.ToLower(u[2])[0] {
+		case 'd':
+			total += n * 86400
 		case 'h':
 			total += n * 3600
 		case 'm':
@@ -399,19 +402,36 @@ func setRetryAfter(w http.ResponseWriter, status int, err error) {
 }
 
 // upstreamStatus picks the HTTP status and message for a failed chat.
+// Upstream 401/403 mean Devin rejected the proxy's own account tokens, not
+// the client's key, so they become 502: returning 401 would make clients
+// such as Claude Code tell the user their API key is wrong.
 func upstreamStatus(err error) (int, string) {
 	var ue *devin.UpstreamError
 	switch {
 	case errors.Is(err, errNoAccount):
 		return http.StatusServiceUnavailable, err.Error()
 	case errors.As(err, &ue):
-		if ue.Status == 499 {
+		switch ue.Status {
+		case 499:
 			return http.StatusBadGateway, "upstream canceled the request"
+		case http.StatusUnauthorized:
+			return http.StatusBadGateway, "devin rejected the account token (re-login in the panel): " + ue.Message
+		case http.StatusForbidden:
+			return http.StatusBadGateway, "devin refused the request: " + ue.Message
 		}
 		return ue.Status, "devin: " + ue.Message
 	default:
 		return http.StatusBadGateway, err.Error()
 	}
+}
+
+// contentOrNull returns the reply text, or nil (JSON null) when the reply
+// is only tool calls, as the OpenAI API does.
+func contentOrNull(text string, res *devin.ChatResult) *string {
+	if text == "" && len(res.ToolCalls) > 0 {
+		return nil
+	}
+	return &text
 }
 
 // chatCompletions handles POST /v1/chat/completions, streaming or not.
@@ -449,7 +469,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		s.streamCompletion(ctx, tr, w, dreq, id, model, created)
+		s.streamCompletion(ctx, tr, w, dreq, id, model, created, req.IncludeUsage())
 		return
 	}
 
@@ -465,7 +485,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		ID: id, Object: "chat.completion", Created: created, Model: model,
 		Choices: []openai.ChatChoice{{
 			Message: openai.AssistantText{
-				Role: "assistant", Content: text, ReasoningContent: thinking,
+				Role: "assistant", Content: contentOrNull(text, res), ReasoningContent: thinking,
 				ToolCalls: openAIToolCalls(res.ToolCalls),
 			},
 			FinishReason: finishReason(res),
@@ -477,7 +497,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 // streamCompletion writes the chat as OpenAI SSE chunks. Headers are only
 // sent once the first delta arrives, so failures before any output still
 // return a proper HTTP error status (and allow account failover).
-func (s *Server) streamCompletion(ctx context.Context, tr *chatTrace, w http.ResponseWriter, dreq devin.ChatRequest, id, model string, created int64) {
+func (s *Server) streamCompletion(ctx context.Context, tr *chatTrace, w http.ResponseWriter, dreq devin.ChatRequest, id, model string, created int64, includeUsage bool) {
 	flusher, _ := w.(http.Flusher)
 	headerSent := false
 	send := func(c openai.ChatChunk) error {
@@ -527,7 +547,7 @@ func (s *Server) streamCompletion(ctx context.Context, tr *chatTrace, w http.Res
 			return
 		}
 		// Mid-stream failure: report it in-band, then terminate the stream.
-		b, _ := json.Marshal(openai.Error{Error: openai.ErrorBody{Message: msg, Type: "devin2api_error", Code: &status}})
+		b, _ := json.Marshal(openai.Error{Error: openai.ErrorBody{Message: msg, Type: openai.ErrorType(status), Code: &status}})
 		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", b)
 		if flusher != nil {
 			flusher.Flush()
@@ -535,8 +555,19 @@ func (s *Server) streamCompletion(ctx context.Context, tr *chatTrace, w http.Res
 		return
 	}
 	reason := finishReason(res)
-	if err := send(openai.ChatChunk{Choices: []openai.ChunkChoice{{Delta: openai.Delta{}, FinishReason: &reason}}, Usage: usageOf(res)}); err != nil {
+	if err := send(openai.ChatChunk{Choices: []openai.ChunkChoice{{Delta: openai.Delta{}, FinishReason: &reason}}}); err != nil {
 		return
+	}
+	// With stream_options.include_usage, usage comes in its own final chunk
+	// with an empty choices list, as in the OpenAI API.
+	if includeUsage {
+		u := usageOf(res)
+		if u == nil {
+			u = &openai.Usage{}
+		}
+		if err := send(openai.ChatChunk{Choices: []openai.ChunkChoice{}, Usage: u}); err != nil {
+			return
+		}
 	}
 	io.WriteString(w, "data: [DONE]\n\n")
 	if flusher != nil {
