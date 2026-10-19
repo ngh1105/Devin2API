@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRequestLogRing(t *testing.T) {
@@ -86,5 +89,42 @@ func TestLogsRecordFailure(t *testing.T) {
 	logs := getLogs(t, srv)
 	if len(logs) != 1 || logs[0].Status != 429 || !strings.Contains(logs[0].Error, "reset in 2 minutes") {
 		t.Errorf("logs = %+v", logs)
+	}
+}
+
+// TestStatsPersist: counters are saved to <data>/stats.json and restored
+// by the next server on the same data dir.
+func TestStatsPersist(t *testing.T) {
+	dir := t.TempDir()
+	srv := chatTestServer(t, &fakeDevin{}, "eyJtok1")
+	srv.stats.load(dir) // chatTestServer has no data dir; point it at one
+	postChat(srv, `{"messages":[{"role":"user","content":"hi"}]}`)
+	srv.stats.failed.Add(1) // as if a second request had failed
+	srv.stats.save()
+
+	var c chatStats
+	c.load(dir)
+	if c.requests.Load() != 1 || c.failed.Load() != 1 || !c.since.Equal(srv.stats.since) {
+		t.Errorf("reloaded requests=%d failed=%d since=%v", c.requests.Load(), c.failed.Load(), c.since)
+	}
+}
+
+// TestStatsSaveIsBatched: many changes schedule one delayed write.
+func TestStatsSaveIsBatched(t *testing.T) {
+	dir := t.TempDir()
+	var c chatStats
+	c.load(dir)
+	for i := 0; i < 50; i++ {
+		c.requests.Add(1)
+		c.changed()
+	}
+	if _, err := os.Stat(filepath.Join(dir, "stats.json")); err == nil {
+		t.Fatal("saved before the batching delay")
+	}
+	time.Sleep(statsSaveDelay + 500*time.Millisecond)
+	var r chatStats
+	r.load(dir)
+	if r.requests.Load() != 50 {
+		t.Errorf("reloaded %d, want 50", r.requests.Load())
 	}
 }

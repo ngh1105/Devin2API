@@ -70,29 +70,26 @@
   function loadStats() {
     apiGet("/admin/api/stats").then(function (d) {
       var g = document.getElementById("stats-grid");
-      g.innerHTML = "";
+      while (g.firstChild) g.removeChild(g.firstChild);
+      var since = d.since ? "since " + new Date(d.since).toLocaleDateString() : "";
       var items = [
-        { label: "Accounts", val: d.accounts, sub: (d.enabled != null ? (d.enabled + "/" + d.accounts) : "") },
+        { label: "Accounts", val: d.accounts, sub: (d.enabled != null ? (d.enabled + "/" + d.accounts + " enabled") : "") },
         { label: "Models", val: (d.models ? d.models : "—"), sub: "" },
-        { label: "Requests", val: (d.requests != null ? d.requests : 0), sub: "" },
-        { label: "Failed", val: (d.failed != null ? d.failed : 0), sub: "" }
+        { label: "Requests", val: (d.requests != null ? d.requests : 0), sub: since },
+        { label: "Failed", val: (d.failed != null ? d.failed : 0), sub: since }
       ];
-      for (var i = 0; i < items.length; i++) {
+      items.forEach(function (it) {
         var c = document.createElement("div");
         c.className = "stat-card";
-        c.innerHTML = "<span class=\"stat-val\">";
-        if (items[i].sub) {
-          c.children[0].textContent = items[i].val;
-        } else {
-          c.children[0].innerHTML = "";
-          c.children[0].appendChild(textNode(items[i].val));
-        }
-        c.innerHTML += "</span><span class=\"stat-label\">" + esc(items[i].label) + "</span>";
-        if (items[i].sub) {
-          c.innerHTML += '<span class="stat-sub">' + esc(items[i].sub) + '</span>';
-        }
+        [["stat-val", String(it.val)], ["stat-label", it.label], ["stat-sub", it.sub]].forEach(function (p) {
+          if (!p[1]) return;
+          var span = document.createElement("span");
+          span.className = p[0];
+          span.appendChild(textNode(p[1]));
+          c.appendChild(span);
+        });
         g.appendChild(c);
-      }
+      });
     }).catch(function (e) { console.warn("loadStats:", e.message); });
   }
 
