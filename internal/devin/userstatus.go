@@ -50,6 +50,12 @@ func GenerateFingerprint(seed string) string {
 //
 // Outer envelope wraps the inner as field 1 (wire 2).
 func BuildGetUserStatusRequest(sessionToken, fingerprint string) []byte {
+	return PwFieldBytes(1, clientMetadata(sessionToken, fingerprint))
+}
+
+// clientMetadata encodes the ClientMetadata message shared by GetUserStatus
+// and GetChatMessage (field layout documented on BuildGetUserStatusRequest).
+func clientMetadata(sessionToken, fingerprint string) []byte {
 	var inner []byte
 	inner = append(inner, pwFieldString(1, "chisel")...)
 	inner = append(inner, pwFieldString(2, "3000.10.21")...)
@@ -59,11 +65,7 @@ func BuildGetUserStatusRequest(sessionToken, fingerprint string) []byte {
 	inner = append(inner, pwFieldString(7, "3000.10.21")...)
 	inner = append(inner, pwFieldString(12, "chisel")...)
 	inner = append(inner, pwFieldString(31, fingerprint)...)
-
-	outer := pwTag(1, wireBytes)
-	outer = append(outer, pwVarint(uint64(len(inner)))...)
-	outer = append(outer, inner...)
-	return outer
+	return inner
 }
 
 // ParseGetUserStatusResponse decodes the protobuf response from

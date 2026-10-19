@@ -404,7 +404,7 @@
     var entries = [
       ["/healthz", "GET", 'Returns {"status":"ok"}'],
       ["/v1/models", "GET", "List available models (OpenAI-compatible)"],
-      ["/v1/chat/completions", "POST", '501 stub — upstream not implemented yet'],
+      ["/v1/chat/completions", "POST", 'Chat completions via Devin (stream + non-stream, text only)'],
       ["/admin/api/accounts", "GET / POST", "List or import accounts"],
       ["/admin/api/stats", "GET", 'Returns {accounts,enabled,requests,failed}']
     ];
@@ -421,8 +421,7 @@
       + 'curl -X POST http://localhost:8080/v1/chat/completions \\\n'
       + '  -H "Authorization: Bearer YOUR_KEY" \\\n'
       + '  -H "Content-Type: application/json" \\\n'
-      + '  -d \'{"model":"devin","messages":[{"role":"user","content":"hi"}]}\' \\\n'
-      + '# Returns: 501 upstream not implemented yet';
+      + '  -d \'{"model":"devin","messages":[{"role":"user","content":"hi"}]}\'';
   }
 
   // ---- Boot ----

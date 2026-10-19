@@ -4,9 +4,10 @@ OpenAI-compatible reverse proxy API for Devin — built from scratch in Go.
 
 **Milestones achieved:**
 1. OAuth login (browser-link, any Devin auth method incl. Google/SSO)
-2. Web panel (accounts, quota display, API keys, settings), CLI login, live usage/quota panel, CLIProxyAPI-compatible account JSON import, token-gated `/v1` proxy stub
+2. Web panel (accounts, quota display, API keys, settings), CLI login, live usage/quota panel, CLIProxyAPI-compatible account JSON import, token-gated `/v1`
+3. Live `/v1/chat/completions` (stream + non-stream) backed by Devin's `GetChatMessage` API, with account rotation and failover
 
-**What it does:** Proxies OpenAI-compatible `/v1/*` requests for Devin. The chat completions endpoint currently returns **501 "upstream not implemented"** (`data:` frames when streaming). Milestone 3 will wire it to Devin's upstream chat protocol (WebSocket).
+**What it does:** Serves OpenAI-compatible `/v1/*` endpoints backed by your Devin accounts.
 
 ---
 
@@ -190,10 +191,18 @@ If the token store is **empty** (no tokens created), the proxy accepts requests 
 | Endpoint                             | Method   | Current behavior                                      |
 |--------------------------------------|----------|-------------------------------------------------------|
 | `GET /healthz`                       | GET      | Returns `{"status":"ok"}`.                            |
-| `GET /v1/models`                     | GET      | Returns the static model list (model id: `devin`).    |
-| `POST /v1/chat/completions`          | POST     | **501** — body contains `{"error":{"message":"upstream not implemented yet","type":"devin2api_error"}}`.<br>When `stream: true`, the error arrives as SSE `data:` frames. |
+| `GET /v1/models`                     | GET      | Lists the advertised models. `devin` is an alias for `swe-2-high`. |
+| `POST /v1/chat/completions`          | POST     | Chat completion through Devin. Supports `stream: true` (SSE). |
 
-The `/v1/chat/completions` endpoint mirrors the OpenAI Chat Completions wire format (request shape accepted as-is), but delegates upstream calls to Devin's actual chat protocol — which has not been implemented yet. This is **the next milestone**.
+How chat works:
+
+- Each request goes to `server.codeium.com/exa.api_server_pb.ApiServerService/GetChatMessage` (Connect + protobuf) using the session token of an enabled account.
+- Accounts are used round-robin. If an account's token is rejected (401) or its quota is exhausted (429/403) before any output is sent, the next account is tried. A rejected token is flagged in the panel so you can re-login.
+- `model` accepts the names from `/v1/models` or any upstream model UID. A `devin/` prefix is dropped and dots become dashes (`claude-sonnet-4.6` → `claude-sonnet-4-6`).
+- `system`/`developer` messages become the system prompt; `user` and `assistant` messages become the conversation. `max_tokens` (default 32000) and `temperature` are forwarded.
+- Thinking text, when the model produces it, is returned as `reasoning_content`.
+- Text only for now: `tool` messages, tool calls and image parts return 400.
+- Errors use the OpenAI error shape. With no usable account the endpoint returns 503.
 
 ---
 
@@ -203,9 +212,8 @@ The `/v1/chat/completions` endpoint mirrors the OpenAI Chat Completions wire for
 |-----------|-----------------------------------------------------------|----------|
 | 1         | OAuth login (Auth0 PKCE), account persistence, web panel, `/v1` proxy stub | Done     |
 | 2         | Browser-link login (any IdP), usage/quota panel, CLI login, CLIProxyAPI JSON import, token-gated /v1 stub | Done |
-| 3         | Devin upstream chat protocol (WebSocket) — brings `/v1/chat/completions` live | Next |
-
-Once milestone 3 lands, the chat completions endpoint will forward user messages to Devin over WebSocket, stream back responses, and complete the OpenAI-compatible experience.
+| 3         | Devin chat upstream (`GetChatMessage`) — `/v1/chat/completions` live, account failover | Done |
+| 4         | Tool calls, images, live model list | Next |
 
 ---
 

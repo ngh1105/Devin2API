@@ -1,0 +1,289 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/ngh1105/Devin2API/internal/devin"
+	"github.com/ngh1105/Devin2API/internal/openai"
+	"github.com/ngh1105/Devin2API/internal/store"
+)
+
+// defaultMaxTokens is sent upstream when the client does not set max_tokens.
+const defaultMaxTokens = 32000
+
+// errNoAccount means no enabled account with a session token exists.
+var errNoAccount = errors.New("no enabled Devin account with a session token; add one in the panel")
+
+// toDevinRequest converts an OpenAI chat request into a Devin chat request.
+// system/developer messages become the system prompt; tool messages and
+// non-text content are rejected because this proxy is text-only for now.
+func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
+	out := devin.ChatRequest{Model: req.Model, MaxTokens: defaultMaxTokens, Temperature: 1.0}
+	if req.MaxTokens != nil && *req.MaxTokens > 0 {
+		out.MaxTokens = int(*req.MaxTokens)
+	}
+	if req.Temperature != nil {
+		out.Temperature = *req.Temperature
+	}
+	var system []string
+	for i, m := range req.Messages {
+		text, err := openai.TextContent(m.Content)
+		if err != nil {
+			return out, fmt.Errorf("messages[%d]: %w", i, err)
+		}
+		switch m.Role {
+		case "system", "developer":
+			if text != "" {
+				system = append(system, text)
+			}
+		case "user":
+			out.Prompts = append(out.Prompts, devin.Prompt{Source: devin.SourceUser, Text: text})
+		case "assistant":
+			out.Prompts = append(out.Prompts, devin.Prompt{Source: devin.SourceAssistant, Text: text})
+		default:
+			return out, fmt.Errorf("messages[%d]: role %q is not supported", i, m.Role)
+		}
+	}
+	out.System = strings.Join(system, "\n\n")
+	hasUser := false
+	for _, p := range out.Prompts {
+		if p.Source == devin.SourceUser && strings.TrimSpace(p.Text) != "" {
+			hasUser = true
+			break
+		}
+	}
+	if !hasUser {
+		return out, errors.New("at least one non-empty user message is required")
+	}
+	return out, nil
+}
+
+// chatAccounts returns enabled accounts that hold a session token, rotated
+// round-robin so load spreads across accounts.
+func (s *Server) chatAccounts() []*store.Account {
+	accs, _ := s.accounts.List()
+	usable := accs[:0]
+	for _, a := range accs {
+		if a.Enabled && a.Tokens.SessionToken != "" {
+			usable = append(usable, a)
+		}
+	}
+	if len(usable) == 0 {
+		return nil
+	}
+	start := int(s.chatRR.Add(1)-1) % len(usable)
+	return append(usable[start:len(usable):len(usable)], usable[:start]...)
+}
+
+// failoverable reports whether another account may succeed where this one
+// failed: bad/expired token or exhausted quota, before any output was sent.
+func failoverable(err error) bool {
+	var ue *devin.UpstreamError
+	if !errors.As(err, &ue) {
+		return false
+	}
+	return ue.Status == http.StatusUnauthorized || ue.Status == http.StatusTooManyRequests ||
+		ue.Status == http.StatusForbidden
+}
+
+// streamWithFailover runs the chat on each usable account in turn until one
+// succeeds, fails after producing output, or fails with a non-retryable error.
+func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, onDelta func(text, thinking string) error) (*devin.ChatResult, error) {
+	accs := s.chatAccounts()
+	if len(accs) == 0 {
+		return nil, errNoAccount
+	}
+	var lastErr error
+	for _, acc := range accs {
+		started := false
+		res, err := devin.StreamChat(ctx, s.loginServerBase, acc.Tokens.SessionToken, req, func(t, th string) error {
+			started = true
+			return onDelta(t, th)
+		})
+		if err == nil {
+			return res, nil
+		}
+		lastErr = err
+		var ue *devin.UpstreamError
+		if errors.As(err, &ue) && ue.Status == http.StatusUnauthorized {
+			s.markTokenExpired(acc.ID)
+		}
+		if started || !failoverable(err) {
+			break
+		}
+	}
+	return nil, lastErr
+}
+
+// markTokenExpired records on the account that its session token was rejected,
+// so the panel shows it needs a re-login.
+func (s *Server) markTokenExpired(id string) {
+	acc, err := s.accounts.Get(id)
+	if err != nil {
+		return
+	}
+	acc.UsageErr = "token expired or revoked"
+	_ = s.accounts.Save(acc)
+}
+
+// finishReason maps a Devin stop reason to an OpenAI finish_reason.
+func finishReason(stop uint64) string {
+	switch stop {
+	case 1, 3:
+		return "length"
+	case 11:
+		return "content_filter"
+	default:
+		return "stop"
+	}
+}
+
+// upstreamStatus picks the HTTP status and message for a failed chat.
+func upstreamStatus(err error) (int, string) {
+	var ue *devin.UpstreamError
+	switch {
+	case errors.Is(err, errNoAccount):
+		return http.StatusServiceUnavailable, err.Error()
+	case errors.As(err, &ue):
+		if ue.Status == 499 {
+			return http.StatusBadGateway, "upstream canceled the request"
+		}
+		return ue.Status, "devin: " + ue.Message
+	default:
+		return http.StatusBadGateway, err.Error()
+	}
+}
+
+// chatCompletions handles POST /v1/chat/completions, streaming or not.
+func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		openai.WriteError(w, http.StatusBadRequest, "unable to read body")
+		return
+	}
+	var req openai.ChatRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		openai.WriteError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if len(req.Messages) == 0 {
+		openai.WriteError(w, http.StatusBadRequest, "messages must not be empty")
+		return
+	}
+	dreq, err := toDevinRequest(req)
+	if err != nil {
+		openai.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	s.stats.requests.Add(1)
+	id := "chatcmpl-" + randID()
+	created := time.Now().Unix()
+	model := req.Model
+	if model == "" {
+		model = "devin"
+	}
+
+	if req.Stream {
+		s.streamCompletion(w, r, dreq, id, model, created)
+		return
+	}
+
+	var text, thinking strings.Builder
+	res, err := s.streamWithFailover(r.Context(), dreq, func(t, th string) error {
+		text.WriteString(t)
+		thinking.WriteString(th)
+		return nil
+	})
+	if err != nil {
+		s.stats.failed.Add(1)
+		status, msg := upstreamStatus(err)
+		openai.WriteError(w, status, msg)
+		return
+	}
+	writeJSON(w, http.StatusOK, openai.ChatCompletion{
+		ID: id, Object: "chat.completion", Created: created, Model: model,
+		Choices: []openai.ChatChoice{{
+			Message:      openai.AssistantText{Role: "assistant", Content: text.String(), ReasoningContent: thinking.String()},
+			FinishReason: finishReason(res.StopReason),
+		}},
+		Usage: usageOf(res),
+	})
+}
+
+// streamCompletion writes the chat as OpenAI SSE chunks. Headers are only
+// sent once the first delta arrives, so failures before any output still
+// return a proper HTTP error status (and allow account failover).
+func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request, dreq devin.ChatRequest, id, model string, created int64) {
+	flusher, _ := w.(http.Flusher)
+	headerSent := false
+	send := func(c openai.ChatChunk) error {
+		if !headerSent {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("X-Accel-Buffering", "no")
+			w.WriteHeader(http.StatusOK)
+			headerSent = true
+		}
+		c.ID, c.Object, c.Created, c.Model = id, "chat.completion.chunk", created, model
+		b, _ := json.Marshal(c)
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
+			return err // client went away
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	}
+
+	first := true
+	res, err := s.streamWithFailover(r.Context(), dreq, func(t, th string) error {
+		d := openai.Delta{Content: t, ReasoningContent: th}
+		if first {
+			d.Role = "assistant"
+			first = false
+		}
+		return send(openai.ChatChunk{Choices: []openai.ChunkChoice{{Delta: d}}})
+	})
+	if err != nil {
+		s.stats.failed.Add(1)
+		status, msg := upstreamStatus(err)
+		if !headerSent {
+			openai.WriteError(w, status, msg)
+			return
+		}
+		// Mid-stream failure: report it in-band, then terminate the stream.
+		b, _ := json.Marshal(openai.Error{Error: openai.ErrorBody{Message: msg, Type: "devin2api_error", Code: &status}})
+		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", b)
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return
+	}
+	reason := finishReason(res.StopReason)
+	if err := send(openai.ChatChunk{Choices: []openai.ChunkChoice{{Delta: openai.Delta{}, FinishReason: &reason}}, Usage: usageOf(res)}); err != nil {
+		return
+	}
+	io.WriteString(w, "data: [DONE]\n\n")
+	if flusher != nil {
+		flusher.Flush()
+	}
+}
+
+func usageOf(res *devin.ChatResult) *openai.Usage {
+	if res == nil || (res.PromptTokens == 0 && res.CompletionTokens == 0) {
+		return nil
+	}
+	return &openai.Usage{
+		PromptTokens:     res.PromptTokens,
+		CompletionTokens: res.CompletionTokens,
+		TotalTokens:      res.PromptTokens + res.CompletionTokens,
+	}
+}

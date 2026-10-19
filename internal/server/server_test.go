@@ -65,7 +65,7 @@ func TestModels(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Object != "list" || len(resp.Data) != 1 {
+	if resp.Object != "list" || len(resp.Data) == 0 {
 		t.Errorf("got %+v", resp)
 	}
 	if resp.Data[0].ID != "devin" || resp.Data[0].OwnedBy != "devin" {
@@ -74,7 +74,7 @@ func TestModels(t *testing.T) {
 }
 
 // TestV1OpenWhenNoTokens ensures that with an empty token store,
-// /v1/chat/completions still reaches the handler and returns 501.
+// /v1/chat/completions skips auth and, with no Devin account, returns 503.
 func TestV1OpenWhenNoTokens(t *testing.T) {
 	tmp := t.TempDir()
 	srv := makeTestServer(t, tmp)
@@ -84,12 +84,12 @@ func TestV1OpenWhenNoTokens(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotImplemented {
-		t.Errorf("status: got %d, want %d", rec.Code, http.StatusNotImplemented)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status: got %d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
 	var errResp openai.Error
 	json.Unmarshal(rec.Body.Bytes(), &errResp)
-	if errResp.Error.Message != "upstream not implemented yet" {
+	if !strings.Contains(errResp.Error.Message, "no enabled Devin account") {
 		t.Errorf("error msg: got %q", errResp.Error.Message)
 	}
 	// Make sure no 401 was returned.
@@ -138,8 +138,8 @@ func TestV1AcceptsCreatedToken(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotImplemented {
-		t.Errorf("status: got %d, want %d (not 401)", rec.Code, http.StatusNotImplemented)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status: got %d, want %d (not 401)", rec.Code, http.StatusServiceUnavailable)
 	}
 	// With X-Api-Key header should also work.
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
@@ -147,8 +147,8 @@ func TestV1AcceptsCreatedToken(t *testing.T) {
 	req2.Header.Set("Content-Type", "application/json")
 	rec2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusNotImplemented {
-		t.Errorf("x-api-key status: got %d, want %d", rec2.Code, http.StatusNotImplemented)
+	if rec2.Code != http.StatusServiceUnavailable {
+		t.Errorf("x-api-key status: got %d, want %d", rec2.Code, http.StatusServiceUnavailable)
 	}
 }
 
@@ -204,34 +204,6 @@ func TestChatCompletionsBadBody(t *testing.T) {
 	}
 }
 
-// TestChatCompletionsStreamStub verifies SSE stream mode for chat completions stub.
-func TestChatCompletionsStreamStub(t *testing.T) {
-	tmp := t.TempDir()
-	srv := makeTestServer(t, tmp)
-	payload := `{"model":"devin","messages":[{"role":"user","content":"hi"}],"stream":true}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status: got %d, want %d", rec.Code, http.StatusOK)
-	}
-	ct := rec.Header().Get("Content-Type")
-	if ct != "text/event-stream" {
-		t.Errorf("content-type: got %q, want text/event-stream", ct)
-	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "upstream not implemented") {
-		t.Errorf("body missing upstream msg: %q", body)
-	}
-	if !strings.Contains(body, "[DONE]") {
-		t.Errorf("body missing [DONE]: %q", body)
-	}
-	if !strings.Contains(body, "data: ") {
-		t.Errorf("body missing SSE data: prefix: %q", body)
-	}
-}
 
 func TestTokenListEmpty(t *testing.T) {
 	tmp := t.TempDir()

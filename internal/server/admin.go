@@ -489,11 +489,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			enabled++
 		}
 	}
-	resp := map[string]int{
-		"accounts": total,
-		"enabled":  enabled,
-		"requests": 0,
-		"failed":   0,
+	resp := map[string]int64{
+		"accounts": int64(total),
+		"enabled":  int64(enabled),
+		"requests": s.stats.requests.Load(),
+		"failed":   s.stats.failed.Load(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

@@ -6,12 +6,14 @@ package devin
 import (
 	"encoding/binary"
 	"errors"
+	"math"
 )
 
 // ---------- wire helpers ----------------------------------------------------
 
 var (
 	WireVarint    = 0
+	WireFixed64   = 1
 	WireFixed32   = 5
 	WireTypeBytes = 2
 )
@@ -62,6 +64,21 @@ func PwFieldString(field int, s string) []byte {
 // PwFieldVarint builds a varint field: tag + varint value.
 func PwFieldVarint(field int, v uint64) []byte {
 	return append(PwTag(field, WireVarint), PwVarint(v)...)
+}
+
+// PwFieldBytes builds a length-delimited field holding raw bytes, typically
+// an embedded message.
+func PwFieldBytes(field int, b []byte) []byte {
+	out := PwTag(field, WireTypeBytes)
+	out = append(out, PwVarint(uint64(len(b)))...)
+	return append(out, b...)
+}
+
+// PwFieldDouble builds a fixed64 little-endian IEEE-754 double field.
+func PwFieldDouble(field int, v float64) []byte {
+	b := make([]byte, 8)
+	binary.LittleEndian.PutUint64(b, math.Float64bits(v))
+	return append(PwTag(field, WireFixed64), b...)
 }
 
 // PwFieldUint32 builds a fixed32 little-endian field.
@@ -148,8 +165,23 @@ func (r *pwReader) Next() (field, wire int, val []byte, varint uint64, ok bool) 
 		r.ok = true
 		return r.field, r.wire, r.val, 0, true
 
+	case WireFixed64:
+		if r.offset+8 > len(r.data) {
+			r.truncated = true
+			r.ok = false
+			return 0, 0, nil, 0, false
+		}
+		r.val = r.data[r.offset : r.offset+8]
+		r.offset += 8
+		r.ok = true
+		return r.field, r.wire, r.val, 0, true
+
 	default:
-		return r.Next() // skip unknown wire types
+		// Groups (3/4) and reserved types carry no length we could skip by,
+		// so the rest of the message cannot be decoded reliably.
+		r.truncated = true
+		r.ok = false
+		return r.field, r.wire, nil, 0, false
 	}
 }
 

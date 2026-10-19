@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ngh1105/Devin2API/internal/config"
@@ -105,6 +106,11 @@ type Server struct {
 	loginAPIBase    string
 	loginServerBase string
 	loginMngr       *loginManager
+
+	chatRR atomic.Uint64 // round-robin cursor over chat accounts
+	stats  struct {
+		requests, failed atomic.Int64 // chat completions since start
+	}
 }
 
 // New creates a new Server from config and stores.
