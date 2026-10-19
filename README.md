@@ -232,6 +232,8 @@ If the token store is **empty** (no tokens created), `/v1/*` accepts requests wi
 | `POST /v1/messages`                  | POST     | Anthropic Messages API (Claude Code, Anthropic SDKs). Stream + non-stream. |
 | `POST /v1/messages/count_tokens`     | POST     | Rough estimate (~4 bytes per token); upstream has no counting endpoint. |
 | `POST /v1/responses`                 | POST     | OpenAI Responses API. Stream + non-stream; `previous_response_id` supported (kept 1 h in memory). |
+| `POST /v1/completions`               | POST     | Legacy text completions, emulated on the chat models. Stream + non-stream. |
+| `POST /v1/embeddings`                | POST     | Not supported: returns 501. Devin offers no embedding models. |
 
 How chat works:
 
@@ -268,6 +270,12 @@ How chat works:
 - Function tools are forwarded; built-in tools (`web_search`, `file_search`, ...) are skipped. `tool_choice` works as for chat completions (named form `{"type":"function","name":...}`). `max_output_tokens`, `temperature` and `top_p` are forwarded.
 - Output items: `reasoning` (summary text), `message` (`output_text`), `function_call`. Streaming emits the standard `response.*` events with `sequence_number`.
 - `previous_response_id`: responses are kept in memory for 1 hour (up to 256, oldest dropped first), so a follow-up can send just the new input. They are lost on restart; an unknown id returns 400. `store: false` skips keeping a response. Instructions are not carried over, as in the OpenAI API.
+
+`/v1/completions` (legacy OpenAI text completions):
+
+- Upstream has only chat models, so the `prompt` is sent as a user message with a system prompt asking the model to output only the continuation. Results are close to a base model's, not identical: the model may still answer instead of continuing.
+- `prompt` is a string or a list holding one string; token arrays and batched prompts return 400. `max_tokens` (default 32000), `temperature`, `top_p`, `stop`, `echo` and `stream_options.include_usage` work as above. `suffix`, `n` > 1, `best_of` > 1 and `logprobs` return 400; `logprobs` in the response is always null.
+- Reasoning models spend part of `max_tokens` on thinking, which this format cannot return, so a small limit (e.g. 30) can end with `finish_reason: "length"` and no text.
 
 ---
 

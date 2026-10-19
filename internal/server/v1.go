@@ -34,6 +34,10 @@ func (s *Server) handleV1(w http.ResponseWriter, r *http.Request) {
 		s.countTokens(w, r)
 	case path == "/v1/responses" && r.Method == http.MethodPost:
 		s.responses(w, r)
+	case path == "/v1/completions" && r.Method == http.MethodPost:
+		s.completions(w, r)
+	case path == "/v1/embeddings" && r.Method == http.MethodPost:
+		s.embeddings(w, r)
 	default:
 		http.NotFound(w, r)
 	}
