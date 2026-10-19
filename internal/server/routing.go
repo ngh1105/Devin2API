@@ -34,7 +34,7 @@ func (s *Server) refreshUsage(ctx context.Context, id string) (*store.Account, e
 	if err != nil {
 		return nil, err
 	}
-	usage, err := devin.FetchUserStatus(ctx, s.loginServerBase, acct.Tokens.SessionToken)
+	usage, err := s.fetchUserStatus(ctx, acct.Tokens.SessionToken)
 	if errors.Is(err, devin.ErrTokenExpired) {
 		s.accounts.Mutate(id, func(a *store.Account) {
 			a.UsageErr = tokenExpiredMsg

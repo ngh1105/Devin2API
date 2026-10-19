@@ -79,7 +79,7 @@ func (s *Server) fetchModelsUpstream(ctx context.Context) []devin.ModelInfo {
 	var merged []devin.ModelInfo
 	seen := make(map[string]bool)
 	for _, acc := range s.usableAccounts() {
-		models, err := devin.FetchModels(ctx, s.loginServerBase, acc.Tokens.SessionToken)
+		models, err := s.fetchModelsFor(ctx, acc.Tokens.SessionToken)
 		if err != nil {
 			if ctx.Err() != nil {
 				break

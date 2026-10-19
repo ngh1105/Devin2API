@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ngh1105/Devin2API/internal/buildinfo"
 	"github.com/ngh1105/Devin2API/internal/devin"
 	"github.com/ngh1105/Devin2API/internal/store"
 )
@@ -42,11 +41,9 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case prefix == "/settings":
-		if r.Method != http.MethodGet {
-			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
 		s.handleSettings(w, r)
+	case prefix == "/settings/upstream-test":
+		s.handleUpstreamTest(w, r)
 	case prefix == "/accounts":
 		switch r.Method {
 		case http.MethodGet:
@@ -151,7 +148,7 @@ func (s *Server) startLogin(ctx context.Context) (string, error) {
 		// Best-effort user status
 		var usage *store.Usage
 		useCtx, useDone := context.WithTimeout(context.Background(), time.Second*120)
-		usage, _ = devin.FetchUserStatus(useCtx, s.loginServerBase, sessToken)
+		usage, _ = s.fetchUserStatus(useCtx, sessToken)
 		useDone()
 
 		// A cancel (or a newer login) after the code arrived must not still
@@ -181,7 +178,7 @@ func handleLoginManualDirect(s *Server, rawToken string) (*store.Account, error)
 	}
 	var usage *store.Usage
 	useCtx, useDone := context.WithTimeout(context.Background(), time.Second*120)
-	usage, _ = devin.FetchUserStatus(useCtx, s.loginServerBase, sessToken)
+	usage, _ = s.fetchUserStatus(useCtx, sessToken)
 	useDone()
 	return s.accounts.Upsert(store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, usage))
 }
@@ -189,16 +186,6 @@ func handleLoginManualDirect(s *Server, rawToken string) (*store.Account, error)
 // ---------------------------------------------------------------------------
 // Existing handlers
 // ---------------------------------------------------------------------------
-
-func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]string{
-		"listen":   s.listen,
-		"data_dir": s.dataDir,
-		"version":  buildinfo.String(),
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
 
 func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	accs, err := s.accounts.List()

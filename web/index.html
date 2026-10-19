@@ -22,6 +22,12 @@
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></symbol>
   <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
   <symbol id="i-paste" viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="m18 15-6-6-6 6"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></symbol>
   <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M10 13l-2 2 2 2M14 13l2 2-2 2"/></symbol>
 </svg>
 
@@ -61,10 +67,35 @@
             <button id="btn-add-account"><svg class="icon"><use href="#i-plus"/></svg>Add account</button>
           </div>
         </div>
+        <div class="filter-bar">
+          <div class="search">
+            <svg class="icon"><use href="#i-search"/></svg>
+            <input id="acct-search" type="search" placeholder="Search email, nickname or id" autocomplete="off">
+          </div>
+          <select id="acct-filter">
+            <option value="">All statuses</option>
+            <option value="active">Active</option>
+            <option value="disabled">Disabled</option>
+            <option value="dead">Token dead</option>
+            <option value="expired">Expired</option>
+          </select>
+          <span id="acct-count" class="count"></span>
+        </div>
+        <div id="bulk-bar" class="bulk-bar hidden">
+          <span id="bulk-count"></span>
+          <div class="bulk-actions">
+            <button class="btn-sm btn-refresh" id="bulk-refresh">Refresh usage</button>
+            <button class="btn-sm" id="bulk-enable">Enable</button>
+            <button class="btn-sm" id="bulk-disable">Disable</button>
+            <button class="btn-sm btn-del" id="bulk-delete">Delete</button>
+            <button class="btn-icon" id="bulk-clear" title="Clear selection"><svg class="icon"><use href="#i-x"/></svg></button>
+          </div>
+        </div>
         <div class="card table-card">
           <table id="acct-table">
             <thead>
               <tr>
+                <th class="col-check"><input type="checkbox" id="acct-check-all" title="Select all shown"></th>
                 <th>Identity</th>
                 <th>Nickname</th>
                 <th>Plan</th>
@@ -127,11 +158,46 @@
         <div class="panel-head">
           <div>
             <h1>Settings</h1>
-            <p class="lead">Changes to these values require environment variables and a restart.</p>
+            <p class="lead">Endpoint and prompt settings apply immediately and are saved in the data dir.</p>
+          </div>
+          <div class="toolbar">
+            <span id="settings-dirty" class="dirty hidden">Unsaved changes</span>
+            <button id="btn-settings-reset" class="btn-secondary" disabled>Discard</button>
+            <button id="btn-settings-save" disabled>Save changes</button>
           </div>
         </div>
-        <div class="card">
-          <dl id="settings-dl" class="kv"></dl>
+        <div class="settings-grid">
+          <div class="card">
+            <h2 class="card-title"><svg class="icon"><use href="#i-server"/></svg>Devin endpoints</h2>
+            <p class="card-desc">Chat, usage and model requests go to the first endpoint. On a network error or HTTP 502/503/504, the next one is tried with the same account.</p>
+            <div id="upstream-list" class="upstream-list"></div>
+            <button id="btn-upstream-add" class="btn-secondary"><svg class="icon"><use href="#i-plus"/></svg>Add endpoint</button>
+            <p class="warn-note">Account session tokens are sent to these hosts. Only add endpoints you trust.</p>
+          </div>
+
+          <div class="card">
+            <h2 class="card-title"><svg class="icon"><use href="#i-chat"/></svg>Global system prompt</h2>
+            <p class="card-desc">Added to the system prompt of every request on all chat endpoints.</p>
+            <label class="switch-row">
+              <input type="checkbox" id="sp-enabled" class="switch">
+              <span>Apply to every request</span>
+            </label>
+            <label class="field">
+              <span>Position</span>
+              <select id="sp-mode">
+                <option value="prepend">Before the client's system prompt</option>
+                <option value="append">After the client's system prompt</option>
+              </select>
+            </label>
+            <textarea id="sp-text" rows="9" placeholder="e.g. Always answer in Vietnamese."></textarea>
+            <div class="field-foot"><span id="sp-count"></span></div>
+          </div>
+
+          <div class="card">
+            <h2 class="card-title"><svg class="icon"><use href="#i-gear"/></svg>Server</h2>
+            <dl id="settings-dl" class="kv"></dl>
+            <p class="note">Listen address and data dir come from environment variables and need a restart.</p>
+          </div>
         </div>
       </section>
 

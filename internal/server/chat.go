@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -251,12 +252,16 @@ func failoverable(err error) bool {
 
 // streamWithFailover runs the chat on each usable account in turn until one
 // succeeds, fails after producing output, or fails with a non-retryable error.
+// Each account is tried on every configured endpoint in turn while the
+// failure is the endpoint's (see endpointFailure) and nothing was output.
 func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, onDelta func(devin.Delta) error) (*devin.ChatResult, error) {
 	model := devin.ResolveModel(req.Model)
 	accs := s.chatAccounts(model)
 	if len(accs) == 0 {
 		return nil, errNoAccount
 	}
+	req.System = s.settings.get().applySystemPrompt(req.System)
+	bases := s.upstreams()
 	tr := traceFrom(ctx)
 	var lastErr error
 	for _, acc := range accs {
@@ -271,10 +276,18 @@ func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, 
 			sw = newStopWatcher(req.Stop, deliver)
 			deliver = sw.feed
 		}
-		res, err := devin.StreamChat(ctx, s.loginServerBase, acc.Tokens.SessionToken, req, func(d devin.Delta) error {
-			started = true
-			return deliver(d)
-		})
+		var res *devin.ChatResult
+		var err error
+		for i, base := range bases {
+			res, err = devin.StreamChat(ctx, base, acc.Tokens.SessionToken, req, func(d devin.Delta) error {
+				started = true
+				return deliver(d)
+			})
+			if started || i == len(bases)-1 || !endpointFailure(err) {
+				break
+			}
+			slog.Warn("devin endpoint failed, trying the next one", "endpoint", base, "err", err)
+		}
 		if sw != nil {
 			switch {
 			case errors.Is(err, errStopSequence):
