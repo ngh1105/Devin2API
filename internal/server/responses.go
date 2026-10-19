@@ -192,7 +192,12 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rw.begin()
-	rw.emit("response.completed", map[string]any{"response": final})
+	// A response cut short by max_output_tokens ends with response.incomplete.
+	event := "response.completed"
+	if statusStr == "incomplete" {
+		event = "response.incomplete"
+	}
+	rw.emit(event, map[string]any{"response": final})
 }
 
 // responsesWriter renders segments as Responses output items. Thinking

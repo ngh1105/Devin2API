@@ -352,3 +352,30 @@ func TestAppendAssistantMerging(t *testing.T) {
 		t.Errorf("prompts = %+v", p)
 	}
 }
+
+func TestMessagesAuthErrorIsAnthropicShaped(t *testing.T) {
+	srv := chatTestServer(t, &fakeDevin{}, "eyJtok1")
+	srv.tokens.Create()
+	rec := postV1(srv, "/v1/messages", `{"max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), `"authentication_error"`) {
+		t.Errorf("status %d body %s", rec.Code, rec.Body)
+	}
+}
+
+func TestResponsesStreamIncompleteEvent(t *testing.T) {
+	up := &fakeDevin{}
+	srv := chatTestServer(t, up, "eyJtok1")
+	// Upstream stop reason 1 = length.
+	srv.loginServerBase = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Write(connectFrame(0, devin.PwFieldString(3, "partial")))
+		w.Write(connectFrame(0, devin.PwFieldVarint(5, 1)))
+		w.Write(connectFrame(2, []byte("{}")))
+	})).URL
+	rec := postV1(srv, "/v1/responses", `{"stream":true,"input":"hi","max_output_tokens":5}`)
+	names, data := sseEvents(t, rec.Body.String())
+	last := names[len(names)-1]
+	if last != "response.incomplete" || data[len(data)-1]["response"].(map[string]any)["status"] != "incomplete" {
+		t.Errorf("last event = %s", last)
+	}
+}
