@@ -87,18 +87,24 @@ func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
 	}
 	out.System = strings.Join(system, "\n\n")
 
-	// Upstream needs something to answer: a user message or a tool result.
-	hasInput := false
-	for _, p := range out.Prompts {
-		if (p.Source == devin.SourceUser && (strings.TrimSpace(p.Text) != "" || len(p.Images) > 0)) || p.Source == devin.SourceToolResult {
-			hasInput = true
-			break
-		}
-	}
-	if !hasInput {
+	if !hasInput(out.Prompts) {
 		return out, errors.New("at least one non-empty user message is required")
 	}
 	return out, nil
+}
+
+// hasInput reports whether upstream has something to answer: a non-empty
+// user message (text or images) or a tool result.
+func hasInput(prompts []devin.Prompt) bool {
+	for _, p := range prompts {
+		if p.Source == devin.SourceToolResult {
+			return true
+		}
+		if p.Source == devin.SourceUser && (strings.TrimSpace(p.Text) != "" || len(p.Images) > 0) {
+			return true
+		}
+	}
+	return false
 }
 
 // toDevinTools converts OpenAI tool definitions. tool_choice "none" drops
@@ -109,26 +115,101 @@ func toDevinTools(tools []openai.Tool, choice json.RawMessage) ([]devin.Tool, er
 		return nil, nil
 	}
 	var out []devin.Tool
-	seen := map[string]bool{}
 	for i, t := range tools {
 		if t.Type != "" && t.Type != "function" {
 			return nil, fmt.Errorf("tools[%d]: type %q is not supported", i, t.Type)
 		}
-		name := t.Function.Name
-		if name == "" {
-			return nil, fmt.Errorf("tools[%d]: function.name is required", i)
-		}
-		if seen[name] {
-			return nil, fmt.Errorf("tools[%d]: duplicate function name %q", i, name)
-		}
-		seen[name] = true
-		params := []byte(t.Function.Parameters)
-		if len(params) > 0 && (!json.Valid(params) || !strings.HasPrefix(strings.TrimSpace(string(params)), "{")) {
-			return nil, fmt.Errorf("tools[%d]: parameters must be a JSON schema object", i)
-		}
-		out = append(out, devin.Tool{Name: name, Description: t.Function.Description, Parameters: params})
+		out = append(out, devin.Tool{Name: t.Function.Name, Description: t.Function.Description, Parameters: []byte(t.Function.Parameters)})
+	}
+	if err := validateTools(out); err != nil {
+		return nil, err
 	}
 	return out, nil
+}
+
+// validateTools checks that tool names are present and unique and that
+// parameter schemas are JSON objects.
+func validateTools(tools []devin.Tool) error {
+	seen := make(map[string]bool, len(tools))
+	for i, t := range tools {
+		if t.Name == "" {
+			return fmt.Errorf("tools[%d]: name is required", i)
+		}
+		if seen[t.Name] {
+			return fmt.Errorf("tools[%d]: duplicate tool name %q", i, t.Name)
+		}
+		seen[t.Name] = true
+		if len(t.Parameters) > 0 && !isJSONObject(t.Parameters) {
+			return fmt.Errorf("tools[%d]: parameters must be a JSON schema object", i)
+		}
+	}
+	return nil
+}
+
+func isJSONObject(b []byte) bool {
+	return json.Valid(b) && strings.HasPrefix(strings.TrimSpace(string(b)), "{")
+}
+
+// toolInput returns tool call arguments as a JSON object, for formats that
+// carry them as objects (Anthropic tool_use input). Arguments that are not
+// a JSON object are wrapped so nothing is lost.
+func toolInput(args string) json.RawMessage {
+	if strings.TrimSpace(args) == "" {
+		return json.RawMessage("{}")
+	}
+	if isJSONObject([]byte(args)) {
+		return json.RawMessage(args)
+	}
+	b, _ := json.Marshal(map[string]string{"raw_arguments": args})
+	return b
+}
+
+// readBody reads a /v1 request body. On failure it returns the status and
+// message to send: 413 for an over-limit body, 400 otherwise.
+func readBody(r *http.Request) ([]byte, int, string) {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			return nil, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeds %d MB", tooBig.Limit>>20)
+		}
+		return nil, http.StatusBadRequest, "unable to read body"
+	}
+	return raw, 0, ""
+}
+
+// checkModel maps dreq.Model onto the cached catalog ("gpt-5-4" ->
+// "gpt-5-4-medium") and rejects unknown models and images sent to text-only
+// models. It uses the cache only, so a cold cache never delays a request;
+// requested is the client's model name for error messages. A zero status
+// means the request may proceed.
+func (s *Server) checkModel(dreq *devin.ChatRequest, requested string) (int, string) {
+	catalog := s.cachedModels()
+	dreq.Model = devin.MatchModel(dreq.Model, catalog)
+	if len(catalog) == 0 {
+		return 0, ""
+	}
+	// Upstream answers unknown models with a misleading permission_denied
+	// "internal error", so reject them locally.
+	if !devin.HasModel(dreq.Model, catalog) {
+		return http.StatusBadRequest, fmt.Sprintf("unknown model %q; see GET /v1/models", requested)
+	}
+	if hasImages(*dreq) && !devin.IsMultimodal(dreq.Model, catalog) {
+		return http.StatusBadRequest, fmt.Sprintf("model %q does not accept images; pick one with \"multimodal\": true in GET /v1/models", dreq.Model)
+	}
+	return 0, ""
+}
+
+// collectChat runs a chat to completion and returns the whole answer and
+// thinking text; tool calls are in res.ToolCalls.
+func (s *Server) collectChat(ctx context.Context, dreq devin.ChatRequest) (text, thinking string, res *devin.ChatResult, err error) {
+	var tb, thb strings.Builder
+	res, err = s.streamWithFailover(ctx, dreq, func(d devin.Delta) error {
+		tb.WriteString(d.Text)
+		thb.WriteString(d.Thinking)
+		return nil
+	})
+	return tb.String(), thb.String(), res, err
 }
 
 // usableAccounts returns enabled accounts that hold a session token.
@@ -295,14 +376,9 @@ func upstreamStatus(err error) (int, string) {
 
 // chatCompletions handles POST /v1/chat/completions, streaming or not.
 func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	raw, err := io.ReadAll(r.Body)
-	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			openai.WriteError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeds %d MB", tooBig.Limit>>20))
-			return
-		}
-		openai.WriteError(w, http.StatusBadRequest, "unable to read body")
+	raw, status, msg := readBody(r)
+	if status != 0 {
+		openai.WriteError(w, status, msg)
 		return
 	}
 	var req openai.ChatRequest
@@ -319,18 +395,8 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Map family names ("gpt-5-4") to a concrete catalog UID ("gpt-5-4-medium").
-	// Uses the cache only, so a cold cache never delays a chat request.
-	catalog := s.cachedModels()
-	dreq.Model = devin.MatchModel(dreq.Model, catalog)
-	// Upstream answers unknown models with a misleading permission_denied
-	// "internal error"; reject them locally when the catalog is known.
-	if len(catalog) > 0 && !devin.HasModel(dreq.Model, catalog) {
-		openai.WriteError(w, http.StatusBadRequest, fmt.Sprintf("unknown model %q; see GET /v1/models", req.Model))
-		return
-	}
-	if hasImages(dreq) && len(catalog) > 0 && !devin.IsMultimodal(dreq.Model, catalog) {
-		openai.WriteError(w, http.StatusBadRequest, fmt.Sprintf("model %q does not accept images; pick one with \"multimodal\": true in GET /v1/models", dreq.Model))
+	if status, msg := s.checkModel(&dreq, req.Model); status != 0 {
+		openai.WriteError(w, status, msg)
 		return
 	}
 
@@ -347,12 +413,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var text, thinking strings.Builder
-	res, err := s.streamWithFailover(r.Context(), dreq, func(d devin.Delta) error {
-		text.WriteString(d.Text)
-		thinking.WriteString(d.Thinking)
-		return nil // tool calls are read whole from res.ToolCalls
-	})
+	text, thinking, res, err := s.collectChat(r.Context(), dreq)
 	if err != nil {
 		s.stats.failed.Add(1)
 		status, msg := upstreamStatus(err)
@@ -364,7 +425,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		ID: id, Object: "chat.completion", Created: created, Model: model,
 		Choices: []openai.ChatChoice{{
 			Message: openai.AssistantText{
-				Role: "assistant", Content: text.String(), ReasoningContent: thinking.String(),
+				Role: "assistant", Content: text, ReasoningContent: thinking,
 				ToolCalls: openAIToolCalls(res.ToolCalls),
 			},
 			FinishReason: finishReason(res),

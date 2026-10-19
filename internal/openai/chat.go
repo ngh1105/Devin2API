@@ -111,7 +111,7 @@ func UserContent(raw json.RawMessage) (string, []Image, error) {
 			if p.ImageURL == nil {
 				return "", nil, fmt.Errorf("content[%d]: image_url.url is required", i)
 			}
-			img, err := parseDataURL(p.ImageURL.URL)
+			img, err := ParseDataURL(p.ImageURL.URL)
 			if err != nil {
 				return "", nil, fmt.Errorf("content[%d]: %w", i, err)
 			}
@@ -123,9 +123,9 @@ func UserContent(raw json.RawMessage) (string, []Image, error) {
 	return strings.Join(texts, "\n"), images, nil
 }
 
-// parseDataURL decodes "data:<mime>;base64,<data>" and checks the payload
+// ParseDataURL decodes "data:<mime>;base64,<data>" and checks the payload
 // is valid base64 of an allowed image type.
-func parseDataURL(u string) (Image, error) {
+func ParseDataURL(u string) (Image, error) {
 	rest, ok := strings.CutPrefix(strings.TrimSpace(u), "data:")
 	if !ok {
 		return Image{}, errors.New("only base64 data URLs are supported for images (data:image/png;base64,...)")

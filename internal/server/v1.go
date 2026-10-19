@@ -27,6 +27,12 @@ func (s *Server) handleV1(w http.ResponseWriter, r *http.Request) {
 		s.getModels(w, r)
 	case path == "/v1/chat/completions" && r.Method == http.MethodPost:
 		s.chatCompletions(w, r)
+	case path == "/v1/messages" && r.Method == http.MethodPost:
+		s.messages(w, r)
+	case path == "/v1/messages/count_tokens" && r.Method == http.MethodPost:
+		s.countTokens(w, r)
+	case path == "/v1/responses" && r.Method == http.MethodPost:
+		s.responses(w, r)
 	default:
 		http.NotFound(w, r)
 	}
