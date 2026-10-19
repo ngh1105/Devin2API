@@ -36,8 +36,18 @@ func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
 	if req.Temperature != nil {
 		out.Temperature = *req.Temperature
 	}
+	if req.TopP != nil {
+		out.TopP = *req.TopP
+	}
+	stops, err := req.StopSequences()
+	if err != nil {
+		return out, err
+	}
+	if out.Stop, err = stopList(stops); err != nil {
+		return out, err
+	}
 
-	tools, err := toDevinTools(req.Tools, req.ToolChoice)
+	tools, err := toDevinTools(req.Tools)
 	if err != nil {
 		return out, err
 	}
@@ -87,6 +97,14 @@ func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
 	}
 	out.System = strings.Join(system, "\n\n")
 
+	tc, err := openAIToolChoice(req.ToolChoice)
+	if err != nil {
+		return out, err
+	}
+	if err := applyToolChoice(&out, tc); err != nil {
+		return out, err
+	}
+
 	if !hasInput(out.Prompts) {
 		return out, errors.New("at least one non-empty user message is required")
 	}
@@ -107,13 +125,9 @@ func hasInput(prompts []devin.Prompt) bool {
 	return false
 }
 
-// toDevinTools converts OpenAI tool definitions. tool_choice "none" drops
-// the tools so the model answers in text; other choices are left to the
-// model (upstream has no forced-choice option).
-func toDevinTools(tools []openai.Tool, choice json.RawMessage) ([]devin.Tool, error) {
-	if string(choice) == `"none"` {
-		return nil, nil
-	}
+// toDevinTools converts OpenAI tool definitions; tool_choice is applied
+// separately by applyToolChoice.
+func toDevinTools(tools []openai.Tool) ([]devin.Tool, error) {
 	var out []devin.Tool
 	for i, t := range tools {
 		if t.Type != "" && t.Type != "function" {
@@ -248,11 +262,30 @@ func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, 
 	for _, acc := range accs {
 		tr.attempt(acc.ID, accountLabel(acc))
 		started := false
-		res, err := devin.StreamChat(ctx, s.loginServerBase, acc.Tokens.SessionToken, req, func(d devin.Delta) error {
-			started = true
+		deliver := func(d devin.Delta) error {
 			tr.output()
 			return onDelta(d)
+		}
+		var sw *stopWatcher
+		if len(req.Stop) > 0 {
+			sw = newStopWatcher(req.Stop, deliver)
+			deliver = sw.feed
+		}
+		res, err := devin.StreamChat(ctx, s.loginServerBase, acc.Tokens.SessionToken, req, func(d devin.Delta) error {
+			started = true
+			return deliver(d)
 		})
+		if sw != nil {
+			switch {
+			case errors.Is(err, errStopSequence):
+				res.StopSequence = sw.hit
+				return res, nil
+			case err == nil:
+				if err := sw.flush(); err != nil {
+					return nil, err
+				}
+			}
+		}
 		if err == nil {
 			return res, nil
 		}
@@ -295,6 +328,9 @@ func (s *Server) markTokenExpired(id string) {
 func finishReason(res *devin.ChatResult) string {
 	if len(res.ToolCalls) > 0 {
 		return "tool_calls"
+	}
+	if res.StopSequence != "" {
+		return "stop"
 	}
 	switch res.StopReason {
 	case devin.StopToolCalls:

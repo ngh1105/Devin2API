@@ -87,6 +87,10 @@ type ChatRequest struct {
 	Tools       []Tool
 	MaxTokens   int
 	Temperature float64
+	TopP        float64 // 0 = upstream default (0.95)
+	// Stop sequences are not sent upstream; the proxy cuts the output at
+	// the first match (see server.stopWatcher).
+	Stop []string
 }
 
 // Delta is one streamed piece of output: answer text, thinking text, or a
@@ -113,6 +117,7 @@ type ChatResult struct {
 	CompletionTokens int
 	Model            string     // model name reported upstream
 	ToolCalls        []ToolCall // complete tool calls, in order
+	StopSequence     string     // client stop sequence that ended the output, if any
 }
 
 // UpstreamError is a failure reported by Devin, mapped to an HTTP status.
@@ -194,8 +199,12 @@ func BuildChatRequest(sessionToken, fingerprint, sessionID string, req ChatReque
 	cfg = append(cfg, pwFieldVarint(2, uint64(req.MaxTokens))...)
 	cfg = append(cfg, pwFieldVarint(3, 400)...)
 	cfg = append(cfg, PwFieldDouble(5, req.Temperature)...)
+	topP := req.TopP
+	if topP <= 0 || topP > 1 {
+		topP = float64(float32(0.95))
+	}
 	cfg = append(cfg, pwFieldVarint(7, 40)...)
-	cfg = append(cfg, PwFieldDouble(8, float64(float32(0.95)))...)
+	cfg = append(cfg, PwFieldDouble(8, topP)...)
 	out = append(out, PwFieldBytes(8, cfg)...)
 
 	for _, t := range req.Tools {

@@ -17,11 +17,18 @@ import (
 // thinking blocks in the history are dropped because upstream takes none.
 func toDevinFromMessages(req anthropic.MessagesRequest) (devin.ChatRequest, error) {
 	out := devin.ChatRequest{Model: req.Model, MaxTokens: defaultMaxTokens, Temperature: 1.0}
+	var err error
 	if req.MaxTokens != nil && *req.MaxTokens > 0 {
 		out.MaxTokens = int(*req.MaxTokens)
 	}
 	if req.Temperature != nil {
 		out.Temperature = *req.Temperature
+	}
+	if req.TopP != nil {
+		out.TopP = *req.TopP
+	}
+	if out.Stop, err = stopList(req.StopSequences); err != nil {
+		return out, err
 	}
 	system, err := anthropic.SystemText(req.System)
 	if err != nil {
@@ -29,15 +36,22 @@ func toDevinFromMessages(req anthropic.MessagesRequest) (devin.ChatRequest, erro
 	}
 	out.System = system
 
-	if req.ToolChoice == nil || req.ToolChoice.Type != "none" {
-		for _, t := range req.Tools {
-			if t.IsClientTool() {
-				out.Tools = append(out.Tools, devin.Tool{Name: t.Name, Description: t.Description, Parameters: []byte(t.InputSchema)})
-			}
+	for _, t := range req.Tools {
+		if t.IsClientTool() {
+			out.Tools = append(out.Tools, devin.Tool{Name: t.Name, Description: t.Description, Parameters: []byte(t.InputSchema)})
 		}
-		if err := validateTools(out.Tools); err != nil {
+	}
+	if err := validateTools(out.Tools); err != nil {
+		return out, err
+	}
+	var tc toolChoice
+	if req.ToolChoice != nil {
+		if tc, err = anthropicToolChoice(req.ToolChoice.Type, req.ToolChoice.Name); err != nil {
 			return out, err
 		}
+	}
+	if err := applyToolChoice(&out, tc); err != nil {
+		return out, err
 	}
 
 	for i, m := range req.Messages {
@@ -178,16 +192,28 @@ func blockImage(src *anthropic.ImageSource) (devin.Image, error) {
 
 // anthropicStopReason maps a finished result to an Anthropic stop_reason.
 func anthropicStopReason(res *devin.ChatResult) string {
-	switch finishReason(res) {
-	case "tool_calls":
+	switch reason := finishReason(res); {
+	case reason == "tool_calls":
 		return "tool_use"
-	case "length":
+	case res.StopSequence != "":
+		return "stop_sequence"
+	case reason == "length":
 		return "max_tokens"
-	case "content_filter":
+	case reason == "content_filter":
 		return "refusal"
 	default:
 		return "end_turn"
 	}
+}
+
+// stopSequence is the Anthropic stop_sequence value: the matched sequence,
+// or null.
+func stopSequence(res *devin.ChatResult) *string {
+	if res == nil || res.StopSequence == "" {
+		return nil
+	}
+	s := res.StopSequence
+	return &s
 }
 
 func anthropicUsage(res *devin.ChatResult) anthropic.Usage {
@@ -329,7 +355,7 @@ func (m *messagesWriter) end(stop string, res *devin.ChatResult) error {
 	}
 	if err := m.sse.event("message_delta", map[string]any{
 		"type":  "message_delta",
-		"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
+		"delta": map[string]any{"stop_reason": stop, "stop_sequence": stopSequence(res)},
 		"usage": anthropicUsage(res),
 	}); err != nil {
 		return err
@@ -352,7 +378,7 @@ func (m *messagesWriter) response(segs []*segment, stop string, res *devin.ChatR
 	}
 	return anthropic.MessageResponse{
 		ID: m.id, Type: "message", Role: "assistant", Model: m.model,
-		Content: content, StopReason: &stop, Usage: anthropicUsage(res),
+		Content: content, StopReason: &stop, StopSequence: stopSequence(res), Usage: anthropicUsage(res),
 	}
 }
 

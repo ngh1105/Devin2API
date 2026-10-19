@@ -204,7 +204,7 @@ If the token store is **empty** (no tokens created), `/v1/*` accepts requests wi
 | `POST /v1/chat/completions`          | POST     | Chat completion through Devin. Supports `stream: true` (SSE). |
 | `POST /v1/messages`                  | POST     | Anthropic Messages API (Claude Code, Anthropic SDKs). Stream + non-stream. |
 | `POST /v1/messages/count_tokens`     | POST     | Rough estimate (~4 bytes per token); upstream has no counting endpoint. |
-| `POST /v1/responses`                 | POST     | OpenAI Responses API, stateless. Stream + non-stream. |
+| `POST /v1/responses`                 | POST     | OpenAI Responses API. Stream + non-stream; `previous_response_id` supported (kept 1 h in memory). |
 
 How chat works:
 
@@ -216,18 +216,21 @@ How chat works:
   - Accounts that are parked, out of daily or weekly quota, or whose token was rejected go last. They are still tried, so a request only fails when every account fails.
 - If an account's token is rejected (401) or it hits a limit (429/403) before any output is sent, the next account is tried. A rejected token is flagged in the panel so you can re-login.
 - `model` accepts the ids from `/v1/models`. A `devin/` prefix is dropped and dots become dashes (`claude-sonnet-4.6` → `claude-sonnet-4-6`). A family name without an effort level picks one from the catalog, trying medium, then high, then low (`gpt-5-4` → `gpt-5-4-medium`).
-- `system`/`developer` messages become the system prompt; `user` and `assistant` messages become the conversation. `max_tokens` (default 32000) and `temperature` are forwarded.
+- `system`/`developer` messages become the system prompt; `user` and `assistant` messages become the conversation. `max_tokens` (default 32000), `temperature` and `top_p` are forwarded.
+- `stop` (a string or up to 4 strings) is applied by the proxy, since upstream has no stop option: the output is cut before the first match and the upstream stream is closed. `finish_reason` is `"stop"`. Only answer text is checked, not thinking or tool arguments.
 - System prompts are cleaned before going upstream: Devin rejects prompts that carry another agent's identity (e.g. "You are Claude Code, ...") with a misleading 403, so such lines, Claude Code billing headers and a few related lines are dropped. This applies to all three chat endpoints.
 - Thinking text, when the model produces it, is returned as `reasoning_content`.
-- Tool calling follows the OpenAI format: `tools` (function type) are forwarded with their JSON schema; the model's calls come back as `tool_calls` (streamed as indexed fragments) with `finish_reason: "tool_calls"`; send results back as `role: "tool"` messages with `tool_call_id`. `tool_choice: "none"` disables tools; other `tool_choice` values are left to the model.
+- Tool calling follows the OpenAI format: `tools` (function type) are forwarded with their JSON schema; the model's calls come back as `tool_calls` (streamed as indexed fragments) with `finish_reason: "tool_calls"`; send results back as `role: "tool"` messages with `tool_call_id`.
+- `tool_choice`: `"none"` drops the tools; `"auto"` is the default. Upstream cannot force a tool call, so `"required"` and a named function are best effort: a named choice narrows the tools to that one, and both add an instruction to the system prompt telling the model to call a tool. Models follow it reliably in testing, but it is not guaranteed.
 - Images: user messages may include `image_url` parts with base64 data URLs (`data:image/png;base64,...`; png, jpeg, webp, gif). Remote image URLs are not fetched and return 400, as do images sent to a model without `"multimodal": true` in `/v1/models`. Request bodies on `/v1` may be up to 32 MB.
 - Rate limits: when Devin returns 429 with a stated wait ("reset in 22 minutes"), the response carries a matching `Retry-After` header (seconds).
 - Errors use the OpenAI error shape. With no usable account the endpoint returns 503.
 
 `/v1/messages` (Anthropic format):
 
-- `system` (string or text blocks), `messages` with `text`, `image` (base64 source only), `tool_use` and `tool_result` blocks, `tools` with `input_schema`, `max_tokens`, `temperature`. `tool_result` with `is_error: true` is sent as "Error: ...".
-- Server tools (`web_search_*`, `code_execution_*`, ...) are skipped, since they run on Anthropic's side. `tool_choice: {"type":"none"}` disables tools.
+- `system` (string or text blocks), `messages` with `text`, `image` (base64 source only), `tool_use` and `tool_result` blocks, `tools` with `input_schema`, `max_tokens`, `temperature`, `top_p`. `tool_result` with `is_error: true` is sent as "Error: ...". `top_k` is ignored.
+- `stop_sequences` are applied by the proxy as for `stop` above; a match ends the message with `stop_reason: "stop_sequence"` and the matched `stop_sequence`.
+- Server tools (`web_search_*`, `code_execution_*`, ...) are skipped, since they run on Anthropic's side. `tool_choice` `none`, `auto`, `any` and `tool` map to the OpenAI forms above (`any` = required, `tool` = named, both best effort).
 - Thinking blocks are returned only when the request sets `thinking` (`enabled` or `adaptive`). Their `signature` is empty because upstream provides none. Thinking blocks in the history are dropped.
 - Streaming uses the standard events: `message_start`, `content_block_*`, `message_delta` (stop reason and usage), `message_stop`. Errors use the Anthropic error shape.
 - Point Claude Code at it with `ANTHROPIC_BASE_URL=http://127.0.0.1:8080` and `ANTHROPIC_API_KEY` set to a panel API key (or any value in keyless mode). `ANTHROPIC_MODEL` takes any id from `/v1/models`.
@@ -235,9 +238,9 @@ How chat works:
 `/v1/responses` (OpenAI Responses format):
 
 - `input` as a string or items: `message` (roles user/assistant/system/developer, `input_text`/`output_text`/`input_image` with a data URL), `function_call`, `function_call_output`. `reasoning` items are ignored. `instructions` becomes the system prompt.
-- Function tools are forwarded; built-in tools (`web_search`, `file_search`, ...) are skipped.
+- Function tools are forwarded; built-in tools (`web_search`, `file_search`, ...) are skipped. `tool_choice` works as for chat completions (named form `{"type":"function","name":...}`). `max_output_tokens`, `temperature` and `top_p` are forwarded.
 - Output items: `reasoning` (summary text), `message` (`output_text`), `function_call`. Streaming emits the standard `response.*` events with `sequence_number`.
-- Stateless: nothing is stored, so `previous_response_id` returns 400 and the full conversation must be sent each time.
+- `previous_response_id`: responses are kept in memory for 1 hour (up to 256, oldest dropped first), so a follow-up can send just the new input. They are lost on restart; an unknown id returns 400. `store: false` skips keeping a response. Instructions are not carried over, as in the OpenAI API.
 
 ---
 

@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 )
 
@@ -23,9 +24,25 @@ type ChatRequest struct {
 	Temperature *float64        `json:"temperature,omitempty"`
 	TopP        *float64        `json:"top_p,omitempty"`
 	MaxTokens   *int64          `json:"max_tokens,omitempty"`
-	Stop        []string        `json:"stop,omitempty"`
+	Stop        json.RawMessage `json:"stop,omitempty"` // string or list of strings
 	Tools       []Tool          `json:"tools,omitempty"`
 	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
+}
+
+// StopSequences decodes the stop parameter, given as a string or a list.
+func (r ChatRequest) StopSequences() ([]string, error) {
+	if len(r.Stop) == 0 || string(r.Stop) == "null" {
+		return nil, nil
+	}
+	var one string
+	if json.Unmarshal(r.Stop, &one) == nil {
+		return []string{one}, nil
+	}
+	var list []string
+	if err := json.Unmarshal(r.Stop, &list); err != nil {
+		return nil, errors.New("stop must be a string or an array of strings")
+	}
+	return list, nil
 }
 
 // Tool is a function the model may call.

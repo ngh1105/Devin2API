@@ -108,11 +108,12 @@ type Server struct {
 	loginServerBase string
 	loginMngr       *loginManager
 
-	chatRR   atomic.Uint64 // round-robin cursor over chat accounts
-	models   modelCache    // upstream model catalog
-	reqLog   requestLog    // recent chat requests for the panel
-	cooldown cooldowns     // accounts parked per model after a 429
-	stats    chatStats     // chat request totals, persisted in the data dir
+	chatRR          atomic.Uint64 // round-robin cursor over chat accounts
+	models          modelCache    // upstream model catalog
+	reqLog          requestLog    // recent chat requests for the panel
+	storedResponses responseStore // /v1/responses history for previous_response_id
+	cooldown        cooldowns     // accounts parked per model after a 429
+	stats           chatStats     // chat request totals, persisted in the data dir
 }
 
 // New creates a new Server from config and stores.

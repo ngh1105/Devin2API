@@ -12,30 +12,28 @@ import (
 	"github.com/ngh1105/Devin2API/internal/openai"
 )
 
-// toDevinFromResponses converts an OpenAI Responses request. The proxy
-// keeps no state, so previous_response_id is rejected: clients must send
-// the full history in input. Built-in tools (web_search, file_search...)
-// are skipped since they run on OpenAI's side.
-func toDevinFromResponses(req openai.ResponsesRequest) (devin.ChatRequest, error) {
-	out := devin.ChatRequest{Model: req.Model, MaxTokens: defaultMaxTokens, Temperature: 1.0}
-	if req.PreviousResponseID != "" {
-		return out, errors.New("previous_response_id is not supported: this proxy stores no responses, send the full conversation in input")
-	}
+// toDevinFromResponses converts an OpenAI Responses request. prior holds the
+// conversation of previous_response_id (nil when not set); the new input
+// continues it. Built-in tools (web_search, file_search...) are skipped
+// since they run on OpenAI's side.
+func toDevinFromResponses(req openai.ResponsesRequest, prior []devin.Prompt) (devin.ChatRequest, error) {
+	out := devin.ChatRequest{Model: req.Model, MaxTokens: defaultMaxTokens, Temperature: 1.0, Prompts: prior}
 	if req.MaxOutputTokens != nil && *req.MaxOutputTokens > 0 {
 		out.MaxTokens = int(*req.MaxOutputTokens)
 	}
 	if req.Temperature != nil {
 		out.Temperature = *req.Temperature
 	}
-	if string(req.ToolChoice) != `"none"` {
-		for _, t := range req.Tools {
-			if t.Type == "function" {
-				out.Tools = append(out.Tools, devin.Tool{Name: t.Name, Description: t.Description, Parameters: []byte(t.Parameters)})
-			}
+	if req.TopP != nil {
+		out.TopP = *req.TopP
+	}
+	for _, t := range req.Tools {
+		if t.Type == "function" {
+			out.Tools = append(out.Tools, devin.Tool{Name: t.Name, Description: t.Description, Parameters: []byte(t.Parameters)})
 		}
-		if err := validateTools(out.Tools); err != nil {
-			return out, err
-		}
+	}
+	if err := validateTools(out.Tools); err != nil {
+		return out, err
 	}
 
 	items, err := openai.InputItems(req.Input)
@@ -102,6 +100,13 @@ func toDevinFromResponses(req openai.ResponsesRequest) (devin.ChatRequest, error
 		}
 	}
 	out.System = strings.Join(system, "\n\n")
+	tc, err := responsesToolChoice(req.ToolChoice)
+	if err != nil {
+		return out, err
+	}
+	if err := applyToolChoice(&out, tc); err != nil {
+		return out, err
+	}
 	if !hasInput(out.Prompts) {
 		return out, errors.New("input needs at least one non-empty user message")
 	}
@@ -144,7 +149,15 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	dreq, err := toDevinFromResponses(req)
+	var prior []devin.Prompt
+	if req.PreviousResponseID != "" {
+		var ok bool
+		if prior, ok = s.storedResponses.get(req.PreviousResponseID); !ok {
+			openai.WriteError(w, http.StatusBadRequest, fmt.Sprintf("previous_response_id %q not found: responses are kept in memory for %v and lost on restart; send the full conversation in input instead", req.PreviousResponseID, responseTTL))
+			return
+		}
+	}
+	dreq, err := toDevinFromResponses(req, prior)
 	if err != nil {
 		openai.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -159,7 +172,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = "devin"
 	}
-	rw := &responsesWriter{id: "resp_" + randID(), model: model, created: time.Now().Unix()}
+	rw := &responsesWriter{id: "resp_" + randID(), model: model, created: time.Now().Unix(), previous: req.PreviousResponseID}
 	if req.Stream {
 		rw.sse = newSSE(w)
 	}
@@ -181,6 +194,10 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := seg.finish(); err != nil {
 		return
+	}
+	if req.ShouldStore() {
+		history := append(append([]devin.Prompt(nil), dreq.Prompts...), assistantTurn(seg.segs, res))
+		s.storedResponses.put(rw.id, history)
 	}
 	statusStr := "completed"
 	if finishReason(res) == "length" {
@@ -205,6 +222,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 // tool call a function_call item.
 type responsesWriter struct {
 	id, model string
+	previous  string // previous_response_id echoed in the response object
 	created   int64
 	sse       *sseWriter
 	seq       int
@@ -358,6 +376,7 @@ func (rw *responsesWriter) object(segs []*segment, status string, res *devin.Cha
 		"id": rw.id, "object": "response", "created_at": rw.created, "status": status,
 		"model": rw.model, "output": output, "output_text": text,
 		"error": nil, "incomplete_details": nil, "usage": nil,
+		"previous_response_id": nilIfEmpty(rw.previous),
 	}
 	if status == "incomplete" {
 		obj["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
@@ -369,4 +388,11 @@ func (rw *responsesWriter) object(segs []*segment, status string, res *devin.Cha
 		}
 	}
 	return obj
+}
+
+func nilIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
