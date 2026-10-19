@@ -2,11 +2,12 @@
 package store
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -59,10 +60,15 @@ type accountPlain struct {
 	UsageErr  string    `json:"usage_error,omitempty"`
 }
 
-// hasV1TokenMarker reports whether raw JSON carries access_token in tokens,
-// which signals a v1 record even when schema key is absent.
-func hasV1TokenMarker(data []byte) bool {
-	return bytes.Contains(data, []byte(`"access_token"`))
+// hasV1TokenMarker reports whether the record's tokens object carries a v1
+// access_token (and no v2 session_token), which signals a v1 record even
+// when the schema key says otherwise. Only the tokens object is inspected,
+// so a v2 field whose value happens to be "access_token" is not mistaken.
+func hasV1TokenMarker(parsed map[string]json.RawMessage) bool {
+	tok := getNested(parsed, "tokens")
+	_, hasAccess := tok["access_token"]
+	_, hasSession := tok["session_token"]
+	return hasAccess && !hasSession
 }
 
 func extractV1Field(m map[string]json.RawMessage, key string, dst *string) {
@@ -132,7 +138,7 @@ func (a *Account) UnmarshalJSON(data []byte) error {
 		hasSchemaKey = true
 	}
 
-	isV1 := schemaVer < 2 || !hasSchemaKey || hasV1TokenMarker(data)
+	isV1 := schemaVer < 2 || !hasSchemaKey || hasV1TokenMarker(parsed)
 
 	if isV1 {
 		return a.migrateFromV1(data, parsed)
@@ -235,6 +241,10 @@ type AccountStore struct {
 	mu       sync.RWMutex
 	dir      string
 	accounts map[string]*Account
+	// paths records the file each account was loaded from when it is not
+	// <id>.json (hand-placed or legacy files), so Delete removes the right
+	// file and Save does not leave a stale copy behind.
+	paths map[string]string
 }
 
 // NewAccountStore creates (if needed) and returns a new AccountStore backed by dir.
@@ -242,13 +252,11 @@ func NewAccountStore(dir string) (*AccountStore, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("account store mkdir: %w", err)
 	}
-	s := &AccountStore{dir: dir, accounts: make(map[string]*Account)}
-	if accs, err := loadAllAccounts(dir); err != nil {
+	accs, paths, err := loadAllAccounts(dir)
+	if err != nil {
 		return nil, fmt.Errorf("account store loadAll: %w", err)
-	} else {
-		s.accounts = accs
 	}
-	return s, nil
+	return &AccountStore{dir: dir, accounts: accs, paths: paths}, nil
 }
 
 // List returns all accounts sorted by created_at ascending.
@@ -331,18 +339,33 @@ func (s *AccountStore) saveLocked(a *Account) error {
 	}
 	cp := *a
 	s.accounts[a.ID] = &cp
+	// The record now lives in <id>.json; drop a differently named source
+	// file so it cannot reload a stale copy.
+	if old, ok := s.paths[a.ID]; ok && old != path {
+		os.Remove(old)
+		delete(s.paths, a.ID)
+	}
 	return nil
 }
 
-// Delete removes the file for id from disk and drops it from memory.
+// Delete removes the account's file from disk, then drops it from memory.
+// A file that is already gone counts as deleted.
 func (s *AccountStore) Delete(id string) error {
 	if !ValidID(id) {
 		return os.ErrNotExist
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	path, ok := s.paths[id]
+	if !ok {
+		path = filepath.Join(s.dir, id+".json")
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	delete(s.accounts, id)
-	return os.Remove(filepath.Join(s.dir, id+".json"))
+	delete(s.paths, id)
+	return nil
 }
 
 // Import normalises raw JSON into an Account and saves it.
@@ -547,6 +570,10 @@ func importBareToken(m map[string]json.RawMessage) *Account {
 		ID:        genHex("acc_", 8),
 		Tokens:    Tokens{SessionToken: FormatSessionToken(val)},
 		CreatedAt: time.Now(),
+		// A new account is usable right away; on a merge into an existing
+		// account Enabled is ignored (enabledExplicitlySet stays false).
+		Enabled:  true,
+		AuthKind: "oauth",
 	}
 	// Also accept optional identity fields for upsert matching.
 	if raw, ok := m["user_id"]; ok {
@@ -565,7 +592,8 @@ func importBareToken(m map[string]json.RawMessage) *Account {
 }
 
 func importSchemaV2(m map[string]json.RawMessage) (*Account, error) {
-	acct := &Account{Schema: 2, Enabled: true, CreatedAt: time.Now(), enabledExplicitlySet: true}
+	_, hasEnabled := m["enabled"]
+	acct := &Account{Schema: 2, Enabled: true, CreatedAt: time.Now(), enabledExplicitlySet: hasEnabled}
 
 	setField := func(key string, dst *string) {
 		if raw, ok := m[key]; ok {
@@ -596,11 +624,15 @@ func importSchemaV2(m map[string]json.RawMessage) (*Account, error) {
 	tokData := getNested(m, "tokens")
 	if raw, ok := tokData["session_token"]; ok {
 		json.Unmarshal(raw, &acct.Tokens.SessionToken)
+	} else if raw, ok := tokData["access_token"]; ok {
+		// A v1 export: its access token is the credential.
+		json.Unmarshal(raw, &acct.Tokens.SessionToken)
 	}
 	// Top-level session_token overrides tokens.session_token.
 	if raw, ok := m["session_token"]; ok {
 		json.Unmarshal(raw, &acct.Tokens.SessionToken)
 	}
+	acct.Tokens.SessionToken = FormatSessionToken(acct.Tokens.SessionToken)
 
 	rawUsage := m["usage"]
 	if len(rawUsage) > 0 && string(rawUsage) != "null" {
@@ -617,7 +649,8 @@ func importSchemaV2(m map[string]json.RawMessage) (*Account, error) {
 }
 
 func importCLIProxyAPI(m map[string]json.RawMessage) *Account {
-	acct := &Account{Schema: 2, AuthKind: "oauth", Enabled: true, CreatedAt: time.Now(), enabledExplicitlySet: true}
+	_, hasDisabled := m["disabled"]
+	acct := &Account{Schema: 2, AuthKind: "oauth", Enabled: true, CreatedAt: time.Now(), enabledExplicitlySet: hasDisabled}
 
 	if raw, ok := m["api_key"]; ok {
 		var val string
@@ -673,8 +706,25 @@ func (s *AccountStore) mergeExistingLocked(newAcct *Account) *Account {
 	if newAcct.UserID != "" {
 		old = find(func(a *Account) bool { return a.UserID == newAcct.UserID })
 	}
+	// Match by email only when one side has no user id: the same email can
+	// belong to different users (e.g. separate orgs).
 	if old == nil && newAcct.Email != "" {
-		old = find(func(a *Account) bool { return a.Email == newAcct.Email })
+		old = find(func(a *Account) bool {
+			return a.Email == newAcct.Email && (a.UserID == "" || newAcct.UserID == "")
+		})
+	}
+	// An import that names an existing account id updates that account,
+	// unless it is evidently a different user, in which case it gets a new
+	// id instead of overwriting the stored one.
+	if old == nil {
+		if cur, ok := s.accounts[newAcct.ID]; ok {
+			if cur.UserID != "" && newAcct.UserID != "" && cur.UserID != newAcct.UserID {
+				fresh := *newAcct
+				fresh.ID = genHex("acc_", 8)
+				return &fresh
+			}
+			old = cur
+		}
 	}
 	if old == nil {
 		return newAcct
@@ -739,11 +789,15 @@ func genHex(prefix string, nbytes int) string {
 	return prefix + hex.EncodeToString(b)
 }
 
-func loadAllAccounts(path string) (map[string]*Account, error) {
+// loadAllAccounts reads every *.json account in dir. It also returns the
+// source path of accounts whose file is not named <id>.json. Unreadable
+// files are skipped with a warning rather than failing startup.
+func loadAllAccounts(path string) (map[string]*Account, map[string]string, error) {
 	result := make(map[string]*Account)
+	paths := make(map[string]string)
 	files, err := os.ReadDir(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, f := range files {
 		if f.IsDir() || f.Name() == "" || f.Name()[0] == '.' {
@@ -754,15 +808,21 @@ func loadAllAccounts(path string) (map[string]*Account, error) {
 		if ext != ".json" || base == "tmp" {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(path, f.Name()))
+		full := filepath.Join(path, f.Name())
+		data, err := os.ReadFile(full)
 		if err != nil {
+			slog.Warn("skip account file", "file", full, "error", err)
 			continue
 		}
 		var acc Account
 		if err := json.Unmarshal(data, &acc); err != nil || !ValidID(acc.ID) {
+			slog.Warn("skip account file", "file", full, "error", err, "id", acc.ID)
 			continue
 		}
 		result[acc.ID] = &acc
+		if base != acc.ID {
+			paths[acc.ID] = full
+		}
 	}
-	return result, nil
+	return result, paths, nil
 }

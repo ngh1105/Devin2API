@@ -156,7 +156,13 @@ func (s *TokenStore) loadTokens() error {
 		}
 		return err
 	}
-	return json.Unmarshal(data, &s.tokens)
+	if err := json.Unmarshal(data, &s.tokens); err != nil {
+		return err
+	}
+	if s.tokens == nil { // file held "null"
+		s.tokens = make(map[string]Token)
+	}
+	return nil
 }
 
 // MaskSecret hides all but the last 4 characters of a secret value,
