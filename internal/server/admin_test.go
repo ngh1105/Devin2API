@@ -806,7 +806,7 @@ func TestAdminMasksSecrets(t *testing.T) {
 	if err := accs.Save(acc); err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := srv.tokens.Create()
+	tok, _ := srv.tokens.Create(store.TokenOptions{})
 
 	for _, path := range []string{"/admin/api/accounts", "/admin/api/tokens"} {
 		rec := httptest.NewRecorder()
@@ -845,5 +845,6 @@ func mustTokens(t *testing.T) *store.TokenStore {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { s.Flush() }) // before TempDir removes the directory
 	return s
 }

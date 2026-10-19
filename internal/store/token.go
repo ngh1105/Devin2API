@@ -1,22 +1,62 @@
 package store
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
 
-// Token is a single OAuth bearer credential persisted to disk.
+// Token is an API key for /v1. Only a SHA-256 hash of the key is stored:
+// the plaintext value is set in Token solely on the record Create returns.
 type Token struct {
 	ID        string     `json:"id"`
-	Token     string     `json:"token"`
+	Name      string     `json:"name,omitempty"`
+	Token     string     `json:"token,omitempty"` // plaintext, never persisted
+	Hash      string     `json:"hash,omitempty"`  // hex SHA-256 of the key
+	Hint      string     `json:"hint,omitempty"`  // masked key for display
 	CreatedAt time.Time  `json:"created_at"`
 	LastUsed  *time.Time `json:"last_used"` // null = never touched
+	Requests  int64      `json:"requests"`  // requests counted against Quota
+	Disabled  bool       `json:"disabled,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	Models    []string   `json:"models,omitempty"` // allowed models; empty = any
+	Quota     int64      `json:"quota,omitempty"`  // max requests; 0 = unlimited
 }
+
+// TokenOptions are the editable settings of an API key.
+type TokenOptions struct {
+	Name      string     `json:"name"`
+	Disabled  bool       `json:"disabled"`
+	ExpiresAt *time.Time `json:"expires_at"`
+	Models    []string   `json:"models"`
+	Quota     int64      `json:"quota"`
+}
+
+// Limits on TokenOptions.
+const (
+	maxTokenName   = 64
+	maxTokenModels = 64
+)
+
+// Reasons Use refuses a key.
+var (
+	ErrKeyDisabled = errors.New("API key is disabled")
+	ErrKeyExpired  = errors.New("API key has expired")
+	ErrKeyQuota    = errors.New("API key request quota is used up")
+)
+
+// tokenSaveDelay batches the counter updates Use makes on every request
+// into one write.
+const tokenSaveDelay = 5 * time.Second
 
 // TokenStore persists Tokens as an index file (<dir>/tokens.json).
 type TokenStore struct {
@@ -24,6 +64,7 @@ type TokenStore struct {
 	dir     string
 	tokens  map[string]Token // id -> Token
 	idxPath string
+	pending *time.Timer // delayed save, nil when none is scheduled
 }
 
 // NewTokenStore creates (if needed) and returns a new TokenStore backed by dir.
@@ -42,21 +83,86 @@ func NewTokenStore(dir string) (*TokenStore, error) {
 	return t, nil
 }
 
-// Create adds a fresh token and returns its full record.
-func (s *TokenStore) Create() (Token, error) {
-	id := genHex("t_", 8)      // "t_" + 16 hex chars
-	val := genHex("d2sk_", 16) // "d2sk_" + 32 hex chars
-	now := time.Now()
-	tok := Token{ID: id, Token: val, CreatedAt: now, LastUsed: nil}
-	s.mu.Lock()
-	s.tokens[id] = tok
-	if err := s.saveTokens(); err != nil {
-		delete(s.tokens, id)
-		s.mu.Unlock()
-		return tok, fmt.Errorf("save after create: %w", err)
+// hashKey returns the stored form of a key value.
+func hashKey(v string) string {
+	sum := sha256.Sum256([]byte(v))
+	return hex.EncodeToString(sum[:])
+}
+
+// normalize validates options and cleans up the model list.
+func (o *TokenOptions) normalize() error {
+	o.Name = strings.TrimSpace(o.Name)
+	if len(o.Name) > maxTokenName {
+		return fmt.Errorf("name is longer than %d characters", maxTokenName)
 	}
-	s.mu.Unlock()
+	if o.Quota < 0 {
+		return errors.New("quota cannot be negative")
+	}
+	seen := map[string]bool{}
+	models := []string{}
+	for _, m := range o.Models {
+		m = strings.TrimSpace(m)
+		if m != "" && !seen[m] {
+			seen[m] = true
+			models = append(models, m)
+		}
+	}
+	if len(models) > maxTokenModels {
+		return fmt.Errorf("at most %d models can be allowed", maxTokenModels)
+	}
+	o.Models = models
+	if len(o.Models) == 0 {
+		o.Models = nil
+	}
+	return nil
+}
+
+// Create adds a fresh key with opts and returns its record, the only one
+// that carries the plaintext value.
+func (s *TokenStore) Create(opts TokenOptions) (Token, error) {
+	if err := opts.normalize(); err != nil {
+		return Token{}, err
+	}
+	val := genHex("d2sk_", 16) // "d2sk_" + 32 hex chars
+	tok := Token{
+		ID: genHex("t_", 8), Name: opts.Name, Hash: hashKey(val), Hint: MaskSecret(val),
+		CreatedAt: time.Now(), Disabled: opts.Disabled, ExpiresAt: opts.ExpiresAt,
+		Models: opts.Models, Quota: opts.Quota,
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokens[tok.ID] = tok
+	if err := s.saveTokens(); err != nil {
+		delete(s.tokens, tok.ID)
+		return Token{}, fmt.Errorf("save after create: %w", err)
+	}
+	tok.Token = val
 	return tok, nil
+}
+
+// Update replaces the settings of key id and, with resetRequests, zeroes
+// its request counter. Returns os.ErrNotExist when id is unknown.
+func (s *TokenStore) Update(id string, opts TokenOptions, resetRequests bool) (Token, error) {
+	if err := opts.normalize(); err != nil {
+		return Token{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old, ok := s.tokens[id]
+	if !ok {
+		return Token{}, os.ErrNotExist
+	}
+	t := old
+	t.Name, t.Disabled, t.ExpiresAt, t.Models, t.Quota = opts.Name, opts.Disabled, opts.ExpiresAt, opts.Models, opts.Quota
+	if resetRequests {
+		t.Requests = 0
+	}
+	s.tokens[id] = t
+	if err := s.saveTokens(); err != nil {
+		s.tokens[id] = old
+		return Token{}, fmt.Errorf("save after update: %w", err)
+	}
+	return t, nil
 }
 
 // List returns all tokens in the store.
@@ -88,47 +194,84 @@ func (s *TokenStore) Delete(id string) error {
 	return nil
 }
 
-// Verify checks whether tokenVal matches any stored token's plaintext value.
+// Verify checks whether tokenVal is a stored key.
 func (s *TokenStore) Verify(tokenVal string) (bool, error) {
 	_, ok := s.Match(tokenVal)
 	return ok, nil
 }
 
-// Match returns the id of the token whose value equals tokenVal.
-// Empty values never match; comparison is constant-time per token.
-func (s *TokenStore) Match(tokenVal string) (string, bool) {
+// Match returns the key whose value is tokenVal. Empty values never match;
+// hashes are compared in constant time.
+func (s *TokenStore) Match(tokenVal string) (Token, bool) {
 	if tokenVal == "" {
-		return "", false
+		return Token{}, false
 	}
+	h := []byte(hashKey(tokenVal))
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for id, t := range s.tokens {
-		if t.Token != "" && subtle.ConstantTimeCompare([]byte(t.Token), []byte(tokenVal)) == 1 {
-			return id, true
+	for _, t := range s.tokens {
+		if t.Hash != "" && subtle.ConstantTimeCompare([]byte(t.Hash), h) == 1 {
+			return t, true
 		}
 	}
-	return "", false
+	return Token{}, false
 }
 
-// touchPersistEvery limits how often Touch rewrites tokens.json, since it
-// runs on every authenticated request.
-const touchPersistEvery = time.Minute
-
-// Touch updates the LastUsed timestamp for the token with id (best-effort).
-func (s *TokenStore) Touch(id string) {
+// Use admits one request made with key id: it fails when the key is
+// disabled, expired or out of quota, and otherwise updates LastUsed and,
+// when counted, the request counter. Returns os.ErrNotExist when id is
+// unknown.
+func (s *TokenStore) Use(id string, counted bool) (Token, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, ok := s.tokens[id]
 	if !ok {
-		return
+		return Token{}, os.ErrNotExist
 	}
 	now := time.Now()
-	persist := t.LastUsed == nil || now.Sub(*t.LastUsed) >= touchPersistEvery
-	t.LastUsed = &now
-	s.tokens[id] = t
-	if persist {
-		s.saveTokens() // best-effort — ignore error
+	switch {
+	case t.Disabled:
+		return t, ErrKeyDisabled
+	case t.ExpiresAt != nil && !now.Before(*t.ExpiresAt):
+		return t, ErrKeyExpired
+	case counted && t.Quota > 0 && t.Requests >= t.Quota:
+		return t, ErrKeyQuota
 	}
+	t.LastUsed = &now
+	if counted {
+		t.Requests++
+	}
+	s.tokens[id] = t
+	s.scheduleSave()
+	return t, nil
+}
+
+// scheduleSave writes the index after tokenSaveDelay unless a write is
+// already scheduled. Caller must hold s.mu.
+func (s *TokenStore) scheduleSave() {
+	if s.pending != nil {
+		return
+	}
+	s.pending = time.AfterFunc(tokenSaveDelay, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.pending = nil
+		if err := s.saveTokens(); err != nil {
+			slog.Warn("save api keys", "error", err)
+		}
+	})
+}
+
+// Flush writes a scheduled save now.
+func (s *TokenStore) Flush() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending == nil {
+		return nil
+	}
+	s.pending.Stop()
+	s.pending = nil
+	return s.saveTokens()
 }
 
 // saveTokens writes the index to disk. Caller must hold s.mu.
@@ -148,6 +291,8 @@ func (s *TokenStore) saveTokens() error {
 	return nil
 }
 
+// loadTokens reads the index. Keys saved in plaintext by older versions are
+// replaced by their hash, and the file is rewritten without them.
 func (s *TokenStore) loadTokens() error {
 	data, err := os.ReadFile(s.idxPath)
 	if err != nil {
@@ -161,6 +306,21 @@ func (s *TokenStore) loadTokens() error {
 	}
 	if s.tokens == nil { // file held "null"
 		s.tokens = make(map[string]Token)
+	}
+	migrated := 0
+	for id, t := range s.tokens {
+		if t.Token == "" {
+			continue
+		}
+		t.Hash, t.Hint, t.Token = hashKey(t.Token), MaskSecret(t.Token), ""
+		s.tokens[id] = t
+		migrated++
+	}
+	if migrated > 0 {
+		if err := s.saveTokens(); err != nil {
+			return fmt.Errorf("hash stored keys: %w", err)
+		}
+		slog.Info("stored API keys hashed", "keys", migrated)
 	}
 	return nil
 }

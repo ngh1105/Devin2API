@@ -2,13 +2,17 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"mime"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ngh1105/Devin2API/internal/config"
@@ -141,6 +145,7 @@ func New(cfg config.Config, accounts *store.AccountStore, tokens *store.TokenSto
 		loginMngr:       newLoginManager(),
 	}
 	s.stats.load(cfg.DataDir)
+	s.reqLog.load(cfg.DataDir)
 	s.settings.load(cfg.DataDir)
 	s.auth.password = cfg.AdminPassword
 	return s
@@ -174,7 +179,37 @@ func (s *Server) Start(addr string) error {
 	go s.fetchModels(context.Background())
 	// Keep quota data fresh for routing.
 	go s.usageLoop(context.Background())
-	return srv.ListenAndServe()
+
+	// On Ctrl+C or SIGTERM, give open requests a moment to finish, then
+	// write the counters that are saved with a delay.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServe() }()
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+	slog.Info("shutting down")
+	sctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+	defer cancel()
+	srv.Shutdown(sctx)
+	s.flush()
+	return nil
+}
+
+// shutdownGrace bounds how long shutdown waits for open requests.
+const shutdownGrace = 5 * time.Second
+
+// flush writes state that is otherwise saved after a delay.
+func (s *Server) flush() {
+	if err := s.tokens.Flush(); err != nil {
+		slog.Warn("save api keys", "error", err)
+	}
+	if s.stats.path != "" {
+		s.stats.save()
+	}
 }
 
 // adminRequestError guards the admin API against browser attacks from

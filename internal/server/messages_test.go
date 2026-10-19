@@ -355,7 +355,7 @@ func TestAppendAssistantMerging(t *testing.T) {
 
 func TestMessagesAuthErrorIsAnthropicShaped(t *testing.T) {
 	srv := chatTestServer(t, &fakeDevin{}, "eyJtok1")
-	srv.tokens.Create()
+	srv.tokens.Create(store.TokenOptions{})
 	rec := postV1(srv, "/v1/messages", `{"max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`)
 	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), `"authentication_error"`) {
 		t.Errorf("status %d body %s", rec.Code, rec.Body)
