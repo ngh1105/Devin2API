@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -181,5 +182,31 @@ func TestResponseStoreEviction(t *testing.T) {
 	}
 	if _, ok := s.get(fmt.Sprintf("resp_%d", responseStoreSize+9)); !ok {
 		t.Error("newest entry missing")
+	}
+}
+
+// TestStopSequenceEstimatesUsage: upstream sends usage only in its last
+// frame, which a stop sequence cuts off, so the proxy estimates it.
+func TestStopSequenceEstimatesUsage(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/GetCliModelConfigs") {
+			return
+		}
+		w.Write(connectFrame(0, devin.PwFieldString(3, "hello world, ")))
+		w.Write(connectFrame(0, devin.PwFieldString(3, "the end")))
+		w.Write(connectFrame(0, devin.PwFieldBytes(7, append(devin.PwFieldVarint(2, 10), devin.PwFieldVarint(3, 2)...))))
+		w.Write(connectFrame(2, []byte("{}")))
+	}))
+	defer up.Close()
+	srv := chatTestServer(t, &fakeDevin{}, "eyJtok1")
+	srv.loginServerBase = up.URL
+	rec := postChat(srv, `{"messages":[{"role":"user","content":"say hello world please"}],"stop":"end"}`)
+	var resp openai.ChatCompletion
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if rec.Code != 200 || strOf(resp.Choices[0].Message.Content) != "hello world, the " {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body)
+	}
+	if u := resp.Usage; u == nil || u.PromptTokens == 0 || u.CompletionTokens != 5 {
+		t.Errorf("usage = %+v, want an estimate (completion 5)", resp.Usage)
 	}
 }
