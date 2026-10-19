@@ -91,17 +91,16 @@ func runLogin(ctx context.Context, stdout io.Writer, cfg config.Config, notifyPo
 
 	p, err := devin.FetchSelfProfile(ctx, "", formatted)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: fetch profile: %v\n", err)
+		// Without the profile the account has no user id or email to match
+		// on, so every retry would add another nameless duplicate.
+		return fmt.Errorf("fetch profile: %w", err)
 	}
 
 	var usage *store.Usage
-	if p.UserID != "" {
-		u, ue := devin.FetchUserStatus(ctx, "", formatted)
-		if ue != nil {
-			fmt.Fprintf(os.Stderr, "warning: fetch usage: %v\n", ue)
-		} else {
-			usage = u
-		}
+	if u, ue := devin.FetchUserStatus(ctx, "", formatted); ue != nil {
+		fmt.Fprintf(os.Stderr, "warning: fetch usage: %v\n", ue)
+	} else {
+		usage = u
 	}
 
 	accDir := cfg.DataDir + "/accounts"

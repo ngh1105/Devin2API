@@ -155,7 +155,7 @@ func (r *pwReader) Next() (field, wire int, val []byte, varint uint64, ok bool) 
 			return 0, 0, nil, 0, false
 		}
 		r.offset += m
-		if int(lenVal) > len(r.data)-r.offset {
+		if lenVal > uint64(len(r.data)-r.offset) { // compare unsigned: a huge length must not wrap negative
 			r.truncated = true
 			r.ok = false
 			return 0, 0, nil, 0, false

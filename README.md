@@ -18,11 +18,13 @@ OpenAI-compatible reverse proxy API for Devin — built from scratch in Go.
 **Docker**: release images are published to `ghcr.io/ngh1105/devin2api`.
 
 ```bash
-docker run -d --name devin2api -p 127.0.0.1:8080:8080 -v devin2api-data:/data ghcr.io/ngh1105/devin2api:latest
+docker run -d --name devin2api -p 127.0.0.1:8080:8080 -v devin2api-data:/data \
+  -e DEVIN2API_ADMIN_PASSWORD='choose-a-password' ghcr.io/ngh1105/devin2api:latest
 ```
 
 - Inside the container the server listens on `0.0.0.0:8080` and keeps data in the `/data` volume.
-- Publish the port on `127.0.0.1` as shown: without an admin password, the admin API and keyless `/v1` only answer loopback hosts. To reach the panel from the LAN, add `-e DEVIN2API_ADMIN_PASSWORD=...`, publish on all interfaces and create API keys.
+- **Set `DEVIN2API_ADMIN_PASSWORD`.** Requests reach the container over Docker's bridge network, not loopback, so without a password the panel and admin API refuse every request. For the same reason, `/v1` needs an API key: create one in the panel.
+- Publishing on `127.0.0.1` (as shown) keeps it on this machine. To use it from the LAN, publish on all interfaces (`-p 8080:8080`).
 - The browser login waits for a callback on a port inside the container, so it cannot finish there. Log in with the binary on the host and import the account JSON in the panel, or use the manual token login.
 
 **From source**:
@@ -57,7 +59,7 @@ The server exposes:
 
 > **Security.** The admin API (`/admin/api/*`) always rejects cross-origin requests and requires an `X-Devin2API` header on state-changing calls (the panel sends it). Session tokens and API keys are masked in every admin response. Imported account `id` values may only contain letters, digits, `_` and `-`.
 >
-> - **Without `DEVIN2API_ADMIN_PASSWORD`** (the default) the panel needs no login. The admin API then only answers requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]`, so keep the default `127.0.0.1` binding.
+> - **Without `DEVIN2API_ADMIN_PASSWORD`** (the default) the panel needs no login. The admin API and keyless `/v1` then only serve local clients: the connection must come from a loopback address, and the `Host` must be `localhost`, `127.0.0.1` or `[::1]`. That covers both direct network requests that forge the `Host` header and DNS rebinding from a browser.
 > - **With `DEVIN2API_ADMIN_PASSWORD`** the panel asks for the password.
 >   - A login lasts 7 days, in an `HttpOnly`, `SameSite=Strict` cookie. Sessions are in memory, so a restart signs everyone out.
 >   - Failed logins are slowed down and capped at 10 per minute.
@@ -216,7 +218,7 @@ or equivalently:
 X-Api-Key: d2sk_xxxx...
 ```
 
-If the token store is **empty** (no tokens created), `/v1/*` accepts requests without a key, but only from local callers: the `Host` must be `localhost`, `127.0.0.1` or `[::1]`, and any `Origin` header must match it. This stops web pages and DNS-rebinding tricks from spending your Devin quota. As soon as one or more tokens exist, every `/v1/*` request must include a valid token. Token values are masked in list responses; the full value is only shown once, on creation.
+If the token store is **empty** (no tokens created), `/v1/*` accepts requests without a key, but only from local clients: the connection must come from a loopback address, the `Host` must be `localhost`, `127.0.0.1` or `[::1]`, and any `Origin` header must match it. This stops web pages and DNS-rebinding tricks from spending your Devin quota. As soon as one or more tokens exist, every `/v1/*` request must include a valid token. Token values are masked in list responses; the full value is only shown once, on creation.
 
 ---
 

@@ -424,6 +424,9 @@ func (t *toolTracker) feed(raw rawToolDelta) *ToolCallDelta {
 	out := &ToolCallDelta{}
 	if idx < 0 {
 		if len(t.calls) >= maxToolCalls {
+			// Drop this call; id-less fragments that follow belong to it,
+			// so they must not extend the previous (accepted) call.
+			t.active = -1
 			return nil
 		}
 		idx = len(t.calls)

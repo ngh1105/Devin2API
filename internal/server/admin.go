@@ -124,9 +124,7 @@ func (s *Server) startLogin(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("start login: %w", err)
 	}
 
-	mgrGen := s.loginMngr.genSnapshot() // capture gen for this goroutine's resolve calls
-	s.loginMngr.SetPending(login)
-	mgrGen = s.loginMngr.genSnapshot() // snap AFTER gen bump so Resolve* calls match
+	mgrGen := s.loginMngr.SetPending(login)
 
 	go func() {
 		defer login.Stop()
@@ -156,6 +154,11 @@ func (s *Server) startLogin(ctx context.Context) (string, error) {
 		usage, _ = devin.FetchUserStatus(useCtx, s.loginServerBase, sessToken)
 		useDone()
 
+		// A cancel (or a newer login) after the code arrived must not still
+		// add the account.
+		if !s.loginMngr.isCurrent(mgrGen) {
+			return
+		}
 		// Upsert: logging in again with the same Devin user updates it in place.
 		acc, err := s.accounts.Upsert(store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, usage))
 		if err != nil {

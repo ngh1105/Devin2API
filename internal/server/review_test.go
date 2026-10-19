@@ -96,3 +96,25 @@ func TestStatsConcurrentSaves(t *testing.T) {
 		t.Error("stats file not readable after concurrent saves")
 	}
 }
+
+// TestLoginLimitHoldsUnderParallelRequests: a burst of parallel wrong
+// logins from one IP gets at most loginFailsPerMinute password checks.
+func TestLoginLimitHoldsUnderParallelRequests(t *testing.T) {
+	srv := passwordServer(t)
+	codes := make(chan int, 40)
+	for i := 0; i < 40; i++ {
+		go func() {
+			rec := adminDo(srv, http.MethodPost, "/admin/api/login", `{"password":"nope"}`, func(r *http.Request) { r.RemoteAddr = "10.1.1.1:5000" })
+			codes <- rec.Code
+		}()
+	}
+	checked := 0
+	for i := 0; i < 40; i++ {
+		if <-codes == http.StatusUnauthorized {
+			checked++
+		}
+	}
+	if checked > loginFailsPerMinute {
+		t.Errorf("%d password checks, cap %d", checked, loginFailsPerMinute)
+	}
+}

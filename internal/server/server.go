@@ -76,7 +76,9 @@ func (m *loginManager) Status() (string, string, string) {
 	return m.statusCode, m.accountID, m.errorMsg
 }
 
-func (m *loginManager) SetPending(login *devin.LoginState) {
+// SetPending makes login the current one and returns its generation, taken
+// under the same lock so concurrent starts cannot read each other's.
+func (m *loginManager) SetPending(login *devin.LoginState) uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stop()
@@ -85,6 +87,15 @@ func (m *loginManager) SetPending(login *devin.LoginState) {
 	m.statusCode = "pending"
 	m.accountID = ""
 	m.errorMsg = ""
+	return m.gen
+}
+
+// isCurrent reports whether gen is still the active login (not cancelled
+// or replaced).
+func (m *loginManager) isCurrent(gen uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.gen == gen
 }
 
 func (m *loginManager) Cancel() {
@@ -175,8 +186,8 @@ func (s *Server) Start(addr string) error {
 //   - State-changing requests must carry the X-Devin2API header, which a
 //     cross-site form or no-cors fetch cannot set without a preflight.
 func adminRequestError(r *http.Request, passwordSet bool) string {
-	if !passwordSet && !isLoopbackHost(r.Host) {
-		return "admin API is only served on loopback hosts (set DEVIN2API_ADMIN_PASSWORD to allow other hosts)"
+	if !passwordSet && !isLocalRequest(r) {
+		return "admin API is only served to local clients (set DEVIN2API_ADMIN_PASSWORD to allow other hosts)"
 	}
 	if foreignOrigin(r) {
 		return "cross-origin request rejected"
@@ -196,6 +207,19 @@ func foreignOrigin(r *http.Request) bool {
 	}
 	u, err := url.Parse(origin)
 	return err != nil || !strings.EqualFold(u.Host, r.Host)
+}
+
+// isLocalRequest reports whether r comes from this machine: the TCP peer is
+// a loopback address AND the Host header names this machine. The peer check
+// stops direct requests from the network that forge "Host: localhost"; the
+// Host check stops DNS rebinding from a local browser.
+func isLocalRequest(r *http.Request) bool {
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		host = h
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback() && isLoopbackHost(r.Host)
 }
 
 // isLoopbackHost reports whether a Host header names this machine.

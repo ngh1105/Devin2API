@@ -124,3 +124,24 @@ func TestPasswordKeepsKeylessV1Local(t *testing.T) {
 		t.Errorf("keyless /v1 from LAN: %d", rec.Code)
 	}
 }
+
+// TestForgedHostFromNetworkRejected: without a password, a client on the
+// network cannot pass the loopback guard by sending "Host: localhost".
+func TestForgedHostFromNetworkRejected(t *testing.T) {
+	srv := New(config.Config{Listen: ":0"}, mustAccounts(t), mustTokens(t))
+	remote := func(r *http.Request) { r.RemoteAddr = "192.168.1.50:41000"; r.Host = "localhost:8080" }
+	if rec := adminDo(srv, http.MethodPost, "/admin/api/tokens", "", remote); rec.Code != http.StatusForbidden {
+		t.Errorf("admin from network with forged Host: %d, want 403", rec.Code)
+	}
+	req := v1Request(http.MethodGet, "/v1/models", nil)
+	remote(req)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("keyless /v1 from network with forged Host: %d, want 401", rec.Code)
+	}
+	// A local client still works.
+	if rec := adminDo(srv, http.MethodGet, "/admin/api/tokens", "", nil); rec.Code != http.StatusOK {
+		t.Errorf("local client: %d", rec.Code)
+	}
+}
