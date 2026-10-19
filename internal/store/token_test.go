@@ -1,6 +1,8 @@
 package store
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -36,6 +38,31 @@ func TestDeleteRevokes(t *testing.T) {
 	ts.Delete(tok.ID)
 	if match, _ := ts.Verify(tok.Token); match {
 		t.Error("expected Verify false after Delete")
+	}
+}
+
+// TestDeleteRollbackKeepsToken ensures a failed save restores the real token,
+// not an empty placeholder that would match an empty Bearer value.
+func TestDeleteRollbackKeepsToken(t *testing.T) {
+	ts := mustTokenStore(t)
+	tok, _ := ts.Create()
+	// Point the index at a directory that doesn't exist so the save fails.
+	ts.idxPath = filepath.Join(t.TempDir(), "sub", "missing", "tokens.json")
+	if err := ts.Delete(tok.ID); err == nil {
+		t.Fatal("expected save error")
+	}
+	if ok, _ := ts.Verify(tok.Token); !ok {
+		t.Error("token lost after rollback")
+	}
+	if ok, _ := ts.Verify(""); ok {
+		t.Error("empty token value must never verify")
+	}
+}
+
+func TestDeleteMissing(t *testing.T) {
+	ts := mustTokenStore(t)
+	if err := ts.Delete("t_nope"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("got %v, want ErrNotExist", err)
 	}
 }
 

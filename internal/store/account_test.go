@@ -295,10 +295,15 @@ func TestUpdateTokensSetsExpiry(t *testing.T) {
 		ExpiresIn:    3600,
 		Scope:        "all",
 	}
-	if err := store.UpdateTokens(a.ID, tok); err != nil {
+	if _, err := store.UpdateTokens(a.ID, tok); err != nil {
 		t.Fatalf("UpdateTokens: %v", err)
 	}
-	got, err := store.Get(a.ID)
+	// Reload from disk to confirm UpdateTokens persisted.
+	reloaded, err := NewAccountStore(store.dir)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	got, err := reloaded.Get(a.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -309,6 +314,61 @@ func TestUpdateTokensSetsExpiry(t *testing.T) {
 	expectedExp := now + tok.ExpiresIn
 	if got.Tokens.ExpiresAt < expectedExp-2 || got.Tokens.ExpiresAt > expectedExp+2 {
 		t.Errorf("expires_at=%d; want ~%d", got.Tokens.ExpiresAt, expectedExp)
+	}
+}
+
+func TestImportRejectsTraversalID(t *testing.T) {
+	store := mustStore(t)
+	for _, id := range []string{`../../evil`, `..\\..\\evil`, `a/b`, `x.json`} {
+		raw := `{"id":"` + id + `","tokens":{"access_token":"at"}}`
+		if _, err := store.Import([]byte(raw)); err == nil {
+			t.Errorf("Import with id %q: expected error", id)
+		}
+	}
+	entries, _ := os.ReadDir(filepath.Dir(store.dir))
+	for _, e := range entries {
+		if e.Name() == "evil.json" {
+			t.Fatal("traversal id escaped the store directory")
+		}
+	}
+}
+
+func TestImportBareTokenDedup(t *testing.T) {
+	store := mustStore(t)
+	a1, err := store.Import([]byte(`{"refresh_token":"rt_same"}`))
+	if err != nil {
+		t.Fatalf("Import 1: %v", err)
+	}
+	a2, err := store.Import([]byte(`{"refresh_token":"rt_same"}`))
+	if err != nil {
+		t.Fatalf("Import 2: %v", err)
+	}
+	if a1.ID != a2.ID {
+		t.Errorf("re-import created a duplicate: %s vs %s", a1.ID, a2.ID)
+	}
+	if list, _ := store.List(); len(list) != 1 {
+		t.Errorf("expected 1 account, got %d", len(list))
+	}
+	if !a2.Expired() {
+		t.Error("refresh-only account should count as expired")
+	}
+}
+
+func TestImportSameSubKeepsCreatedAt(t *testing.T) {
+	store := mustStore(t)
+	base := makeAccount("keep-created", "a@b.c", "auth0|ca")
+	if err := store.Save(base); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := store.Import([]byte(`{"sub":"auth0|ca","tokens":{"access_token":"new"}}`)); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	got, _ := store.Get("keep-created")
+	if !got.CreatedAt.Equal(base.CreatedAt) {
+		t.Errorf("created_at overwritten: %v", got.CreatedAt)
+	}
+	if got.Email != "a@b.c" {
+		t.Errorf("email wiped: %q", got.Email)
 	}
 }
 

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -70,45 +71,67 @@ func (s *TokenStore) List() ([]Token, error) {
 }
 
 // Delete removes a token from the store and its persistence file.
+// Returns os.ErrNotExist when id is unknown.
 func (s *TokenStore) Delete(id string) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	old, ok := s.tokens[id]
+	if !ok {
+		return os.ErrNotExist
+	}
 	delete(s.tokens, id)
 	if err := s.saveTokens(); err != nil {
-		// Rollback: re-add since disk still holds it.
-		s.tokens[id] = Token{ID: id} // placeholder to restore consistency
-		s.mu.Unlock()
+		// Rollback: disk still holds the token, so memory must too.
+		s.tokens[id] = old
 		return fmt.Errorf("save after delete: %w", err)
 	}
-	s.mu.Unlock()
 	return nil
 }
 
 // Verify checks whether tokenVal matches any stored token's plaintext value.
 func (s *TokenStore) Verify(tokenVal string) (bool, error) {
+	_, ok := s.Match(tokenVal)
+	return ok, nil
+}
+
+// Match returns the id of the token whose value equals tokenVal.
+// Empty values never match; comparison is constant-time per token.
+func (s *TokenStore) Match(tokenVal string) (string, bool) {
+	if tokenVal == "" {
+		return "", false
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, t := range s.tokens {
-		if t.Token == tokenVal {
-			return true, nil
+	for id, t := range s.tokens {
+		if t.Token != "" && subtle.ConstantTimeCompare([]byte(t.Token), []byte(tokenVal)) == 1 {
+			return id, true
 		}
 	}
-	return false, nil
+	return "", false
 }
+
+// touchPersistEvery limits how often Touch rewrites tokens.json, since it
+// runs on every authenticated request.
+const touchPersistEvery = time.Minute
 
 // Touch updates the LastUsed timestamp for the token with id (best-effort).
 func (s *TokenStore) Touch(id string) {
 	s.mu.Lock()
-	if t, ok := s.tokens[id]; ok {
-		now := time.Now()
-		t.LastUsed = &now
-		s.tokens[id] = t
-		s.mu.Unlock()
-		s.saveTokens() // best-effort — ignore error
+	defer s.mu.Unlock()
+	t, ok := s.tokens[id]
+	if !ok {
 		return
 	}
-	s.mu.Unlock()
+	now := time.Now()
+	persist := t.LastUsed == nil || now.Sub(*t.LastUsed) >= touchPersistEvery
+	t.LastUsed = &now
+	s.tokens[id] = t
+	if persist {
+		s.saveTokens() // best-effort — ignore error
+	}
 }
 
+// saveTokens writes the index to disk. Caller must hold s.mu.
 func (s *TokenStore) saveTokens() error {
 	data, err := json.MarshalIndent(s.tokens, "", "  ")
 	if err != nil {
@@ -134,4 +157,20 @@ func (s *TokenStore) loadTokens() error {
 		return err
 	}
 	return json.Unmarshal(data, &s.tokens)
+}
+
+// MaskSecret hides all but the last 4 characters of a secret value,
+// keeping a known prefix such as "d2sk_" visible. Empty stays empty.
+func MaskSecret(v string) string {
+	if v == "" {
+		return ""
+	}
+	prefix := ""
+	if len(v) > 5 && v[:5] == "d2sk_" {
+		prefix = "d2sk_"
+	}
+	if len(v) <= len(prefix)+8 {
+		return prefix + "…"
+	}
+	return prefix + "…" + v[len(v)-4:]
 }

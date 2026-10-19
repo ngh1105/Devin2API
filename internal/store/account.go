@@ -8,12 +8,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/ngh1105/Devin2API/internal/auth"
 )
+
+// validID restricts account ids to a filename-safe charset so an imported id
+// can never escape the store directory (e.g. "../../x").
+var validID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// ValidID reports whether id is safe to use as an account file name.
+func ValidID(id string) bool { return validID.MatchString(id) }
 
 // OAuth holds a single provider's connection credentials.
 type OAuth struct {
@@ -53,7 +61,12 @@ type Account struct {
 }
 
 // Expired reports whether this account's tokens have passed their expiration.
+// An account holding only a refresh token has no usable access token yet,
+// so it counts as expired until refreshed.
 func (a *Account) Expired() bool {
+	if a.Tokens.AccessToken == "" {
+		return true
+	}
 	if a.Tokens.ExpiresAt == 0 {
 		return false
 	}
@@ -116,7 +129,17 @@ func (s *AccountStore) Get(id string) (*Account, error) {
 }
 
 // Save atomically writes account to <id>.json in the store directory.
+// The store keeps its own copy, so later mutations of a do not leak in.
 func (s *AccountStore) Save(a *Account) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saveLocked(a)
+}
+
+func (s *AccountStore) saveLocked(a *Account) error {
+	if !ValidID(a.ID) {
+		return fmt.Errorf("invalid account id %q", a.ID)
+	}
 	data, err := json.MarshalIndent(a, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal account %s: %w", a.ID, err)
@@ -130,14 +153,16 @@ func (s *AccountStore) Save(a *Account) error {
 		os.Remove(tmp)
 		return fmt.Errorf("rename %s → %s: %w", tmp, path, err)
 	}
-	s.mu.Lock()
-	s.accounts[a.ID] = a
-	s.mu.Unlock()
+	cp := *a
+	s.accounts[a.ID] = &cp
 	return nil
 }
 
 // Delete removes the file for id from disk and drops it from memory.
 func (s *AccountStore) Delete(id string) error {
+	if !ValidID(id) {
+		return os.ErrNotExist
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.accounts, id)
@@ -146,6 +171,8 @@ func (s *AccountStore) Delete(id string) error {
 
 // Import normalises raw JSON into an Account and saves it.
 // Handles three shapes: full schema, bare email+password blob, bare token blobs.
+// An import matching an existing account (same sub, or same token for bare
+// blobs) updates that account in place instead of creating a duplicate.
 func (s *AccountStore) Import(raw json.RawMessage) (*Account, error) {
 	parsed, err := parseJSONRaw(raw)
 	if err != nil {
@@ -154,12 +181,32 @@ func (s *AccountStore) Import(raw json.RawMessage) (*Account, error) {
 	keys := keysOf(parsed)
 	sort.Strings(keys)
 
-	switch {
-	case hasBareEmailPass(parsed):
+	if hasBareEmailPass(parsed) {
 		return nil, &ImportError{"email/password found; run the login flow"}
-	default:
-		return importSchemaOrTokens(s, parsed, keys)
 	}
+	acct, err := importSchemaOrTokens(parsed, keys)
+	if err != nil {
+		return nil, err
+	}
+	return s.Upsert(acct)
+}
+
+// Upsert saves acct, merging it into an existing account that matches by sub
+// (or by token when sub is unknown) instead of creating a duplicate.
+// Returns a copy of the stored record.
+func (s *AccountStore) Upsert(acct *Account) (*Account, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if old := s.findMatchLocked(acct); old != nil {
+		merged := *old
+		mergeInto(&merged, acct)
+		acct = &merged
+	}
+	if err := s.saveLocked(acct); err != nil {
+		return nil, err
+	}
+	cp := *acct
+	return &cp, nil
 }
 
 // tokenBlobKeys are the only keys allowed in a bare token import blob.
@@ -178,20 +225,25 @@ func isSubset(m map[string]json.RawMessage, allow map[string]bool) bool {
 	return true
 }
 
-// UpdateTokens sets the token fields and computes expires_at from tok.ExpiresIn.
-func (s *AccountStore) UpdateTokens(id string, tok auth.Tokens) error {
+// UpdateTokens sets the token fields, computes expires_at from tok.ExpiresIn,
+// persists the account and returns a copy of the updated record.
+func (s *AccountStore) UpdateTokens(id string, tok auth.Tokens) (*Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	a, ok := s.accounts[id]
+	old, ok := s.accounts[id]
 	if !ok {
-		return os.ErrNotExist
+		return nil, os.ErrNotExist
 	}
+	a := *old
 	a.Tokens.AccessToken = tok.AccessToken
 	a.Tokens.RefreshToken = tok.RefreshToken
 	a.Tokens.IDToken = tok.IDToken
 	a.Tokens.ExpiresAt = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix()
 	a.Tokens.Scope = tok.Scope
-	return nil
+	if err := s.saveLocked(&a); err != nil {
+		return nil, err
+	}
+	return &a, nil
 }
 
 // AccountFromLogin builds an Account from auth login tokens and user info.
@@ -255,7 +307,7 @@ func loadAllAccounts(path string) (map[string]*Account, error) {
 			continue
 		}
 		var acc Account
-		if err := json.Unmarshal(data, &acc); err != nil {
+		if err := json.Unmarshal(data, &acc); err != nil || !ValidID(acc.ID) {
 			continue
 		}
 		result[acc.ID] = &acc
@@ -313,8 +365,8 @@ func importSchema(m map[string]json.RawMessage) (*Account, error) {
 	}
 	if raw, ok := m["id"]; ok {
 		json.Unmarshal(raw, &acct.ID)
-		if acct.ID == "" {
-			acct.ID = genHex("acc_", 8)
+		if acct.ID != "" && !ValidID(acct.ID) {
+			return nil, &ImportError{"invalid id: only letters, digits, '_' and '-' allowed"}
 		}
 	}
 
@@ -389,27 +441,30 @@ func getNested(m map[string]json.RawMessage, key string) map[string]json.RawMess
 	return nil
 }
 
-func findSub(store *AccountStore, sub string) *Account {
-	store.mu.RLock()
-	defer store.mu.RUnlock()
-	for _, a := range store.accounts {
-		if a.Sub == sub {
+// findMatchLocked returns the stored account that newAcct should upsert into:
+// same sub when sub is known, otherwise the same access or refresh token.
+// Caller must hold s.mu.
+func (s *AccountStore) findMatchLocked(newAcct *Account) *Account {
+	for _, a := range s.accounts {
+		switch {
+		case newAcct.Sub != "":
+			if a.Sub == newAcct.Sub {
+				return a
+			}
+		case newAcct.Tokens.RefreshToken != "" && a.Tokens.RefreshToken == newAcct.Tokens.RefreshToken,
+			newAcct.Tokens.AccessToken != "" && a.Tokens.AccessToken == newAcct.Tokens.AccessToken:
 			return a
 		}
 	}
 	return nil
 }
 
-func importSchemaOrTokens(store *AccountStore, m map[string]json.RawMessage, keys []string) (*Account, error) {
+func importSchemaOrTokens(m map[string]json.RawMessage, keys []string) (*Account, error) {
 	// Full-schema import: dispatch when any known top-level key is present.
 	for _, k := range keys {
 		switch k {
 		case "schema", "id", "email", "sub", "created_at", "oauth", "tokens", "profile", "usage":
-			acct, err := importSchema(m)
-			if err != nil {
-				return nil, err
-			}
-			return withSubCheck(store, acct), nil
+			return importSchema(m)
 		}
 	}
 
@@ -422,36 +477,34 @@ func importSchemaOrTokens(store *AccountStore, m map[string]json.RawMessage, key
 				break
 			}
 		}
-		return withSubCheck(store, importFromTokenBlob(m, tokenKey)), nil
+		return importFromTokenBlob(m, tokenKey), nil
 	}
 
 	// Anything else: unexpected keys.
 	return nil, &ImportError{"unexpected fields: " + keysToReason(keys)}
 }
 
-func withSubCheck(store *AccountStore, newAcct *Account) *Account {
-	// Same-sub upsert: if sub is non-empty and an existing account shares it,
-	// merge the new data into the old account in-memory so Save overwrites it.
-	sub := newAcct.Sub
-	if sub != "" {
-		old := findSub(store, sub)
-		if old != nil {
-			mergeInto(old, newAcct)
-			return old
-		}
-	}
-	return newAcct
-}
-
+// mergeInto copies imported data onto an existing account. ID and CreatedAt
+// stay with the existing record; empty imported identity fields don't wipe
+// known ones (bare token blobs carry no email/sub).
 func mergeInto(dst, src *Account) {
 	dst.Schema = src.Schema
-	dst.Email = src.Email
-	dst.Sub = src.Sub
-	dst.CreatedAt = src.CreatedAt
-	dst.OAuth = src.OAuth
+	if src.Email != "" {
+		dst.Email = src.Email
+	}
+	if src.Sub != "" {
+		dst.Sub = src.Sub
+	}
+	if src.OAuth != (OAuth{}) {
+		dst.OAuth = src.OAuth
+	}
 	dst.Tokens = src.Tokens
-	dst.Profile = src.Profile
-	dst.Usage = src.Usage
+	if src.Profile != (Profile{}) {
+		dst.Profile = src.Profile
+	}
+	if src.Usage != nil {
+		dst.Usage = src.Usage
+	}
 }
 
 func keysToReason(keys []string) string {
