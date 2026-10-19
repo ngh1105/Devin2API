@@ -158,7 +158,7 @@ func TestChatCompletionNonStream(t *testing.T) {
 		t.Fatalf("resp = %+v", resp)
 	}
 	c := resp.Choices[0]
-	if c.Message.Role != "assistant" || c.Message.Content != "pong" || c.FinishReason != "stop" {
+	if c.Message.Role != "assistant" || strOf(c.Message.Content) != "pong" || c.FinishReason != "stop" {
 		t.Errorf("choice = %+v", c)
 	}
 	if resp.Usage == nil || resp.Usage.TotalTokens != 12 {
@@ -620,4 +620,12 @@ func TestChatBodyTooLarge(t *testing.T) {
 	if rec.Code != http.StatusRequestEntityTooLarge || len(*bodies) != 0 {
 		t.Errorf("status %d, upstream calls %d", rec.Code, len(*bodies))
 	}
+}
+
+// strOf dereferences an optional string (nil = "").
+func strOf(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }

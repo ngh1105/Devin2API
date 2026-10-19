@@ -119,7 +119,7 @@ func TestV1RejectsBadToken(t *testing.T) {
 	}
 	var errResp openai.Error
 	json.Unmarshal(rec.Body.Bytes(), &errResp)
-	if errResp.Error.Type != "devin2api_error" {
+	if errResp.Error.Type != "authentication_error" {
 		t.Errorf("error type: got %q", errResp.Error.Type)
 	}
 }
