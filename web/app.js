@@ -231,7 +231,10 @@
   function planEndStr(a) {
     if (!a.usage) return "—";
     if (!a.usage.plan_end) return "—";
-    return new Date(a.usage.plan_end).toLocaleDateString();
+    // Upstream sends the Unix epoch (or Go's zero time) when there is no end date.
+    var d = new Date(a.usage.plan_end);
+    if (isNaN(d) || d.getUTCFullYear() < 2000) return "—";
+    return d.toLocaleDateString();
   }
 
   // ---- Accounts tab ----

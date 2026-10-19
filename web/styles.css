@@ -97,10 +97,9 @@ code { font-family: var(--mono); font-size: .85em; background: var(--surface-2);
 a { color: var(--accent); }
 .hidden { display: none !important; }
 
-.icon {
-  width: 16px; height: 16px; flex: none;
-  fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
-}
+/* Phosphor duotone icons: filled paths, the back layer at 20% opacity. */
+.icon { width: 17px; height: 17px; flex: none; fill: currentColor; }
+.tab .icon, .card-title .icon { width: 19px; height: 19px; }
 
 /* ---- Shell: sidebar + content ---- */
 .shell { display: flex; min-height: 100vh; }
