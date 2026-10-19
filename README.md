@@ -11,13 +11,29 @@ OpenAI-compatible reverse proxy API for Devin — built from scratch in Go.
 
 ---
 
-## Build
+## Install
+
+**Prebuilt binaries**: each tagged release on GitHub has archives for Windows, Linux and macOS (amd64 and arm64) plus `checksums.txt`. `devin2api version` prints the version.
+
+**Docker**: release images are published to `ghcr.io/ngh1105/devin2api`.
+
+```bash
+docker run -d --name devin2api -p 127.0.0.1:8080:8080 -v devin2api-data:/data ghcr.io/ngh1105/devin2api:latest
+```
+
+- Inside the container the server listens on `0.0.0.0:8080` and keeps data in the `/data` volume.
+- Publish the port on `127.0.0.1` as shown: the admin API and keyless `/v1` only answer loopback hosts.
+- The browser login waits for a callback on a port inside the container, so it cannot finish there. Log in with the binary on the host and import the account JSON in the panel, or use the manual token login.
+
+**From source**:
 
 ```bash
 go build ./cmd/devin2api
 ```
 
-Requires **Go 1.26 or newer**. Windows users get a `.exe` binary.
+Requires **Go 1.26 or newer**. Windows users get a `.exe` binary. To build an image locally: `docker build --build-arg VERSION=dev -t devin2api .`
+
+**Releasing** (maintainers): push a tag such as `v0.1.0`. The Release workflow tests, builds the archives, creates the GitHub release and pushes the multi-arch image. Running the workflow by hand is a dry run: it only uploads the archives as a workflow artifact.
 
 ---
 

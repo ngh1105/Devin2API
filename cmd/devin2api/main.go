@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/ngh1105/Devin2API/internal/buildinfo"
 	"github.com/ngh1105/Devin2API/internal/config"
 	"github.com/ngh1105/Devin2API/internal/devin"
 	"github.com/ngh1105/Devin2API/internal/server"
@@ -20,8 +21,12 @@ func main() {
 			fmt.Println("Usage: devin2api [COMMAND]")
 			fmt.Println()
 			fmt.Println("Commands:")
-			fmt.Println("  login    CLI OAuth login flow")
-			fmt.Println("         (default)   Start the web panel server")
+			fmt.Println("  (none)     Start the web panel and API server")
+			fmt.Println("  login      CLI OAuth login flow")
+			fmt.Println("  version    Print the version")
+			os.Exit(0)
+		case "version", "-v", "--version":
+			fmt.Println("devin2api", buildinfo.String())
 			os.Exit(0)
 		case "login":
 			cfg := config.Load()
@@ -133,7 +138,7 @@ func serve(cfg config.Config) {
 	}
 
 	srv := server.New(cfg, accounts, tokens)
-	fmt.Printf("Serving on %s, data at %s\n", cfg.Listen, cfg.DataDir)
+	fmt.Printf("devin2api %s serving on %s, data at %s\n", buildinfo.String(), cfg.Listen, cfg.DataDir)
 	if err := srv.Start(cfg.Listen); err != nil {
 		fmt.Fprintf(os.Stderr, "serve: %v\n", err)
 		os.Exit(1)
