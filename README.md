@@ -32,7 +32,7 @@ The server exposes:
 - **Health check** — `GET /healthz` → `{"status":"ok"}`.
 - **OpenAI-compatible `/v1/*` endpoints** — see [API status](#api-status).
 
-> **Warning about non-loopback binding.** Panel pages are unauthenticated — anyone who can reach them gets full admin control over accounts and tokens. Do not bind to `0.0.0.0` or any public interface without adding your own auth/gateway layer.
+> **Warning about non-loopback binding.** Panel pages are unauthenticated. The admin API (`/admin/api/*`) only answers requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]`, rejects cross-origin requests, and requires an `X-Devin2API` header on state-changing calls (the panel sends it). Token values are masked in every list response. Do not expose the server on a public interface without adding your own auth/gateway layer.
 
 ---
 
@@ -100,7 +100,7 @@ You can paste JSON into the Accounts panel textarea (`/web/accounts.html`) to im
 | A bare `"access_token": "..."` blob | New account generated; only the token is set.   |
 | A bare `"refresh_token": "..."` blob| New account generated; only the refresh token.  |
 
-Same-sub re-import merges the new data into the existing account in memory before saving, so your account list stays deduplicated by sub.
+Re-importing an account updates the existing record instead of creating a duplicate. Accounts match by `sub`, or by token value for bare token blobs. The original `id` and `created_at` are kept. Imported `id` values may only contain letters, digits, `_` and `-`. An account holding only a refresh token shows as expired until you refresh it.
 
 ---
 
@@ -109,7 +109,7 @@ Same-sub re-import merges the new data into the existing account in memory befor
 Use the **Tokens** page (`/web/tokens.html`) in the panel to create tokens. Each call generates:
 
 - **ID** — internal `t_XXXXXXXX`
-- **Value** — `d2sk_` + 32 hex characters (shown once on creation; store it securely)
+- **Value** — `d2sk_` + 32 hex characters (shown once on creation; later listings show it masked, so store it securely)
 
 Include the token value with any request to the `/v1/*` endpoints:
 
