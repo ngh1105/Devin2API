@@ -103,6 +103,16 @@ func HasModel(uid string, catalog []ModelInfo) bool {
 	return false
 }
 
+// IsMultimodal reports whether uid is a catalog model that accepts images.
+func IsMultimodal(uid string, catalog []ModelInfo) bool {
+	for _, m := range catalog {
+		if strings.EqualFold(m.UID, uid) {
+			return m.Multimodal
+		}
+	}
+	return false
+}
+
 // effortSuffixes is the order tried when a client names a model family
 // without an effort level ("gpt-5-4" -> "gpt-5-4-medium").
 var effortSuffixes = []string{"", "-medium", "-high", "-low"}

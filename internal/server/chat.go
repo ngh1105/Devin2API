@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,7 +45,14 @@ func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
 
 	var system []string
 	for i, m := range req.Messages {
-		text, err := openai.TextContent(m.Content)
+		var text string
+		var images []openai.Image
+		var err error
+		if m.Role == "user" {
+			text, images, err = openai.UserContent(m.Content)
+		} else {
+			text, err = openai.TextContent(m.Content)
+		}
 		if err != nil {
 			return out, fmt.Errorf("messages[%d]: %w", i, err)
 		}
@@ -54,7 +62,11 @@ func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
 				system = append(system, text)
 			}
 		case "user":
-			out.Prompts = append(out.Prompts, devin.Prompt{Source: devin.SourceUser, Text: text})
+			p := devin.Prompt{Source: devin.SourceUser, Text: text}
+			for _, img := range images {
+				p.Images = append(p.Images, devin.Image{MimeType: img.MimeType, Base64: img.Base64})
+			}
+			out.Prompts = append(out.Prompts, p)
 		case "assistant":
 			p := devin.Prompt{Source: devin.SourceAssistant, Text: text}
 			for j, tc := range m.ToolCalls {
@@ -78,7 +90,7 @@ func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
 	// Upstream needs something to answer: a user message or a tool result.
 	hasInput := false
 	for _, p := range out.Prompts {
-		if (p.Source == devin.SourceUser && strings.TrimSpace(p.Text) != "") || p.Source == devin.SourceToolResult {
+		if (p.Source == devin.SourceUser && (strings.TrimSpace(p.Text) != "" || len(p.Images) > 0)) || p.Source == devin.SourceToolResult {
 			hasInput = true
 			break
 		}
@@ -211,6 +223,60 @@ func finishReason(res *devin.ChatResult) string {
 	}
 }
 
+// hasImages reports whether any prompt carries an image.
+func hasImages(req devin.ChatRequest) bool {
+	for _, p := range req.Prompts {
+		if len(p.Images) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// resetInRe matches the wait Devin states in rate-limit messages, e.g.
+// "Your limit will reset in 22 minutes" or "reset in 1 hour and 5 minutes".
+var (
+	resetInRe   = regexp.MustCompile(`(?i)reset in ([^.(]+)`)
+	resetUnitRe = regexp.MustCompile(`(?i)(\d+)\s*(hour|minute|min|second|sec)`)
+)
+
+// retryAfterSeconds extracts the stated wait from an upstream message, in
+// seconds, or 0 when it states none.
+func retryAfterSeconds(msg string) int {
+	m := resetInRe.FindStringSubmatch(msg)
+	if m == nil {
+		return 0
+	}
+	total := 0
+	for _, u := range resetUnitRe.FindAllStringSubmatch(m[1], -1) {
+		n, err := strconv.Atoi(u[1])
+		if err != nil {
+			continue
+		}
+		switch strings.ToLower(u[2])[0] {
+		case 'h':
+			total += n * 3600
+		case 'm':
+			total += n * 60
+		default:
+			total += n
+		}
+	}
+	return total
+}
+
+// setRetryAfter adds a Retry-After header to a 429 when upstream said how
+// long to wait, so clients can back off instead of retrying immediately.
+func setRetryAfter(w http.ResponseWriter, status int, err error) {
+	var ue *devin.UpstreamError
+	if status != http.StatusTooManyRequests || !errors.As(err, &ue) {
+		return
+	}
+	if secs := retryAfterSeconds(ue.Message); secs > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+	}
+}
+
 // upstreamStatus picks the HTTP status and message for a failed chat.
 func upstreamStatus(err error) (int, string) {
 	var ue *devin.UpstreamError
@@ -258,6 +324,10 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, http.StatusBadRequest, fmt.Sprintf("unknown model %q; see GET /v1/models", req.Model))
 		return
 	}
+	if hasImages(dreq) && len(catalog) > 0 && !devin.IsMultimodal(dreq.Model, catalog) {
+		openai.WriteError(w, http.StatusBadRequest, fmt.Sprintf("model %q does not accept images; pick one with \"multimodal\": true in GET /v1/models", dreq.Model))
+		return
+	}
 
 	s.stats.requests.Add(1)
 	id := "chatcmpl-" + randID()
@@ -281,6 +351,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.stats.failed.Add(1)
 		status, msg := upstreamStatus(err)
+		setRetryAfter(w, status, err)
 		openai.WriteError(w, status, msg)
 		return
 	}
@@ -345,6 +416,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request, dreq d
 		s.stats.failed.Add(1)
 		status, msg := upstreamStatus(err)
 		if !headerSent {
+			setRetryAfter(w, status, err)
 			openai.WriteError(w, status, msg)
 			return
 		}

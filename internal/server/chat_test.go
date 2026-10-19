@@ -528,3 +528,87 @@ func TestChatRejectsNonObjectToolSchema(t *testing.T) {
 		t.Errorf("status %d, upstream calls %d", rec.Code, len(*bodies))
 	}
 }
+
+func TestRetryAfterSeconds(t *testing.T) {
+	for msg, want := range map[string]int{
+		"Reached free model rate limit. Your limit will reset in 22 minutes (at 05:01 UTC).": 1320,
+		"Your limit will reset in 1 hour and 5 minutes.":                                     3900,
+		"try again, reset in 30 seconds":                                                     30,
+		"daily quota exhausted":                                                              0,
+	} {
+		if got := retryAfterSeconds(msg); got != want {
+			t.Errorf("%q: got %d, want %d", msg, got, want)
+		}
+	}
+}
+
+func TestChatRateLimitSetsRetryAfter(t *testing.T) {
+	limit := `{"error":{"code":"resource_exhausted","message":"Reached free model rate limit. Your limit will reset in 22 minutes (at 05:01 UTC)."}}`
+	srv := chatTestServer(t, &fakeDevin{trailers: map[string]string{"eyJrl": limit}}, "eyJrl")
+	for _, stream := range []string{"false", "true"} {
+		rec := postChat(srv, `{"stream":`+stream+`,"messages":[{"role":"user","content":"hi"}]}`)
+		if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "1320" {
+			t.Errorf("stream=%s: status %d Retry-After %q", stream, rec.Code, rec.Header().Get("Retry-After"))
+		}
+	}
+}
+
+// imageServer is a fake upstream whose catalog has one multimodal and one
+// text-only model, recording chat request bodies.
+func imageServer(t *testing.T) (*Server, *[][]byte) {
+	t.Helper()
+	var mu sync.Mutex
+	var bodies [][]byte
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if strings.HasSuffix(r.URL.Path, "/GetCliModelConfigs") {
+			mm := append(devin.PwFieldString(1, "Vision"), devin.PwFieldVarint(5, 1)...)
+			mm = append(mm, devin.PwFieldString(22, "vision-model")...)
+			txt := append(devin.PwFieldString(1, "Text"), devin.PwFieldString(22, "text-model")...)
+			w.Write(append(devin.PwFieldBytes(1, mm), devin.PwFieldBytes(1, txt)...))
+			return
+		}
+		mu.Lock()
+		bodies = append(bodies, b)
+		mu.Unlock()
+		w.Write(connectFrame(0, devin.PwFieldString(3, "a red square")))
+		w.Write(connectFrame(2, []byte("{}")))
+	}))
+	t.Cleanup(up.Close)
+	accs := mustAccounts(t)
+	accs.Save(store.AccountFromLogin("u", "usr_img", "org", "eyJtok", "", nil))
+	srv := New(config.Config{Listen: ":0"}, accs, mustTokens(t))
+	srv.loginServerBase = up.URL
+	srv.fetchModels(context.Background())
+	return srv, &bodies
+}
+
+const imageMsg = `[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="}}]}]`
+
+func TestChatImageForwarded(t *testing.T) {
+	srv, bodies := imageServer(t)
+	rec := postChat(srv, `{"model":"vision-model","messages":`+imageMsg+`}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "a red square") {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	b := string((*bodies)[0])
+	if !strings.Contains(b, "iVBORw0KGgo") || !strings.Contains(b, "image/png") || !strings.Contains(b, "[Image 1: pasted_image_1.png]") {
+		t.Error("image not forwarded upstream")
+	}
+}
+
+func TestChatImageRejectedForTextModel(t *testing.T) {
+	srv, bodies := imageServer(t)
+	rec := postChat(srv, `{"model":"text-model","messages":`+imageMsg+`}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "does not accept images") || len(*bodies) != 0 {
+		t.Errorf("status %d body %s upstream %d", rec.Code, rec.Body, len(*bodies))
+	}
+}
+
+func TestChatImageOnlyMessageAllowed(t *testing.T) {
+	srv, _ := imageServer(t)
+	msg := strings.Replace(imageMsg, `{"type":"text","text":"what is this?"},`, "", 1)
+	if rec := postChat(srv, `{"model":"vision-model","messages":`+msg+`}`); rec.Code != http.StatusOK {
+		t.Errorf("status %d: %s", rec.Code, rec.Body)
+	}
+}

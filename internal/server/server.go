@@ -135,8 +135,12 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// maxBodyBytes caps request bodies on /v1 and the admin API.
-const maxBodyBytes = 4 << 20
+// maxBodyBytes caps admin API request bodies; maxV1BodyBytes caps /v1,
+// which must fit base64 images and long agent histories.
+const (
+	maxBodyBytes   = 4 << 20
+	maxV1BodyBytes = 32 << 20
+)
 
 // Start runs the HTTP server on the configured address.
 func (s *Server) Start(addr string) error {
@@ -232,7 +236,7 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strings.HasPrefix(path, "/v1/") {
-		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		r.Body = http.MaxBytesReader(w, r.Body, maxV1BodyBytes)
 		s.v1Middleware(s.handleV1)(w, r)
 		return
 	}
