@@ -795,3 +795,21 @@ func TestImportDoesNotMutateStoredRecord(t *testing.T) {
 		t.Errorf("created_at changed on upsert")
 	}
 }
+
+// TestListStableOnCreatedAtTie: accounts with identical created_at must
+// come back in the same (id) order on every call.
+func TestListStableOnCreatedAtTie(t *testing.T) {
+	store := mustStore(t)
+	now := time.Now()
+	for _, id := range []string{"acc_c", "acc_a", "acc_b"} {
+		if err := store.Save(&Account{Schema: 2, ID: id, Enabled: true, CreatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 50; i++ {
+		list, _ := store.List()
+		if list[0].ID != "acc_a" || list[1].ID != "acc_b" || list[2].ID != "acc_c" {
+			t.Fatalf("call %d: order %s,%s,%s", i, list[0].ID, list[1].ID, list[2].ID)
+		}
+	}
+}

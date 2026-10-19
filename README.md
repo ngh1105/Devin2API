@@ -202,7 +202,8 @@ How chat works:
 - `system`/`developer` messages become the system prompt; `user` and `assistant` messages become the conversation. `max_tokens` (default 32000) and `temperature` are forwarded.
 - Thinking text, when the model produces it, is returned as `reasoning_content`.
 - Tool calling follows the OpenAI format: `tools` (function type) are forwarded with their JSON schema; the model's calls come back as `tool_calls` (streamed as indexed fragments) with `finish_reason: "tool_calls"`; send results back as `role: "tool"` messages with `tool_call_id`. `tool_choice: "none"` disables tools; other `tool_choice` values are left to the model.
-- Image content parts still return 400.
+- Images: user messages may include `image_url` parts with base64 data URLs (`data:image/png;base64,...`; png, jpeg, webp, gif). Remote image URLs are not fetched and return 400, as do images sent to a model without `"multimodal": true` in `/v1/models`. Request bodies on `/v1` may be up to 32 MB.
+- Rate limits: when Devin returns 429 with a stated wait ("reset in 22 minutes"), the response carries a matching `Retry-After` header (seconds).
 - Errors use the OpenAI error shape. With no usable account the endpoint returns 503.
 
 ---
@@ -214,7 +215,7 @@ How chat works:
 | 1         | OAuth login (Auth0 PKCE), account persistence, web panel, `/v1` proxy stub | Done     |
 | 2         | Browser-link login (any IdP), usage/quota panel, CLI login, CLIProxyAPI JSON import, token-gated /v1 stub | Done |
 | 3         | Devin chat upstream (`GetChatMessage`) — `/v1/chat/completions` live, account failover | Done |
-| 4         | Live model list, tool calls (done), images | In progress |
+| 4         | Live model list, tool calls, images, Retry-After | Done |
 
 ---
 

@@ -64,11 +64,19 @@ type Tool struct {
 
 // Prompt is one conversation turn. Assistant turns may carry ToolCalls;
 // tool results use SourceToolResult with the ToolCallID they answer.
+// User turns may carry inline Images.
 type Prompt struct {
 	Source     PromptSource
 	Text       string
 	ToolCalls  []ToolCall
 	ToolCallID string
+	Images     []Image
+}
+
+// Image is an inline image sent with a prompt.
+type Image struct {
+	MimeType string // e.g. "image/png"
+	Base64   string // standard base64
 }
 
 // ChatRequest is a chat call.
@@ -137,7 +145,8 @@ func ResolveModel(name string) string {
 //
 //	1  ClientMetadata
 //	2  system prompt (omitted when empty)
-//	3  repeated Prompt {1 id, 2 source, 3 text, 6 repeated ToolCall {1 id, 2 name, 3 args}, 7 tool call id}
+//	3  repeated Prompt {1 id, 2 source, 3 text, 6 repeated ToolCall {1 id, 2 name, 3 args}, 7 tool call id,
+//	   10 repeated Image {1 base64, 2 mime type}}
 //	7  5 (constant)
 //	8  config {1:1, 2 max tokens, 3:400, 5 temperature (double), 7:40, 8 top_p 0.95 (double)}
 //	10 repeated Tool {1 name, 2 description, 3 JSON schema}
@@ -154,7 +163,7 @@ func BuildChatRequest(sessionToken, fingerprint, sessionID string, req ChatReque
 		var m []byte
 		m = append(m, pwFieldString(1, newUUID())...)
 		m = append(m, pwFieldVarint(2, uint64(p.Source))...)
-		m = append(m, pwFieldString(3, p.Text)...)
+		m = append(m, pwFieldString(3, imageHeader(p.Images)+p.Text)...)
 		for _, tc := range p.ToolCalls {
 			var c []byte
 			if tc.ID != "" {
@@ -170,6 +179,11 @@ func BuildChatRequest(sessionToken, fingerprint, sessionID string, req ChatReque
 		}
 		if p.ToolCallID != "" {
 			m = append(m, pwFieldString(7, p.ToolCallID)...)
+		}
+		for _, img := range p.Images {
+			ib := pwFieldString(1, img.Base64)
+			ib = append(ib, pwFieldString(2, img.MimeType)...)
+			m = append(m, PwFieldBytes(10, ib)...)
 		}
 		out = append(out, PwFieldBytes(3, m)...)
 	}
@@ -210,6 +224,24 @@ func BuildChatRequest(sessionToken, fingerprint, sessionID string, req ChatReque
 	out = append(out, pwFieldVarint(20, 1)...)
 	out = append(out, pwFieldString(21, ResolveModel(req.Model))...)
 	return out
+}
+
+// imageHeader returns the "[Image N: pasted_image_N.ext]" lines the Devin CLI
+// puts before a prompt's text so the model can refer to attached images.
+func imageHeader(images []Image) string {
+	if len(images) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, img := range images {
+		ext := strings.TrimPrefix(img.MimeType, "image/")
+		if ext == "jpeg" {
+			ext = "jpg"
+		}
+		fmt.Fprintf(&b, "[Image %d: pasted_image_%d.%s]\n", i+1, i+1, ext)
+	}
+	b.WriteString("\n")
+	return b.String()
 }
 
 // StreamChat runs one GetChatMessage call, invoking onDelta for each piece

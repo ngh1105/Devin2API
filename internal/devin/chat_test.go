@@ -353,3 +353,28 @@ func TestToolTrackerNewIDStartsNewCall(t *testing.T) {
 		t.Errorf("calls = %+v", tr.calls)
 	}
 }
+
+func TestBuildChatRequestImages(t *testing.T) {
+	b := BuildChatRequest("tok", "fp", "sess", ChatRequest{Prompts: []Prompt{{
+		Source: SourceUser, Text: "what is this?",
+		Images: []Image{{MimeType: "image/jpeg", Base64: "QUJD"}},
+	}}})
+	r := &pwReader{data: b}
+	var prompt []byte
+	for {
+		f, wire, val, _, ok := r.Next()
+		if !ok {
+			break
+		}
+		if f == 3 && wire == wireBytes {
+			prompt = val
+		}
+	}
+	if !bytes.Contains(prompt, []byte("[Image 1: pasted_image_1.jpg]\n\nwhat is this?")) {
+		t.Errorf("image header missing: %q", prompt)
+	}
+	img := PwFieldBytes(10, append(pwFieldString(1, "QUJD"), pwFieldString(2, "image/jpeg")...))
+	if !bytes.Contains(prompt, img) {
+		t.Error("image field 10 missing")
+	}
+}
