@@ -38,7 +38,7 @@ func TestUserContentRejectsBadImages(t *testing.T) {
 
 func TestParseDataURLNormalises(t *testing.T) {
 	// image/jpg is mapped to image/jpeg; unpadded base64 is re-padded.
-	img, err := parseDataURL("data:image/jpg;base64,QUJDRA")
+	img, err := ParseDataURL("data:image/jpg;base64,QUJDRA")
 	if err != nil {
 		t.Fatal(err)
 	}

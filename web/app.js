@@ -405,6 +405,10 @@
       ["/healthz", "GET", 'Returns {"status":"ok"}'],
       ["/v1/models", "GET", "List available models (OpenAI-compatible)"],
       ["/v1/chat/completions", "POST", 'Chat completions via Devin (stream + non-stream, tool calls)'],
+      ["/v1/messages", "POST", "Anthropic Messages API (Claude Code, Anthropic SDKs)"],
+      ["/v1/responses", "POST", "OpenAI Responses API (stateless)"],
+      ["/v1/messages", "POST", 'Anthropic Messages API (Claude Code, Anthropic SDKs)'],
+      ["/v1/responses", "POST", 'OpenAI Responses API (stateless)'],
       ["/admin/api/accounts", "GET / POST", "List or import accounts"],
       ["/admin/api/stats", "GET", 'Returns {accounts,enabled,requests,failed}']
     ];

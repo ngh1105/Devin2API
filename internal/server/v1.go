@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ngh1105/Devin2API/internal/anthropic"
 	"github.com/ngh1105/Devin2API/internal/devin"
 	"github.com/ngh1105/Devin2API/internal/openai"
 )
@@ -27,6 +28,12 @@ func (s *Server) handleV1(w http.ResponseWriter, r *http.Request) {
 		s.getModels(w, r)
 	case path == "/v1/chat/completions" && r.Method == http.MethodPost:
 		s.chatCompletions(w, r)
+	case path == "/v1/messages" && r.Method == http.MethodPost:
+		s.messages(w, r)
+	case path == "/v1/messages/count_tokens" && r.Method == http.MethodPost:
+		s.countTokens(w, r)
+	case path == "/v1/responses" && r.Method == http.MethodPost:
+		s.responses(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -41,7 +48,7 @@ func (s *Server) v1Middleware(next http.HandlerFunc) http.HandlerFunc {
 			// style callers are let in: loopback Host (blocks DNS rebinding)
 			// and no foreign Origin (blocks cross-site requests).
 			if !isLoopbackHost(r.Host) || foreignOrigin(r) {
-				openai.WriteError(w, http.StatusUnauthorized, "create an API key in the panel to use /v1 from this origin")
+				writeV1AuthError(w, r, "create an API key in the panel to use /v1 from this origin")
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -57,7 +64,7 @@ func (s *Server) v1Middleware(next http.HandlerFunc) http.HandlerFunc {
 			id, authed = s.tokens.Match(r.Header.Get("X-Api-Key"))
 		}
 		if !authed {
-			openai.WriteError(w, http.StatusUnauthorized, "invalid or missing token")
+			writeV1AuthError(w, r, "invalid or missing token")
 			return
 		}
 		s.tokens.Touch(id)
@@ -101,4 +108,15 @@ func randID() string {
 		panic("crypto/rand failed: " + err.Error())
 	}
 	return hex.EncodeToString(b)
+}
+
+// writeV1AuthError answers a rejected /v1 request with a 401 in the
+// caller's API format: Anthropic clients (Claude Code) expect
+// {"type":"error","error":{"type":"authentication_error",...}}.
+func writeV1AuthError(w http.ResponseWriter, r *http.Request, msg string) {
+	if strings.HasPrefix(r.URL.Path, "/v1/messages") {
+		anthropic.WriteError(w, http.StatusUnauthorized, msg)
+		return
+	}
+	openai.WriteError(w, http.StatusUnauthorized, msg)
 }

@@ -193,6 +193,9 @@ If the token store is **empty** (no tokens created), `/v1/*` accepts requests wi
 | `GET /healthz`                       | GET      | Returns `{"status":"ok"}`.                            |
 | `GET /v1/models`                     | GET      | Lists the live model catalog from Devin (`GetCliModelConfigs`, cached 30 min) with display name, context length and multimodal flag. `devin` is an alias for `swe-2-high`. |
 | `POST /v1/chat/completions`          | POST     | Chat completion through Devin. Supports `stream: true` (SSE). |
+| `POST /v1/messages`                  | POST     | Anthropic Messages API (Claude Code, Anthropic SDKs). Stream + non-stream. |
+| `POST /v1/messages/count_tokens`     | POST     | Rough estimate (~4 bytes per token); upstream has no counting endpoint. |
+| `POST /v1/responses`                 | POST     | OpenAI Responses API, stateless. Stream + non-stream. |
 
 How chat works:
 
@@ -206,6 +209,21 @@ How chat works:
 - Rate limits: when Devin returns 429 with a stated wait ("reset in 22 minutes"), the response carries a matching `Retry-After` header (seconds).
 - Errors use the OpenAI error shape. With no usable account the endpoint returns 503.
 
+`/v1/messages` (Anthropic format):
+
+- `system` (string or text blocks), `messages` with `text`, `image` (base64 source only), `tool_use` and `tool_result` blocks, `tools` with `input_schema`, `max_tokens`, `temperature`. `tool_result` with `is_error: true` is sent as "Error: ...".
+- Server tools (`web_search_*`, `code_execution_*`, ...) are skipped, since they run on Anthropic's side. `tool_choice: {"type":"none"}` disables tools.
+- Thinking blocks are returned only when the request sets `thinking` (`enabled` or `adaptive`). Their `signature` is empty because upstream provides none. Thinking blocks in the history are dropped.
+- Streaming uses the standard events: `message_start`, `content_block_*`, `message_delta` (stop reason and usage), `message_stop`. Errors use the Anthropic error shape.
+- Point Claude Code at it with `ANTHROPIC_BASE_URL=http://127.0.0.1:8080` and `ANTHROPIC_API_KEY` set to a panel API key (or any value in keyless mode). `ANTHROPIC_MODEL` takes any id from `/v1/models`.
+
+`/v1/responses` (OpenAI Responses format):
+
+- `input` as a string or items: `message` (roles user/assistant/system/developer, `input_text`/`output_text`/`input_image` with a data URL), `function_call`, `function_call_output`. `reasoning` items are ignored. `instructions` becomes the system prompt.
+- Function tools are forwarded; built-in tools (`web_search`, `file_search`, ...) are skipped.
+- Output items: `reasoning` (summary text), `message` (`output_text`), `function_call`. Streaming emits the standard `response.*` events with `sequence_number`.
+- Stateless: nothing is stored, so `previous_response_id` returns 400 and the full conversation must be sent each time.
+
 ---
 
 ## Roadmap
@@ -216,6 +234,7 @@ How chat works:
 | 2         | Browser-link login (any IdP), usage/quota panel, CLI login, CLIProxyAPI JSON import, token-gated /v1 stub | Done |
 | 3         | Devin chat upstream (`GetChatMessage`) — `/v1/chat/completions` live, account failover | Done |
 | 4         | Live model list, tool calls, images, Retry-After | Done |
+| 5         | `/v1/messages` (Anthropic) and `/v1/responses` (OpenAI Responses) | Done |
 
 ---
 
