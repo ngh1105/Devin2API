@@ -184,7 +184,14 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	// Map family names ("gpt-5-4") to a concrete catalog UID ("gpt-5-4-medium").
 	// Uses the cache only, so a cold cache never delays a chat request.
-	dreq.Model = devin.MatchModel(dreq.Model, s.cachedModels())
+	catalog := s.cachedModels()
+	dreq.Model = devin.MatchModel(dreq.Model, catalog)
+	// Upstream answers unknown models with a misleading permission_denied
+	// "internal error"; reject them locally when the catalog is known.
+	if len(catalog) > 0 && !devin.HasModel(dreq.Model, catalog) {
+		openai.WriteError(w, http.StatusBadRequest, fmt.Sprintf("unknown model %q; see GET /v1/models", req.Model))
+		return
+	}
 
 	s.stats.requests.Add(1)
 	id := "chatcmpl-" + randID()

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"io"
@@ -56,6 +57,25 @@ func TestModelsFromUpstream(t *testing.T) {
 	}
 	if got := devin.MatchModel("gpt-5.4", srv.cachedModels()); got != "gpt-5-4-medium" {
 		t.Errorf("MatchModel = %q", got)
+	}
+}
+
+// TestChatRejectsUnknownModel: with a loaded catalog, unknown models get a
+// local 400 without spending an upstream call; known family names pass.
+func TestChatRejectsUnknownModel(t *testing.T) {
+	fake := &fakeDevin{}
+	srv := chatTestServer(t, fake, "eyJtok1")
+	srv.fetchModels(context.Background())
+
+	rec := postChat(srv, `{"model":"no-such-model","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "unknown model") {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body)
+	}
+	if len(fake.calls) != 0 {
+		t.Error("unknown model reached upstream")
+	}
+	if rec := postChat(srv, `{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}]}`); rec.Code != http.StatusOK {
+		t.Errorf("family name: status %d body %s", rec.Code, rec.Body)
 	}
 }
 

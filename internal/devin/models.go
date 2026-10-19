@@ -93,6 +93,16 @@ func parseModelConfig(data []byte) ModelInfo {
 	}
 }
 
+// HasModel reports whether uid is in the catalog (case-insensitive).
+func HasModel(uid string, catalog []ModelInfo) bool {
+	for _, m := range catalog {
+		if strings.EqualFold(m.UID, uid) {
+			return true
+		}
+	}
+	return false
+}
+
 // effortSuffixes is the order tried when a client names a model family
 // without an effort level ("gpt-5-4" -> "gpt-5-4-medium").
 var effortSuffixes = []string{"", "-medium", "-high", "-low"}
