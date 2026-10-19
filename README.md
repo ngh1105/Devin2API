@@ -181,11 +181,18 @@ Single-page app at `/web/` with five tabs:
 
 | Tab          | Contents                                                        |
 |--------------|-----------------------------------------------------------------|
-| **Accounts** | Account list with usage bars; add (browser login or JSON import), enable/disable, rename, delete, refresh usage |
+| **Accounts** | Account list with usage bars, search and status filter; add (browser login, pasted session token or JSON import), enable/disable, delete, refresh usage. Tick rows (or the header box for all shown) to refresh, enable, disable or delete many at once. |
 | **API Keys** | Create, list (masked) and revoke proxy API keys                 |
 | **Logs**     | The last 200 chat requests: endpoint, model, account, status, duration, time to first output, tokens, failover attempts, upstream error |
-| **Settings** | Listen address and data directory (set via environment variables) |
+| **Settings** | Devin endpoints, global system prompt, and the listen address / data directory (read-only, set via environment variables) |
 | **API**      | Endpoint reference and a curl example                           |
+
+The panel follows the OS light/dark setting; the Theme button overrides it for that browser.
+
+Settings saved from the panel apply immediately and are kept in `<data>/settings.json`:
+
+- **Devin endpoints**: an ordered list of Devin server base URLs (default `https://server.codeium.com`). Chat, usage and model requests use the first one. On a network error or HTTP 502/503/504 before any output, the same account is retried on the next endpoint; other errors (a rejected token, a rate limit, a bad request) are not endpoint problems and go to account failover as before. **Test** checks that a URL answers without sending any account token. Account session tokens are sent to every listed endpoint, so only add hosts you trust.
+- **Global system prompt**: when switched on, added before (default) or after the client's own system prompt on every chat endpoint (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/completions`). It goes through the same cleaning as client prompts. Up to 32 KB.
 
 Stats grid at the top: Accounts, Models, Requests, Failed. Request and failure totals are saved to `<data>/stats.json` (within ~2 s of each request) and survive restarts; the date counting started is shown under them. Delete the file to reset.
 

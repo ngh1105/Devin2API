@@ -126,6 +126,7 @@ type Server struct {
 	auth            adminAuth     // optional admin password and sessions
 	cooldown        cooldowns     // accounts parked per model after a 429
 	stats           chatStats     // chat request totals, persisted in the data dir
+	settings        settingsStore // panel-editable settings, persisted in the data dir
 }
 
 // New creates a new Server from config and stores.
@@ -140,6 +141,7 @@ func New(cfg config.Config, accounts *store.AccountStore, tokens *store.TokenSto
 		loginMngr:       newLoginManager(),
 	}
 	s.stats.load(cfg.DataDir)
+	s.settings.load(cfg.DataDir)
 	s.auth.password = cfg.AdminPassword
 	return s
 }

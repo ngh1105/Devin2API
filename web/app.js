@@ -77,7 +77,7 @@
         document.getElementById("admin-password").value = "";
         status.textContent = "";
         document.getElementById("login-overlay").className = "modal-overlay hidden";
-        document.getElementById("btn-logout").className = "";
+        document.getElementById("btn-logout").classList.remove("hidden");
         onReady();
       }).catch(function (e) { status.textContent = e.message; });
     };
@@ -85,13 +85,44 @@
       apiPost("/admin/api/logout", "").then(function () { location.reload(); });
     };
     return apiGet("/admin/api/session").then(function (s) {
-      if (s.auth_required) document.getElementById("btn-logout").className = "";
+      if (s.auth_required) document.getElementById("btn-logout").classList.remove("hidden");
       if (s.auth_required && !s.authenticated) {
         showAdminLogin();
         return false;
       }
       return true;
     });
+  }
+
+  // ---- Theme ----
+
+  // The page follows the OS theme until the user picks one; the choice is a
+  // per-browser convenience, so storage failures are ignored.
+  function applySavedTheme() {
+    try {
+      var t = localStorage.getItem("devin2api-theme");
+      if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+    } catch (e) { /* storage unavailable */ }
+  }
+
+  function toggleTheme() {
+    var root = document.documentElement;
+    var cur = root.getAttribute("data-theme");
+    if (!cur) cur = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    var next = cur === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("devin2api-theme", next); } catch (e) { /* storage unavailable */ }
+  }
+
+  // emptyRow fills a table body with one centered message row.
+  function emptyRow(tbody, cols, msg) {
+    var tr = document.createElement("tr");
+    var td = document.createElement("td");
+    td.colSpan = cols;
+    td.className = "empty";
+    td.appendChild(textNode(msg));
+    tr.appendChild(td);
+    tbody.appendChild(tr);
   }
 
   // ---- Stats grid ----
@@ -163,13 +194,7 @@
       var tbody = document.querySelector("#log-table tbody");
       while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
       if (!entries.length) {
-        var tr = document.createElement("tr");
-        var td = document.createElement("td");
-        td.colSpan = 8;
-        td.className = "note";
-        td.appendChild(textNode("No chat requests yet."));
-        tr.appendChild(td);
-        tbody.appendChild(tr);
+        emptyRow(tbody, 8, "No chat requests yet.");
         return;
       }
       entries.forEach(function (e) {
@@ -206,7 +231,10 @@
   function planEndStr(a) {
     if (!a.usage) return "—";
     if (!a.usage.plan_end) return "—";
-    return new Date(a.usage.plan_end).toLocaleDateString();
+    // Upstream sends the Unix epoch (or Go's zero time) when there is no end date.
+    var d = new Date(a.usage.plan_end);
+    if (isNaN(d) || d.getUTCFullYear() < 2000) return "—";
+    return d.toLocaleDateString();
   }
 
   // ---- Accounts tab ----
@@ -225,12 +253,12 @@
     var daily = Number(a.usage.daily_remaining_percent);
     var weekly = Number(a.usage.weekly_remaining_percent);
     if (isFinite(daily) && isFinite(weekly)) {
-      var left = Math.min(daily, weekly); // the tighter limit decides
-      var usedPct = Math.max(0, Math.min(100 - left, 100));
+      // The bar shows quota left, matching the label; the tighter limit decides.
+      var left = Math.max(0, Math.min(Math.min(daily, weekly), 100));
       var barCls = "usage-bar";
-      if (usedPct > 90) barCls = "usage-bar critical";
-      else if (usedPct > 70) barCls = "usage-bar high";
-      return "<td><div class='usage-bar-track'><div class='" + barCls + "' style='width:" + usedPct + "%'></div></div><span>Daily " + daily + "% · weekly " + weekly + "% left</span></td>";
+      if (left < 10) barCls = "usage-bar critical";
+      else if (left < 30) barCls = "usage-bar high";
+      return "<td><div class='usage-bar-track'><div class='" + barCls + "' style='width:" + left + "%'></div></div><span>Daily " + daily + "% · weekly " + weekly + "% left</span></td>";
     }
     return "<td>—</td>";
   }
@@ -241,18 +269,89 @@
   }
 
   var acctCache = [];
+  var selected = {}; // account id -> true, kept across reloads
+
+  function statusKey(a) {
+    if (a.usage_error) return "dead";
+    if (a.expired) return "expired";
+    if (!a.enabled) return "disabled";
+    return "active";
+  }
+
+  // visibleAccounts applies the search box and status filter.
+  function visibleAccounts() {
+    var q = document.getElementById("acct-search").value.trim().toLowerCase();
+    var st = document.getElementById("acct-filter").value;
+    return acctCache.filter(function (a) {
+      if (st && statusKey(a) !== st) return false;
+      if (!q) return true;
+      return [a.email, a.user_name, a.nickname, a.id].some(function (v) {
+        return v && String(v).toLowerCase().indexOf(q) !== -1;
+      });
+    });
+  }
+
+  function selectedIDs() {
+    return acctCache.filter(function (a) { return selected[a.id]; }).map(function (a) { return a.id; });
+  }
 
   function renderAccounts(accs) {
     acctCache = accs;
+    // Forget selections of accounts that no longer exist.
+    var live = {};
+    accs.forEach(function (a) { if (selected[a.id]) live[a.id] = true; });
+    selected = live;
+    drawAccounts();
+  }
+
+  function drawAccounts() {
+    var accs = visibleAccounts();
     var tbody = document.querySelector("#acct-table tbody");
     tbody.innerHTML = "";
+    if (!acctCache.length) emptyRow(tbody, 8, "No accounts yet. Use \"Add account\" to log in or import one.");
+    else if (!accs.length) emptyRow(tbody, 8, "No accounts match the search or filter.");
     for (var i = 0; i < accs.length; i++) {
       var a = accs[i];
       var tr = document.createElement("tr");
+      if (selected[a.id]) tr.className = "selected";
 
-      // Identity
+      // Selection checkbox
+      var tdChk = document.createElement("td");
+      tdChk.className = "col-check";
+      var chk = document.createElement("input");
+      chk.type = "checkbox";
+      chk.checked = !!selected[a.id];
+      chk.onchange = (function (id, row) {
+        return function (ev) {
+          if (ev.target.checked) selected[id] = true; else delete selected[id];
+          row.className = ev.target.checked ? "selected" : "";
+          updateBulkBar();
+        };
+      })(a.id, tr);
+      tdChk.appendChild(chk);
+      tr.appendChild(tdChk);
+
+      // Identity: initial avatar, name, and the account id underneath.
       var tdId = document.createElement("td");
-      tdId.appendChild(textNode(identityCell(a)));
+      var ident = document.createElement("div");
+      ident.className = "ident";
+      var avatar = document.createElement("span");
+      avatar.className = "avatar";
+      avatar.appendChild(textNode(identityCell(a).charAt(0) || "?"));
+      var identText = document.createElement("div");
+      identText.className = "ident-text";
+      var main = document.createElement("span");
+      main.className = "ident-main";
+      main.title = identityCell(a);
+      main.appendChild(textNode(identityCell(a)));
+      var sub = document.createElement("span");
+      sub.className = "ident-sub";
+      sub.appendChild(textNode(a.id));
+      identText.appendChild(main);
+      identText.appendChild(sub);
+      ident.appendChild(avatar);
+      ident.appendChild(identText);
+      tdId.appendChild(ident);
       tr.appendChild(tdId);
 
       // Nickname
@@ -309,7 +408,7 @@
         return function () {
           var newVal = !cur;
           apiPatch("/admin/api/accounts/" + id, JSON.stringify({ enabled: newVal }))
-            .then(loadAccounts)
+            .then(function () { loadAccounts(); loadStats(); })
             .catch(function (e) { toast(e.message, "#f87171"); });
         };
       })(a.id, a.enabled);
@@ -332,32 +431,110 @@
 
       tbody.appendChild(tr);
     }
+
+    var count = document.getElementById("acct-count");
+    count.textContent = accs.length === acctCache.length
+      ? acctCache.length + " account" + (acctCache.length === 1 ? "" : "s")
+      : accs.length + " of " + acctCache.length + " shown";
+    updateBulkBar();
+  }
+
+  // updateBulkBar shows the bulk actions while anything is selected and
+  // keeps the header checkbox in step with the visible rows.
+  function updateBulkBar() {
+    var ids = selectedIDs();
+    var bar = document.getElementById("bulk-bar");
+    bar.classList.toggle("hidden", ids.length === 0);
+    document.getElementById("bulk-count").textContent = ids.length + " selected";
+    var vis = visibleAccounts();
+    var nSel = vis.filter(function (a) { return selected[a.id]; }).length;
+    var all = document.getElementById("acct-check-all");
+    all.checked = vis.length > 0 && nSel === vis.length;
+    all.indeterminate = nSel > 0 && nSel < vis.length;
   }
 
   function loadAccounts() {
     apiGet("/admin/api/accounts").then(renderAccounts).catch(function (e) { toast(e.message, "#f87171"); });
   }
 
-  function refreshAllUsage() {
-    var ids = [];
-    for (var i = 0; i < acctCache.length; i++) {
-      if (acctCache[i].tokens && acctCache[i].tokens.session_token) {
-        ids.push(acctCache[i].id);
+  // runPool calls fn(id) for every id with at most limit in flight, reports
+  // progress, and resolves with the number of failures.
+  function runPool(ids, limit, fn, onProgress) {
+    return new Promise(function (resolve) {
+      var next = 0, done = 0, failed = 0;
+      if (!ids.length) return resolve(0);
+      function launch() {
+        if (next >= ids.length) return;
+        var id = ids[next++];
+        fn(id).catch(function () { failed++; }).then(function () {
+          done++;
+          if (onProgress) onProgress(done, ids.length);
+          if (done === ids.length) resolve(failed);
+          else launch();
+        });
       }
-    }
-    if (ids.length === 0) return toast("No accounts with tokens to refresh", "#f87171");
-    var idx = 0;
-    function next() {
-      if (idx >= ids.length) {
+      for (var i = 0; i < Math.min(limit, ids.length); i++) launch();
+    });
+  }
+
+  // bulkRun runs one action over ids, showing progress on the button, then
+  // reloads the lists.
+  function bulkRun(btn, verb, ids, fn) {
+    if (!ids.length) return;
+    var label = btn.innerHTML;
+    btn.disabled = true;
+    return runPool(ids, 4, fn, function (d, n) { btn.textContent = verb + " " + d + "/" + n + "…"; })
+      .then(function (failed) {
+        btn.innerHTML = label;
+        btn.disabled = false;
         loadAccounts();
-        return toast("Refresh complete", "#34d399");
-      }
-      var id = ids[idx++];
-      apiPost("/admin/api/accounts/" + id + "/usage/refresh")
-        .then(function () { next(); })
-        .catch(function () { next(); });
-    }
-    next();
+        loadStats();
+        if (failed) toast(verb + ": " + failed + " of " + ids.length + " failed", "#f87171");
+        else toast(verb + ": " + ids.length + " account" + (ids.length === 1 ? "" : "s") + " done", "#34d399");
+      });
+  }
+
+  function refreshUsage(id) { return apiPost("/admin/api/accounts/" + id + "/usage/refresh"); }
+
+  function setEnabled(on) {
+    return function (id) { return apiPatch("/admin/api/accounts/" + id, JSON.stringify({ enabled: on })); };
+  }
+
+  function refreshAllUsage() {
+    var ids = acctCache.filter(function (a) { return a.tokens && a.tokens.session_token; })
+      .map(function (a) { return a.id; });
+    if (ids.length === 0) return toast("No accounts with tokens to refresh", "#f87171");
+    bulkRun(document.getElementById("btn-refresh-all"), "Refreshing", ids, refreshUsage);
+  }
+
+  function setupBulk() {
+    var search = document.getElementById("acct-search");
+    search.oninput = drawAccounts;
+    document.getElementById("acct-filter").onchange = drawAccounts;
+    document.getElementById("acct-check-all").onchange = function (ev) {
+      visibleAccounts().forEach(function (a) {
+        if (ev.target.checked) selected[a.id] = true; else delete selected[a.id];
+      });
+      drawAccounts();
+    };
+    document.getElementById("bulk-clear").onclick = function () { selected = {}; drawAccounts(); };
+    document.getElementById("bulk-refresh").onclick = function () {
+      bulkRun(this, "Refreshing", selectedIDs(), refreshUsage);
+    };
+    document.getElementById("bulk-enable").onclick = function () {
+      bulkRun(this, "Enabling", selectedIDs(), setEnabled(true));
+    };
+    document.getElementById("bulk-disable").onclick = function () {
+      bulkRun(this, "Disabling", selectedIDs(), setEnabled(false));
+    };
+    document.getElementById("bulk-delete").onclick = function () {
+      var ids = selectedIDs();
+      if (!ids.length || !confirm("Delete " + ids.length + " account" + (ids.length === 1 ? "" : "s") + "? This cannot be undone.")) return;
+      var btn = this;
+      bulkRun(btn, "Deleting", ids, function (id) {
+        return apiDelete("/admin/api/accounts/" + id).then(function () { delete selected[id]; });
+      });
+    };
   }
 
   // ---- Tokens (API Keys) tab ----
@@ -365,6 +542,7 @@
   function renderTokens(toks) {
     var tbody = document.querySelector("#tok-table tbody");
     tbody.innerHTML = "";
+    if (!toks.length) emptyRow(tbody, 4, "No API keys. Without keys, only local clients may call /v1.");
     for (var i = 0; i < toks.length; i++) {
       var t = toks[i];
       var tr = document.createElement("tr");
@@ -401,20 +579,187 @@
 
   // ---- Settings tab ----
 
+  // savedSettings is the server's copy; draft is what the form shows. Save
+  // is enabled while they differ.
+  var savedSettings = null;
+  var draft = null;
+  var defaultUpstream = "";
+
+  function editable(s) {
+    return {
+      upstreams: (s.upstreams || []).slice(),
+      system_prompt: s.system_prompt || "",
+      system_prompt_enabled: !!s.system_prompt_enabled,
+      system_prompt_mode: s.system_prompt_mode || "prepend"
+    };
+  }
+
+  function isDirty() {
+    return JSON.stringify(draft) !== JSON.stringify(savedSettings);
+  }
+
+  function markDirty() {
+    var dirty = isDirty();
+    document.getElementById("settings-dirty").classList.toggle("hidden", !dirty);
+    document.getElementById("btn-settings-save").disabled = !dirty;
+    document.getElementById("btn-settings-reset").disabled = !dirty;
+  }
+
+  function iconButton(icon, title, onclick, cls) {
+    var b = document.createElement("button");
+    b.className = "btn-icon" + (cls ? " " + cls : "");
+    b.title = title;
+    b.innerHTML = "<svg class='icon'><use href='#i-" + icon + "'/></svg>";
+    b.onclick = onclick;
+    return b;
+  }
+
+  function renderUpstreams() {
+    var list = document.getElementById("upstream-list");
+    list.innerHTML = "";
+    if (!draft.upstreams.length) {
+      var p = document.createElement("div");
+      p.className = "upstream-default";
+      p.appendChild(textNode("Using the default endpoint "));
+      var c = document.createElement("code");
+      c.appendChild(textNode(defaultUpstream));
+      p.appendChild(c);
+      list.appendChild(p);
+      return;
+    }
+    draft.upstreams.forEach(function (u, i) {
+      var row = document.createElement("div");
+      row.className = "upstream-row";
+      var idx = document.createElement("span");
+      idx.className = "upstream-idx";
+      idx.appendChild(textNode(i === 0 ? "Primary" : "Fallback " + i));
+      var input = document.createElement("input");
+      input.type = "url";
+      input.value = u;
+      input.placeholder = "https://server.codeium.com";
+      input.oninput = function () { draft.upstreams[i] = input.value; markDirty(); };
+      var result = document.createElement("span");
+      result.className = "upstream-result";
+      var test = document.createElement("button");
+      test.className = "btn-sm";
+      test.textContent = "Test";
+      test.onclick = function () { testUpstream(input.value, result, test); };
+      var up = iconButton("up", "Move up", function () { moveUpstream(i, -1); });
+      up.disabled = i === 0;
+      var down = iconButton("down", "Move down", function () { moveUpstream(i, 1); });
+      down.disabled = i === draft.upstreams.length - 1;
+      var del = iconButton("trash", "Remove", function () {
+        draft.upstreams.splice(i, 1);
+        renderUpstreams();
+        markDirty();
+      }, "danger");
+      [idx, input, test, up, down, del, result].forEach(function (el) { row.appendChild(el); });
+      list.appendChild(row);
+    });
+  }
+
+  function moveUpstream(i, d) {
+    var j = i + d;
+    var u = draft.upstreams;
+    if (j < 0 || j >= u.length) return;
+    var t = u[i]; u[i] = u[j]; u[j] = t;
+    renderUpstreams();
+    markDirty();
+  }
+
+  function testUpstream(url, out, btn) {
+    out.className = "upstream-result";
+    out.textContent = "Testing…";
+    btn.disabled = true;
+    apiPost("/admin/api/settings/upstream-test", JSON.stringify({ url: url })).then(function (r) {
+      out.className = "upstream-result " + (r.ok ? "ok" : "err");
+      out.textContent = r.ok ? "Reachable · HTTP " + r.status + " · " + r.ms + " ms" : "Unreachable · " + r.error;
+    }).catch(function (e) {
+      out.className = "upstream-result err";
+      out.textContent = e.message;
+    }).then(function () { btn.disabled = false; });
+  }
+
+  function renderPromptForm() {
+    document.getElementById("sp-enabled").checked = draft.system_prompt_enabled;
+    document.getElementById("sp-mode").value = draft.system_prompt_mode;
+    document.getElementById("sp-text").value = draft.system_prompt;
+    updatePromptCount();
+  }
+
+  function updatePromptCount() {
+    var n = draft.system_prompt.length;
+    document.getElementById("sp-count").textContent = n + " characters" + (draft.system_prompt_enabled || !n ? "" : " · not applied while off");
+  }
+
+  function renderSettings(s) {
+    savedSettings = editable(s);
+    draft = editable(s);
+    defaultUpstream = s.default_upstream || "";
+    var dl = document.getElementById("settings-dl");
+    dl.innerHTML = "";
+    var fields = [["Listen", s.listen], ["Data dir", s.data_dir], ["Version", s.version]];
+    for (var i = 0; i < fields.length; i++) {
+      var dt = document.createElement("dt");
+      dt.appendChild(textNode(fields[i][0]));
+      dl.appendChild(dt);
+      var dd = document.createElement("dd");
+      dd.appendChild(textNode(fields[i][1] || "—"));
+      dl.appendChild(dd);
+    }
+    renderUpstreams();
+    renderPromptForm();
+    markDirty();
+  }
+
   function loadSettings() {
-    apiGet("/admin/api/settings").then(function (s) {
-      var dl = document.getElementById("settings-dl");
-      dl.innerHTML = "";
-      var fields = [["Listen", s.listen], ["Data dir", s.data_dir], ["Version", s.version]];
-      for (var i = 0; i < fields.length; i++) {
-        var dt = document.createElement("dt");
-        dt.appendChild(textNode(fields[i][0]));
-        dl.appendChild(dt);
-        var dd = document.createElement("dd");
-        dd.appendChild(textNode(fields[i][1] || "—"));
-        dl.appendChild(dd);
-      }
-    }).catch(function (e) { toast(e.message, "#f87171"); });
+    // Reopening the tab must not throw away edits that were not saved.
+    if (draft && isDirty()) return;
+    apiGet("/admin/api/settings").then(renderSettings).catch(function (e) { toast(e.message, "#f87171"); });
+  }
+
+  function saveSettings() {
+    var body = editable(draft);
+    body.upstreams = body.upstreams.map(function (u) { return u.trim(); }).filter(Boolean);
+    var btn = document.getElementById("btn-settings-save");
+    btn.disabled = true;
+    fetch("/admin/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-Devin2API": "1" },
+      body: JSON.stringify(body)
+    }).then(checkStatus).then(parseJSON).then(function (s) {
+      renderSettings(s);
+      toast("Settings saved", "#34d399");
+    }).catch(function (e) {
+      markDirty();
+      toast(e.message, "#f87171");
+    });
+  }
+
+  function setupSettings() {
+    document.getElementById("btn-upstream-add").onclick = function () {
+      // The first added row starts from the default so the order is explicit.
+      if (!draft.upstreams.length && defaultUpstream) draft.upstreams.push(defaultUpstream);
+      draft.upstreams.push("");
+      renderUpstreams();
+      markDirty();
+      var inputs = document.querySelectorAll("#upstream-list input");
+      if (inputs.length) inputs[inputs.length - 1].focus();
+    };
+    document.getElementById("sp-enabled").onchange = function (ev) {
+      draft.system_prompt_enabled = ev.target.checked; updatePromptCount(); markDirty();
+    };
+    document.getElementById("sp-mode").onchange = function (ev) { draft.system_prompt_mode = ev.target.value; markDirty(); };
+    document.getElementById("sp-text").oninput = function (ev) {
+      draft.system_prompt = ev.target.value; updatePromptCount(); markDirty();
+    };
+    document.getElementById("btn-settings-save").onclick = saveSettings;
+    document.getElementById("btn-settings-reset").onclick = function () {
+      draft = editable(savedSettings);
+      renderUpstreams();
+      renderPromptForm();
+      markDirty();
+    };
   }
 
   // ---- Login flow ----
@@ -520,15 +865,20 @@
     ];
     for (var i = 0; i < entries.length; i++) {
       var dt = document.createElement("dt");
-      dt.appendChild(textNode(entries[i][1] + " " + entries[i][0]));
+      var method = document.createElement("span");
+      method.className = entries[i][1].indexOf("POST") === 0 ? "method post" : "method";
+      method.appendChild(textNode(entries[i][1]));
+      dt.appendChild(method);
+      dt.appendChild(textNode(entries[i][0]));
       dl.appendChild(dt);
       var dd = document.createElement("dd");
       dd.appendChild(textNode(entries[i][2]));
       dl.appendChild(dd);
     }
+    var base = location.origin;
     var codeEl = document.getElementById("curl-example");
-    codeEl.textContent = 'curl http://localhost:8080/v1/models\n'
-      + 'curl -X POST http://localhost:8080/v1/chat/completions \\\n'
+    codeEl.textContent = 'curl ' + base + '/v1/models\n\n'
+      + 'curl -X POST ' + base + '/v1/chat/completions \\\n'
       + '  -H "Authorization: Bearer YOUR_KEY" \\\n'
       + '  -H "Content-Type: application/json" \\\n'
       + '  -d \'{"model":"devin","messages":[{"role":"user","content":"hi"}]}\'';
@@ -542,7 +892,11 @@
   }
 
   function boot() {
+    applySavedTheme();
+    document.getElementById("btn-theme").onclick = toggleTheme;
     setupTabs();
+    setupBulk();
+    setupSettings();
     renderTokens([]); // placeholder until tab clicked
     setupAdminLogin(loadInitialData).then(function (ready) {
       if (ready) loadInitialData();
