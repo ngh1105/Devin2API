@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"mime"
 	"net"
 	"net/http"
@@ -108,6 +109,7 @@ type Server struct {
 	loginMngr       *loginManager
 
 	chatRR atomic.Uint64 // round-robin cursor over chat accounts
+	models modelCache    // upstream model catalog
 	stats  struct {
 		requests, failed atomic.Int64 // chat completions since start
 	}
@@ -146,6 +148,8 @@ func (s *Server) Start(addr string) error {
 		IdleTimeout:       120 * time.Second,
 		// No WriteTimeout: streamed chat completions can run for minutes.
 	}
+	// Warm the model catalog so the first chat can map family names.
+	go s.fetchModels(context.Background())
 	return srv.ListenAndServe()
 }
 

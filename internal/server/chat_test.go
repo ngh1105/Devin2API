@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"io"
@@ -27,12 +28,79 @@ func connectFrame(flag byte, payload []byte) []byte {
 // trailers get that end-of-stream JSON, all others stream "pong".
 type fakeDevin struct {
 	mu       sync.Mutex
-	calls    []string // Authorization headers seen, in order
-	trailers map[string]string
+	calls      []string // chat Authorization headers seen, in order
+	modelCalls int
+	trailers   map[string]string
+}
+
+// TestModelsFromUpstream: /v1/models lists the live catalog after the
+// "devin" alias, caches it, and chat maps a family name onto a catalog UID.
+func TestModelsFromUpstream(t *testing.T) {
+	fake := &fakeDevin{}
+	srv := chatTestServer(t, fake, "eyJtok1")
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, v1Request(http.MethodGet, "/v1/models", nil))
+		var resp struct {
+			Data []struct {
+				ID            string `json:"id"`
+				ContextLength int    `json:"context_length"`
+			} `json:"data"`
+		}
+		json.Unmarshal(rec.Body.Bytes(), &resp)
+		if len(resp.Data) != 2 || resp.Data[0].ID != "devin" || resp.Data[1].ID != "gpt-5-4-medium" || resp.Data[1].ContextLength != 400000 {
+			t.Fatalf("models = %+v", resp.Data)
+		}
+	}
+	if fake.modelCalls != 1 {
+		t.Errorf("upstream catalog fetched %d times, want 1 (cached)", fake.modelCalls)
+	}
+	if got := devin.MatchModel("gpt-5.4", srv.cachedModels()); got != "gpt-5-4-medium" {
+		t.Errorf("MatchModel = %q", got)
+	}
+}
+
+// TestChatRejectsUnknownModel: with a loaded catalog, unknown models get a
+// local 400 without spending an upstream call; known family names pass.
+func TestChatRejectsUnknownModel(t *testing.T) {
+	fake := &fakeDevin{}
+	srv := chatTestServer(t, fake, "eyJtok1")
+	srv.fetchModels(context.Background())
+
+	rec := postChat(srv, `{"model":"no-such-model","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "unknown model") {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body)
+	}
+	if len(fake.calls) != 0 {
+		t.Error("unknown model reached upstream")
+	}
+	if rec := postChat(srv, `{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}]}`); rec.Code != http.StatusOK {
+		t.Errorf("family name: status %d body %s", rec.Code, rec.Body)
+	}
+}
+
+// TestModelsWithoutAccount lists only the alias and never calls upstream.
+func TestModelsWithoutAccount(t *testing.T) {
+	fake := &fakeDevin{}
+	srv := chatTestServer(t, fake)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, v1Request(http.MethodGet, "/v1/models", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"devin"`) || fake.modelCalls != 0 {
+		t.Errorf("status %d body %s calls %d", rec.Code, rec.Body, fake.modelCalls)
+	}
 }
 
 func (f *fakeDevin) handler(w http.ResponseWriter, r *http.Request) {
 	io.Copy(io.Discard, r.Body)
+	if strings.HasSuffix(r.URL.Path, "/GetCliModelConfigs") {
+		f.mu.Lock()
+		f.modelCalls++
+		f.mu.Unlock()
+		cfg := append(devin.PwFieldString(1, "GPT-5.4 Medium"), devin.PwFieldVarint(18, 400000)...)
+		cfg = append(cfg, devin.PwFieldString(22, "gpt-5-4-medium")...)
+		w.Write(devin.PwFieldBytes(1, cfg))
+		return
+	}
 	auth := r.Header.Get("Authorization")
 	f.mu.Lock()
 	f.calls = append(f.calls, auth)
@@ -191,5 +259,47 @@ func TestChatRejectsUnsupportedInput(t *testing.T) {
 		if rec := postChat(srv, body); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: status %d, want 400", body, rec.Code)
 		}
+	}
+}
+
+// TestModelsMergedAcrossAccounts: each account may see a different catalog;
+// the cache holds the union so no account's models are rejected as unknown.
+func TestModelsMergedAcrossAccounts(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		uid := "model-a"
+		if strings.Contains(r.Header.Get("Authorization"), "eyJb") {
+			uid = "model-b"
+		}
+		config := func(id string) []byte {
+			return devin.PwFieldBytes(1, append(devin.PwFieldString(1, id), devin.PwFieldString(22, id)...))
+		}
+		w.Write(append(config(uid), config("shared")...))
+	}))
+	defer up.Close()
+	accs := mustAccounts(t)
+	for i, tok := range []string{"eyJa", "eyJb"} {
+		accs.Save(store.AccountFromLogin("u", "usr_"+string(rune('a'+i)), "org", tok, "", nil))
+	}
+	srv := New(config.Config{Listen: ":0"}, accs, mustTokens(t))
+	srv.loginServerBase = up.URL
+
+	got := map[string]int{}
+	for _, m := range srv.fetchModels(context.Background()) {
+		got[m.UID]++
+	}
+	if got["model-a"] != 1 || got["model-b"] != 1 || got["shared"] != 1 {
+		t.Errorf("merged catalog = %v", got)
+	}
+}
+
+// TestModelsFetchIgnoresCallerCancel: a client that disconnects mid-fetch
+// must not leave the shared cache empty and throttled.
+func TestModelsFetchIgnoresCallerCancel(t *testing.T) {
+	srv := chatTestServer(t, &fakeDevin{}, "eyJtok1")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if models := srv.fetchModels(ctx); len(models) == 0 {
+		t.Fatal("cancelled caller left the catalog empty")
 	}
 }

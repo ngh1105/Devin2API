@@ -492,6 +492,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]int64{
 		"accounts": int64(total),
 		"enabled":  int64(enabled),
+		"models":   int64(len(s.cachedModels())),
 		"requests": s.stats.requests.Load(),
 		"failed":   s.stats.failed.Load(),
 	}

@@ -65,9 +65,8 @@ func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
 	return out, nil
 }
 
-// chatAccounts returns enabled accounts that hold a session token, rotated
-// round-robin so load spreads across accounts.
-func (s *Server) chatAccounts() []*store.Account {
+// usableAccounts returns enabled accounts that hold a session token.
+func (s *Server) usableAccounts() []*store.Account {
 	accs, _ := s.accounts.List()
 	usable := accs[:0]
 	for _, a := range accs {
@@ -75,6 +74,13 @@ func (s *Server) chatAccounts() []*store.Account {
 			usable = append(usable, a)
 		}
 	}
+	return usable
+}
+
+// chatAccounts returns the usable accounts rotated round-robin so chat load
+// spreads across accounts.
+func (s *Server) chatAccounts() []*store.Account {
+	usable := s.usableAccounts()
 	if len(usable) == 0 {
 		return nil
 	}
@@ -180,6 +186,16 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	dreq, err := toDevinRequest(req)
 	if err != nil {
 		openai.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Map family names ("gpt-5-4") to a concrete catalog UID ("gpt-5-4-medium").
+	// Uses the cache only, so a cold cache never delays a chat request.
+	catalog := s.cachedModels()
+	dreq.Model = devin.MatchModel(dreq.Model, catalog)
+	// Upstream answers unknown models with a misleading permission_denied
+	// "internal error"; reject them locally when the catalog is known.
+	if len(catalog) > 0 && !devin.HasModel(dreq.Model, catalog) {
+		openai.WriteError(w, http.StatusBadRequest, fmt.Sprintf("unknown model %q; see GET /v1/models", req.Model))
 		return
 	}
 
