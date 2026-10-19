@@ -83,3 +83,15 @@ func TestMatchModel(t *testing.T) {
 		t.Errorf("empty catalog: got %q", got)
 	}
 }
+
+// TestMatchModelKeepsCatalogCase: upstream UIDs are case-sensitive, so a
+// lowercase request must resolve to the catalog's spelling.
+func TestMatchModelKeepsCatalogCase(t *testing.T) {
+	catalog := []ModelInfo{{UID: "MODEL_PRIVATE_11"}, {UID: "swe-2-medium"}}
+	if got := MatchModel("model_private_11", catalog); got != "MODEL_PRIVATE_11" {
+		t.Errorf("got %q, want MODEL_PRIVATE_11", got)
+	}
+	if got := MatchModel("SWE-2", catalog); got != "swe-2-medium" {
+		t.Errorf("got %q, want swe-2-medium", got)
+	}
+}

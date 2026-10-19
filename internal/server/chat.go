@@ -65,9 +65,8 @@ func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
 	return out, nil
 }
 
-// chatAccounts returns enabled accounts that hold a session token, rotated
-// round-robin so load spreads across accounts.
-func (s *Server) chatAccounts() []*store.Account {
+// usableAccounts returns enabled accounts that hold a session token.
+func (s *Server) usableAccounts() []*store.Account {
 	accs, _ := s.accounts.List()
 	usable := accs[:0]
 	for _, a := range accs {
@@ -75,6 +74,13 @@ func (s *Server) chatAccounts() []*store.Account {
 			usable = append(usable, a)
 		}
 	}
+	return usable
+}
+
+// chatAccounts returns the usable accounts rotated round-robin so chat load
+// spreads across accounts.
+func (s *Server) chatAccounts() []*store.Account {
+	usable := s.usableAccounts()
 	if len(usable) == 0 {
 		return nil
 	}

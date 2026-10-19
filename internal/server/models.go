@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,20 +68,35 @@ func (s *Server) fetchModels(ctx context.Context) []devin.ModelInfo {
 	return m
 }
 
-// fetchModelsUpstream asks each usable account in turn until one answers.
+// fetchModelsUpstream merges the catalogs of all usable accounts: accounts
+// on different plans may see different models, and the unknown-model check
+// must not reject a model that only some accounts can use. The fetch is
+// detached from the caller's context so one client disconnecting cannot fail
+// the shared fetch (and trigger the retry throttle) for everyone.
 func (s *Server) fetchModelsUpstream(ctx context.Context) []devin.ModelInfo {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()
-	for _, acc := range s.chatAccounts() {
+	var merged []devin.ModelInfo
+	seen := make(map[string]bool)
+	for _, acc := range s.usableAccounts() {
 		models, err := devin.FetchModels(ctx, s.loginServerBase, acc.Tokens.SessionToken)
-		if err == nil && len(models) > 0 {
-			return models
+		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			continue
 		}
-		if ctx.Err() != nil {
-			break
+		for _, m := range models {
+			if k := strings.ToLower(m.UID); !seen[k] {
+				seen[k] = true
+				merged = append(merged, m)
+			}
 		}
 	}
-	return nil
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
 }
 
 // cachedModels returns the catalog without fetching (nil if never loaded).

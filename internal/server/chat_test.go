@@ -261,3 +261,45 @@ func TestChatRejectsUnsupportedInput(t *testing.T) {
 		}
 	}
 }
+
+// TestModelsMergedAcrossAccounts: each account may see a different catalog;
+// the cache holds the union so no account's models are rejected as unknown.
+func TestModelsMergedAcrossAccounts(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		uid := "model-a"
+		if strings.Contains(r.Header.Get("Authorization"), "eyJb") {
+			uid = "model-b"
+		}
+		config := func(id string) []byte {
+			return devin.PwFieldBytes(1, append(devin.PwFieldString(1, id), devin.PwFieldString(22, id)...))
+		}
+		w.Write(append(config(uid), config("shared")...))
+	}))
+	defer up.Close()
+	accs := mustAccounts(t)
+	for i, tok := range []string{"eyJa", "eyJb"} {
+		accs.Save(store.AccountFromLogin("u", "usr_"+string(rune('a'+i)), "org", tok, "", nil))
+	}
+	srv := New(config.Config{Listen: ":0"}, accs, mustTokens(t))
+	srv.loginServerBase = up.URL
+
+	got := map[string]int{}
+	for _, m := range srv.fetchModels(context.Background()) {
+		got[m.UID]++
+	}
+	if got["model-a"] != 1 || got["model-b"] != 1 || got["shared"] != 1 {
+		t.Errorf("merged catalog = %v", got)
+	}
+}
+
+// TestModelsFetchIgnoresCallerCancel: a client that disconnects mid-fetch
+// must not leave the shared cache empty and throttled.
+func TestModelsFetchIgnoresCallerCancel(t *testing.T) {
+	srv := chatTestServer(t, &fakeDevin{}, "eyJtok1")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if models := srv.fetchModels(ctx); len(models) == 0 {
+		t.Fatal("cancelled caller left the catalog empty")
+	}
+}

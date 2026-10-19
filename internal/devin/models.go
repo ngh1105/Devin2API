@@ -108,21 +108,22 @@ func HasModel(uid string, catalog []ModelInfo) bool {
 var effortSuffixes = []string{"", "-medium", "-high", "-low"}
 
 // MatchModel resolves a client model name against the catalog: the name is
-// normalised with ResolveModel, then matched exactly or with an effort
-// suffix. It returns the normalised name unchanged when nothing matches,
-// leaving upstream to reject unknown models.
+// normalised with ResolveModel, then matched case-insensitively, exactly or
+// with an effort suffix. A match returns the catalog's own spelling of the
+// UID (upstream UIDs are case-sensitive, e.g. "MODEL_PRIVATE_11"). It
+// returns the normalised name unchanged when nothing matches.
 func MatchModel(name string, catalog []ModelInfo) string {
 	uid := ResolveModel(name)
 	if len(catalog) == 0 {
 		return uid
 	}
-	known := make(map[string]bool, len(catalog))
+	canonical := make(map[string]string, len(catalog))
 	for _, m := range catalog {
-		known[strings.ToLower(m.UID)] = true
+		canonical[strings.ToLower(m.UID)] = m.UID
 	}
 	for _, suf := range effortSuffixes {
-		if cand := uid + suf; known[strings.ToLower(cand)] {
-			return cand
+		if c, ok := canonical[strings.ToLower(uid+suf)]; ok {
+			return c
 		}
 	}
 	return uid
