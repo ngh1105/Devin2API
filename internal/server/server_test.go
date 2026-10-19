@@ -225,6 +225,7 @@ func TestTokenListEmpty(t *testing.T) {
 func v1Request(method, target string, body io.Reader) *http.Request {
 	req := httptest.NewRequest(method, target, body)
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "127.0.0.1:50000" // a local client
 	return req
 }
 

@@ -58,10 +58,16 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm devin2api:ci version
-          docker run -d --name d2 -p 127.0.0.1:8080:8080 devin2api:ci
+          docker run -d --name d2 -p 127.0.0.1:8080:8080 -e DEVIN2API_ADMIN_PASSWORD=ci-pass devin2api:ci
           for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8080/healthz && break; sleep 1; done
           curl -fsS http://127.0.0.1:8080/healthz | grep -q '"ok"'
+          # Requests reach the container from the bridge network, not loopback,
+          # so the admin API needs the password.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-Devin2API: 1' http://127.0.0.1:8080/admin/api/tokens)
+          [ "$code" = 401 ] || { echo "admin without login returned $code"; exit 1; }
+          curl -fsS -c jar -X POST -H 'X-Devin2API: 1' -H 'Content-Type: application/json' \
+            -d '{"password":"ci-pass"}' http://127.0.0.1:8080/admin/api/login
           # The data volume must be writable by the nonroot user.
-          curl -fsS -X POST -H 'X-Devin2API: 1' http://127.0.0.1:8080/admin/api/tokens | grep -q d2sk_
+          curl -fsS -b jar -X POST -H 'X-Devin2API: 1' http://127.0.0.1:8080/admin/api/tokens | grep -q d2sk_
           docker logs d2
           docker rm -f d2

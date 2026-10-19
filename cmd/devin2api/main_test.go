@@ -80,7 +80,7 @@ func TestRunLoginSavesAccount(t *testing.T) {
 
 	cbReq, _ := http.NewRequest(http.MethodGet,
 		fmt.Sprintf("http://127.0.0.1:%d/callback?code=fake-code&state=%s",
-			port, devin.LastVerifier()), nil)
+			port, devin.LastState()), nil)
 	if _, err := http.DefaultClient.Do(cbReq); err != nil {
 		t.Fatal(err)
 	}

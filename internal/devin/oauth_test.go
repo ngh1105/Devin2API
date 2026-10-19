@@ -3,6 +3,7 @@ package devin
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -126,78 +127,63 @@ func TestStartLoginCallbackHappyPath(t *testing.T) {
 	}
 }
 
-// TestStartLoginCallbackStateMismatch sends an HTTP GET to the real callback
-// endpoint with a wrong state param, verifies Wait surfaces the mismatch error.
+// TestStartLoginCallbackStateMismatch: a callback with the wrong state is
+// refused with 400 and does not end the login; the real redirect still works.
 func TestStartLoginCallbackStateMismatch(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = r.URL.Query().Get("state")
-		redirect := r.URL.Query().Get("redirect_uri")
-		w.Header().Set("Location", redirect+"?code=bad&state=wrong-state")
-		w.WriteHeader(http.StatusFound)
-	}))
-	defer ts.Close()
-
-	s, err := StartLogin(ts.URL)
+	s, err := StartLogin("http://example.invalid")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Stop()
+	if s.State == s.Verifier {
+		t.Fatal("state must not reveal the PKCE verifier")
+	}
+	if strings.Contains(s.LoginURL, s.Verifier) {
+		t.Fatal("login URL contains the PKCE verifier")
+	}
 
-	// Simulate browser redirect: hit the bound loopback callback with wrong state.
-	callbackURL := "http://127.0.0.1:" + strconv.Itoa(s.Port) +
-		"/callback?code=bad&state=wrong-state"
-	client := &http.Client{}
-	req, _ := http.NewRequest(http.MethodGet, callbackURL, nil)
-	resp, err := client.Do(req)
+	base := "http://127.0.0.1:" + strconv.Itoa(s.Port) + "/callback"
+	for _, q := range []string{"?code=bad&state=wrong-state", "", "?code=bad"} {
+		resp, err := http.Get(base + q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || strings.Contains(string(body), s.State) {
+			t.Errorf("%q: status %d body %q", q, resp.StatusCode, body)
+		}
+	}
+	if _, err := s.Wait(context.Background(), 200*time.Millisecond); err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("stray callbacks ended the login: %v", err)
+	}
+
+	resp, err := http.Get(base + "?code=good&state=" + url.QueryEscape(s.State))
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err = s.Wait(ctx, time.Second)
-	if err == nil {
-		t.Fatal("expected error for state mismatch")
-	}
-	if !strings.Contains(err.Error(), "state mismatch") {
-		t.Errorf("error = %q; expected 'state mismatch'", err.Error())
+	res, err := s.Wait(context.Background(), time.Second)
+	if err != nil || res.Code != "good" {
+		t.Fatalf("real callback: %v %+v", err, res)
 	}
 }
 
-// TestStartLoginCallbackMissingParams hits /callback without code/state,
-// verifying Wait returns a missing-params error.
-func TestStartLoginCallbackMissingParams(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Location", "http://127.0.0.1:"+strconv.Itoa(0)+"/callback")
-		w.WriteHeader(http.StatusFound)
-	}))
-	defer ts.Close()
-
-	s, err := StartLogin(ts.URL)
+// TestStartLoginCallbackError: an error redirect with the right state
+// fails the login.
+func TestStartLoginCallbackError(t *testing.T) {
+	s, err := StartLogin("http://example.invalid")
 	if err != nil {
-		t.Skipf("start login failed: %v", err)
+		t.Fatal(err)
 	}
 	defer s.Stop()
-
-	// Directly hit the callback with no params.
-	cbURL := "http://127.0.0.1:" + strconv.Itoa(s.Port) + "/callback"
-	resp, err := http.DefaultClient.Get(cbURL)
+	resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(s.Port) + "/callback?error=access_denied&state=" + url.QueryEscape(s.State))
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err = s.Wait(ctx, time.Second)
-	if err == nil {
-		t.Fatal("expected error for missing params")
-	}
-	if !strings.Contains(err.Error(), "missing code or state") {
-		t.Errorf("error = %q; expected 'missing code or state'", err.Error())
+	if _, err := s.Wait(context.Background(), time.Second); err == nil || !strings.Contains(err.Error(), "access_denied") {
+		t.Errorf("err = %v", err)
 	}
 }
 

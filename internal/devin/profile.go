@@ -30,19 +30,19 @@ func FetchSelfProfile(ctx context.Context, apiBase, sessionToken string) (SelfPr
 	}
 	req.Header.Set("Authorization", "Bearer "+sessionToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := apiHTTPClient.Do(req)
 	if err != nil {
 		return SelfProfile{}, fmt.Errorf("self profile request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
+		io.Copy(io.Discard, io.LimitReader(resp.Body, maxJSONBytes))
 		return SelfProfile{}, fmt.Errorf("self profile: status %d", resp.StatusCode)
 	}
 
 	var p SelfProfile
-	if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONBytes)).Decode(&p); err != nil {
 		return SelfProfile{}, fmt.Errorf("decode self profile: %w", err)
 	}
 	return p, nil

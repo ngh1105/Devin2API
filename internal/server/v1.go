@@ -47,7 +47,7 @@ func (s *Server) v1Middleware(next http.HandlerFunc) http.HandlerFunc {
 			// Keyless mode spends real Devin quota, so only local non-browser
 			// style callers are let in: loopback Host (blocks DNS rebinding)
 			// and no foreign Origin (blocks cross-site requests).
-			if !isLoopbackHost(r.Host) || foreignOrigin(r) {
+			if !isLocalRequest(r) || foreignOrigin(r) {
 				writeV1AuthError(w, r, "create an API key in the panel to use /v1 from this origin")
 				return
 			}

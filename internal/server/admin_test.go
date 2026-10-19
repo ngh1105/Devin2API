@@ -765,6 +765,7 @@ func TestLoginLifecycleAsync(t *testing.T) {
 func adminRequest(method, target string, body io.Reader) *http.Request {
 	req := httptest.NewRequest(method, target, body)
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "127.0.0.1:50000" // a local client
 	req.Header.Set("X-Devin2API", "1")
 	return req
 }

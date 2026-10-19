@@ -36,7 +36,7 @@ func FetchModels(ctx context.Context, serverBase, sessionToken string) ([]ModelI
 	req.Header.Set("Content-Type", "application/proto")
 	req.Header.Set("Connect-Protocol-Version", "1")
 
-	resp, err := chatHTTPClient.Do(req)
+	resp, err := apiHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("models request: %w", err)
 	}

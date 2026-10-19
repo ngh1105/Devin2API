@@ -195,23 +195,23 @@ func FetchUserStatus(ctx context.Context, serverBase, sessionToken string) (*sto
 	httpReq.Header.Set("Content-Type", "application/proto")
 	httpReq.Header.Set("Authorization", "Bearer "+sessionToken)
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := apiHTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("user status request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		io.Copy(io.Discard, resp.Body)
+		io.Copy(io.Discard, io.LimitReader(resp.Body, maxJSONBytes))
 		return nil, ErrTokenExpired
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
+		io.Copy(io.Discard, io.LimitReader(resp.Body, maxJSONBytes))
 		return nil, fmt.Errorf("user status: status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJSONBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}

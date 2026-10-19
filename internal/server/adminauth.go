@@ -56,8 +56,10 @@ func clientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-// allowAttempt reports whether ip may try another login now.
-func (a *adminAuth) allowAttempt(ip string) bool {
+// takeAttempt reserves one login attempt for ip, counting it before the
+// password is checked so parallel requests cannot all slip under the cap.
+// A successful login clears the count again (clearAttempts).
+func (a *adminAuth) takeAttempt(ip string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := time.Now()
@@ -66,21 +68,25 @@ func (a *adminAuth) allowAttempt(ip string) bool {
 			delete(a.fails, k)
 		}
 	}
-	return a.fails[ip].count < loginFailsPerMinute
-}
-
-func (a *adminAuth) recordFailure(ip string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.fails == nil {
 		a.fails = map[string]failWindow{}
 	}
 	w := a.fails[ip]
+	if w.count >= loginFailsPerMinute {
+		return false
+	}
 	if w.count == 0 {
-		w.start = time.Now()
+		w.start = now
 	}
 	w.count++
 	a.fails[ip] = w
+	return true
+}
+
+func (a *adminAuth) clearAttempts(ip string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.fails, ip)
 }
 
 func (a *adminAuth) newSession() string {
@@ -161,7 +167,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := clientIP(r)
-	if !s.auth.allowAttempt(ip) {
+	if !s.auth.takeAttempt(ip) {
 		writeErr(w, http.StatusTooManyRequests, "too many failed logins; try again in a minute")
 		return
 	}
@@ -173,11 +179,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.auth.checkPassword(body.Password) {
-		s.auth.recordFailure(ip)
 		time.Sleep(loginFailDelay)
 		writeErr(w, http.StatusUnauthorized, "wrong password")
 		return
 	}
+	s.auth.clearAttempts(ip)
 	setSessionCookie(w, s.auth.newSession(), int(sessionTTL/time.Second))
 	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
 }

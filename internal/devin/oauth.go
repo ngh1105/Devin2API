@@ -49,25 +49,36 @@ func ExchangeCode(ctx context.Context, apiBase, code, verifier string) (string, 
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := apiHTTPClient.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("exchange request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
+		io.Copy(io.Discard, io.LimitReader(resp.Body, maxJSONBytes))
 		return "", fmt.Errorf("exchange failed: status %d", resp.StatusCode)
 	}
 
 	var out struct {
 		Token string `json:"token"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONBytes)).Decode(&out); err != nil {
 		return "", fmt.Errorf("decode token response: %w", err)
+	}
+	if out.Token == "" {
+		return "", errors.New("exchange returned no token")
 	}
 	return out.Token, nil
 }
+
+// apiHTTPClient is used for the short request/response calls (token
+// exchange, profile, user status, model list). A timeout keeps a stalled
+// upstream from hanging a login or the background usage refresh forever.
+var apiHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+// maxJSONBytes caps the small JSON/proto bodies read from those calls.
+const maxJSONBytes = 1 << 20
 
 // FormatSessionToken formats a raw token value for persistence. Values starting
 // with the prefix are kept as-is; all others get the prefix.
@@ -88,7 +99,9 @@ func FormatSessionToken(raw string) string {
 // challenge (also base64url no-padding).
 func GeneratePKCE() (verifier, challenge string) {
 	b := make([]byte, 32)
-	io.ReadFull(rand.Reader, b)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		panic("devin: crypto/rand failed: " + err.Error())
+	}
 	verifier = base64.RawURLEncoding.EncodeToString(b)
 
 	hash := sha256.Sum256([]byte(verifier))
@@ -140,47 +153,59 @@ func StartLogin(appBaseOverride string) (*LoginState, error) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	redirect := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
 
+	// state is independent of the PKCE verifier: the verifier must stay
+	// secret until the token exchange, while state travels in the URL.
+	oauthState := randHex(16)
 	state := &LoginState{
 		LoginURL: fmt.Sprintf(
 			"%s/auth/cli/continue?redirect_uri=%s&prompt=select_account&code_challenge=%s&code_challenge_method=S256&state=%s",
 			base,
 			url.QueryEscape(redirect),
-			c, v,
+			c, oauthState,
 		),
 		Port:     port,
-		State:    v, // use verifier itself as state (unique enough)
+		State:    oauthState,
 		Verifier: v,
 		resultCh: make(chan loginResult, 1),
 		done:     make(chan struct{}),
 		ln:       ln, // store for idempotent shutdown
 	}
 
-	lastVerifier = v // test-only accessor
+	lastStateMu.Lock()
+	lastState = oauthState // test-only accessor
+	lastStateMu.Unlock()
 
-	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-			code := r.URL.Query().Get("code")
-			st := r.URL.Query().Get("state")
-			var res loginResult
-			switch {
-			case code == "" || st == "":
-				res.error = "missing code or state"
-			case st != state.State:
-				res.error = fmt.Sprintf("state mismatch: got %q, want %q", st, state.State)
-			default:
-				res.code = code
-			}
-			if res.error != "" {
-				w.WriteHeader(http.StatusBadRequest)
-				fmt.Fprint(w, res.error)
-			}
-			state.resultCh <- res
-		})
-
-		state.srv = &http.Server{Handler: mux}
-		_ = state.srv.Serve(ln)
-	}()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		// Only a request carrying this login's state may complete or fail
+		// it; anything else (a stray or hostile local request) is refused
+		// without affecting the pending login.
+		if q.Get("state") != state.State {
+			http.Error(w, "invalid or missing state", http.StatusBadRequest)
+			return
+		}
+		var res loginResult
+		switch {
+		case q.Get("error") != "":
+			res.error = "login failed: " + q.Get("error")
+		case q.Get("code") == "":
+			res.error = "missing code"
+		default:
+			res.code = q.Get("code")
+		}
+		select {
+		case state.resultCh <- res:
+		default: // a result is already pending; ignore repeats
+		}
+		if res.error != "" {
+			http.Error(w, res.error, http.StatusBadRequest)
+			return
+		}
+		fmt.Fprint(w, "Login complete. You can close this tab.")
+	})
+	state.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	go func() { _ = state.srv.Serve(ln) }()
 
 	return state, nil
 }
@@ -191,7 +216,7 @@ func (l *LoginState) Stop() {
 	if l.shutOnce.Swap(true) {
 		return
 	}
-	l.ln.Close() // closes listener → Serve returns immediately
+	l.srv.Close() // closes the listener and any open callback connections
 	select {
 	case <-l.done:
 	default:
@@ -235,12 +260,17 @@ type Result struct {
 	Code string
 }
 
-// lastVerifier stores the PKCE verifier from the most recent StartLogin call.
-// Only intended for use in tests via LastVerifier().
-var lastVerifier string
+// lastState stores the OAuth state from the most recent StartLogin call.
+// Only intended for use in tests via LastState().
+var (
+	lastStateMu sync.Mutex
+	lastState   string
+)
 
-// LastVerifier returns the PKCE verifier from the most recent StartLogin call.
+// LastState returns the OAuth state of the most recent StartLogin call.
 // Only intended for use in tests.
-func LastVerifier() string {
-	return lastVerifier
+func LastState() string {
+	lastStateMu.Lock()
+	defer lastStateMu.Unlock()
+	return lastState
 }
