@@ -112,14 +112,12 @@ type Server struct {
 	models   modelCache    // upstream model catalog
 	reqLog   requestLog    // recent chat requests for the panel
 	cooldown cooldowns     // accounts parked per model after a 429
-	stats    struct {
-		requests, failed atomic.Int64 // chat completions since start
-	}
+	stats    chatStats     // chat request totals, persisted in the data dir
 }
 
 // New creates a new Server from config and stores.
 func New(cfg config.Config, accounts *store.AccountStore, tokens *store.TokenStore) *Server {
-	return &Server{
+	s := &Server{
 		listen:          cfg.Listen,
 		dataDir:         cfg.DataDir,
 		accounts:        accounts,
@@ -128,6 +126,8 @@ func New(cfg config.Config, accounts *store.AccountStore, tokens *store.TokenSto
 		loginServerBase: devin.ServerBaseURL,
 		loginMngr:       newLoginManager(),
 	}
+	s.stats.load(cfg.DataDir)
+	return s
 }
 
 // Handler returns the root http.Handler with all routes registered.

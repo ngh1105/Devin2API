@@ -146,6 +146,7 @@ func (s *Server) finishTrace(ctx context.Context, tr *chatTrace, res *devin.Chat
 		s.stats.failed.Add(1)
 	}
 	s.reqLog.add(e)
+	s.stats.changed() // covers this request's count from startTrace too
 
 	attrs := []any{
 		"endpoint", e.Endpoint, "model", e.UpstreamModel, "stream", e.Stream,

@@ -1,0 +1,85 @@
+package server
+
+import (
+	"encoding/json"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// statsSaveDelay batches counter updates into one write: a save is
+// scheduled on the first change and covers every change made before it.
+const statsSaveDelay = 2 * time.Second
+
+// chatStats counts chat requests and failures and persists them to
+// <data>/stats.json, so the panel totals survive restarts.
+type chatStats struct {
+	requests, failed atomic.Int64
+	since            time.Time // when counting started (first run)
+
+	path    string // "" disables persistence (tests)
+	mu      sync.Mutex
+	pending bool
+}
+
+type statsFile struct {
+	Requests int64     `json:"requests"`
+	Failed   int64     `json:"failed"`
+	Since    time.Time `json:"since"`
+}
+
+// load restores counters from dataDir; a missing or unreadable file starts
+// from zero.
+func (c *chatStats) load(dataDir string) {
+	c.since = time.Now()
+	if dataDir == "" {
+		return
+	}
+	c.path = filepath.Join(dataDir, "stats.json")
+	b, err := os.ReadFile(c.path)
+	if err != nil {
+		return
+	}
+	var f statsFile
+	if json.Unmarshal(b, &f) != nil {
+		return
+	}
+	c.requests.Store(f.Requests)
+	c.failed.Store(f.Failed)
+	if !f.Since.IsZero() {
+		c.since = f.Since
+	}
+}
+
+// changed schedules a save unless one is already pending.
+func (c *chatStats) changed() {
+	if c.path == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pending {
+		return
+	}
+	c.pending = true
+	time.AfterFunc(statsSaveDelay, c.save)
+}
+
+func (c *chatStats) save() {
+	c.mu.Lock()
+	c.pending = false
+	c.mu.Unlock()
+	b, _ := json.MarshalIndent(statsFile{Requests: c.requests.Load(), Failed: c.failed.Load(), Since: c.since}, "", "  ")
+	tmp := c.path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		slog.Warn("save stats", "error", err)
+		return
+	}
+	if err := os.Rename(tmp, c.path); err != nil {
+		os.Remove(tmp)
+		slog.Warn("save stats", "error", err)
+	}
+}

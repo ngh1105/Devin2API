@@ -160,7 +160,7 @@ Single-page app at `/web/` with five tabs:
 | **Settings** | Listen address and data directory (set via environment variables) |
 | **API**      | Endpoint reference and a curl example                           |
 
-Stats grid at the top: Accounts, Models, Requests, Failed (requests and failures count since the server started).
+Stats grid at the top: Accounts, Models, Requests, Failed. Request and failure totals are saved to `<data>/stats.json` (within ~2 s of each request) and survive restarts; the date counting started is shown under them. Delete the file to reset.
 
 Every chat request is also logged to the console (stderr) as one line, for example:
 
