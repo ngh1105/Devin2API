@@ -447,22 +447,38 @@ func AccountFromLogin(userName, userID, orgID, sessionToken, email string, u *Us
 	}
 }
 
-// Patch partially updates an account: nickname and/or enabled.
-// Only non-nil fields are applied. Returns ErrNotFound if id is absent.
+// Patch partially updates an account: nickname and/or enabled, and persists
+// it. Only non-nil fields are applied. Returns os.ErrNotExist if id is absent.
 func (s *AccountStore) Patch(id string, nickname *string, enabled *bool) error {
+	_, err := s.Mutate(id, func(a *Account) {
+		if nickname != nil {
+			a.Nickname = *nickname
+		}
+		if enabled != nil {
+			a.Enabled = *enabled
+		}
+	})
+	return err
+}
+
+// Mutate applies fn to a copy of the account and saves it, all under the
+// store lock, so concurrent updates (panel edits, background usage refresh)
+// never overwrite each other. Returns a copy of the saved account.
+func (s *AccountStore) Mutate(id string, fn func(*Account)) (*Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	a, ok := s.accounts[id]
+	cur, ok := s.accounts[id]
 	if !ok {
-		return os.ErrNotExist
+		return nil, os.ErrNotExist
 	}
-	if nickname != nil {
-		a.Nickname = *nickname
+	a := *cur
+	fn(&a)
+	a.ID = id // fn must not move the record
+	if err := s.saveLocked(&a); err != nil {
+		return nil, err
 	}
-	if enabled != nil {
-		a.Enabled = *enabled
-	}
-	return nil
+	cp := a
+	return &cp, nil
 }
 
 // ---------- token helpers ---------------------------------------------------

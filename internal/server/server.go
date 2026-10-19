@@ -108,10 +108,11 @@ type Server struct {
 	loginServerBase string
 	loginMngr       *loginManager
 
-	chatRR atomic.Uint64 // round-robin cursor over chat accounts
-	models modelCache    // upstream model catalog
-	reqLog requestLog    // recent chat requests for the panel
-	stats  struct {
+	chatRR   atomic.Uint64 // round-robin cursor over chat accounts
+	models   modelCache    // upstream model catalog
+	reqLog   requestLog    // recent chat requests for the panel
+	cooldown cooldowns     // accounts parked per model after a 429
+	stats    struct {
 		requests, failed atomic.Int64 // chat completions since start
 	}
 }
@@ -155,6 +156,8 @@ func (s *Server) Start(addr string) error {
 	}
 	// Warm the model catalog so the first chat can map family names.
 	go s.fetchModels(context.Background())
+	// Keep quota data fresh for routing.
+	go s.usageLoop(context.Background())
 	return srv.ListenAndServe()
 }
 

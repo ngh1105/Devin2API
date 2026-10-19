@@ -224,17 +224,6 @@ func (s *Server) usableAccounts() []*store.Account {
 	return usable
 }
 
-// chatAccounts returns the usable accounts rotated round-robin so chat load
-// spreads across accounts.
-func (s *Server) chatAccounts() []*store.Account {
-	usable := s.usableAccounts()
-	if len(usable) == 0 {
-		return nil
-	}
-	start := int(s.chatRR.Add(1)-1) % len(usable)
-	return append(usable[start:len(usable):len(usable)], usable[:start]...)
-}
-
 // failoverable reports whether another account may succeed where this one
 // failed: bad/expired token or exhausted quota, before any output was sent.
 func failoverable(err error) bool {
@@ -249,7 +238,8 @@ func failoverable(err error) bool {
 // streamWithFailover runs the chat on each usable account in turn until one
 // succeeds, fails after producing output, or fails with a non-retryable error.
 func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, onDelta func(devin.Delta) error) (*devin.ChatResult, error) {
-	accs := s.chatAccounts()
+	model := devin.ResolveModel(req.Model)
+	accs := s.chatAccounts(model)
 	if len(accs) == 0 {
 		return nil, errNoAccount
 	}
@@ -268,8 +258,14 @@ func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, 
 		}
 		lastErr = err
 		var ue *devin.UpstreamError
-		if errors.As(err, &ue) && ue.Status == http.StatusUnauthorized {
-			s.markTokenExpired(acc.ID)
+		if errors.As(err, &ue) {
+			switch ue.Status {
+			case http.StatusUnauthorized:
+				s.markTokenExpired(acc.ID)
+			case http.StatusTooManyRequests:
+				// Park this account for this model until the stated reset.
+				s.cooldown.set(acc.ID, model, time.Duration(retryAfterSeconds(ue.Message))*time.Second)
+			}
 		}
 		if started || !failoverable(err) {
 			break
@@ -291,12 +287,7 @@ func accountLabel(a *store.Account) string {
 // markTokenExpired records on the account that its session token was rejected,
 // so the panel shows it needs a re-login.
 func (s *Server) markTokenExpired(id string) {
-	acc, err := s.accounts.Get(id)
-	if err != nil {
-		return
-	}
-	acc.UsageErr = "token expired or revoked"
-	_ = s.accounts.Save(acc)
+	s.accounts.Mutate(id, func(a *store.Account) { a.UsageErr = tokenExpiredMsg })
 }
 
 // finishReason maps a finished Devin result to an OpenAI finish_reason.
