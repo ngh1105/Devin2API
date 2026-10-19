@@ -4,13 +4,47 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Devin2API Admin</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128' width='128' height='128'%3E%3Cdefs%3E%3ClinearGradient id='d2a-bg' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%2314b8a6'/%3E%3Cstop offset='1' stop-color='%230369a1'/%3E%3C/linearGradient%3E%3ClinearGradient id='d2a-head' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23ffffff'/%3E%3Cstop offset='1' stop-color='%23d9f3ef'/%3E%3C/linearGradient%3E%3ClinearGradient id='d2a-visor' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%230b2f3a'/%3E%3Cstop offset='1' stop-color='%23061a22'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='128' height='128' rx='32' fill='url(%23d2a-bg)'/%3E%3Cpath d='M0 32a32 32 0 0 1 32-32h64a32 32 0 0 1 32 32v6c-20-10-44-14-64-14S20 28 0 38z' fill='%23fff' opacity='.1'/%3E%3Cpath d='M64 30V19' stroke='%23e6fffb' stroke-width='5' stroke-linecap='round'/%3E%3Ccircle cx='64' cy='15' r='7' fill='%2399f6e4' stroke='%23e6fffb' stroke-width='3'/%3E%3Crect x='17' y='54' width='10' height='24' rx='5' fill='%23cdeee8'/%3E%3Crect x='101' y='54' width='10' height='24' rx='5' fill='%23cdeee8'/%3E%3Crect x='24' y='30' width='80' height='70' rx='24' fill='url(%23d2a-head)'/%3E%3Crect x='33' y='45' width='62' height='36' rx='18' fill='url(%23d2a-visor)'/%3E%3Cg fill='none' stroke='%232dd4bf' stroke-width='5.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M52 55l-9 8 9 8'/%3E%3Cpath d='M76 55l9 8-9 8'/%3E%3C/g%3E%3Cpath d='M68 53l-8 20' stroke='%235eead4' stroke-width='4.5' stroke-linecap='round'/%3E%3Crect x='56' y='88' width='16' height='4.5' rx='2.25' fill='%2314b8a6' opacity='.55'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/web/styles.css">
 </head>
 <body id="app">
 
 <!-- Icon sprite: each icon is used by id (#i-name) from an svg use element.
      Icons: Phosphor Icons (duotone), https://phosphoricons.com, MIT License, Copyright (c) 2023 Phosphor Icons. -->
-<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+<svg xmlns="http://www.w3.org/2000/svg" class="sprite" aria-hidden="true">
+  <!-- Devin2API logo (original artwork, also in assets/logo.svg). -->
+  <symbol id="logo" viewBox="0 0 128 128">
+    <defs>
+      <linearGradient id="d2a-bg" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#14b8a6"/>
+        <stop offset="1" stop-color="#0369a1"/>
+      </linearGradient>
+      <linearGradient id="d2a-head" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#ffffff"/>
+        <stop offset="1" stop-color="#d9f3ef"/>
+      </linearGradient>
+      <linearGradient id="d2a-visor" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#0b2f3a"/>
+        <stop offset="1" stop-color="#061a22"/>
+      </linearGradient>
+    </defs>
+    <rect width="128" height="128" rx="32" fill="url(#d2a-bg)"/>
+    <path d="M0 32a32 32 0 0 1 32-32h64a32 32 0 0 1 32 32v6c-20-10-44-14-64-14S20 28 0 38z" fill="#fff" opacity=".1"/>
+    <path d="M64 30V19" stroke="#e6fffb" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="64" cy="15" r="7" fill="#99f6e4" stroke="#e6fffb" stroke-width="3"/>
+    <rect x="17" y="54" width="10" height="24" rx="5" fill="#cdeee8"/>
+    <rect x="101" y="54" width="10" height="24" rx="5" fill="#cdeee8"/>
+    <rect x="24" y="30" width="80" height="70" rx="24" fill="url(#d2a-head)"/>
+    <rect x="33" y="45" width="62" height="36" rx="18" fill="url(#d2a-visor)"/>
+    <g fill="none" stroke="#2dd4bf" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M52 55l-9 8 9 8"/>
+      <path d="M76 55l9 8-9 8"/>
+    </g>
+    <path d="M68 53l-8 20" stroke="#5eead4" stroke-width="4.5" stroke-linecap="round"/>
+    <rect x="56" y="88" width="16" height="4.5" rx="2.25" fill="#14b8a6" opacity=".55"/>
+  </symbol>
+  <symbol id="i-sun" viewBox="0 0 256 256"><path d="M184,128a56,56,0,1,1-56-56A56,56,0,0,1,184,128Z" opacity="0.2"/><path d="M120,40V16a8,8,0,0,1,16,0V40a8,8,0,0,1-16,0Zm72,88a64,64,0,1,1-64-64A64.07,64.07,0,0,1,192,128Zm-16,0a48,48,0,1,0-48,48A48.05,48.05,0,0,0,176,128ZM58.34,69.66A8,8,0,0,0,69.66,58.34l-16-16A8,8,0,0,0,42.34,53.66Zm0,116.68-16,16a8,8,0,0,0,11.32,11.32l16-16a8,8,0,0,0-11.32-11.32ZM192,72a8,8,0,0,0,5.66-2.34l16-16a8,8,0,0,0-11.32-11.32l-16,16A8,8,0,0,0,192,72Zm5.66,114.34a8,8,0,0,0-11.32,11.32l16,16a8,8,0,0,0,11.32-11.32ZM48,128a8,8,0,0,0-8-8H16a8,8,0,0,0,0,16H40A8,8,0,0,0,48,128Zm80,80a8,8,0,0,0-8,8v24a8,8,0,0,0,16,0V216A8,8,0,0,0,128,208Zm112-88H216a8,8,0,0,0,0,16h24a8,8,0,0,0,0-16Z"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 256 256"><path d="M224,64V176a16,16,0,0,1-16,16H48a16,16,0,0,1-16-16V64A16,16,0,0,1,48,48H208A16,16,0,0,1,224,64Z" opacity="0.2"/><path d="M208,40H48A24,24,0,0,0,24,64V176a24,24,0,0,0,24,24H208a24,24,0,0,0,24-24V64A24,24,0,0,0,208,40Zm8,136a8,8,0,0,1-8,8H48a8,8,0,0,1-8-8V64a8,8,0,0,1,8-8H208a8,8,0,0,1,8,8Zm-48,48a8,8,0,0,1-8,8H96a8,8,0,0,1,0-16h64A8,8,0,0,1,168,224Z"/></symbol>
   <symbol id="i-users" viewBox="0 0 256 256"><path d="M168,144a40,40,0,1,1-40-40A40,40,0,0,1,168,144ZM64,56A32,32,0,1,0,96,88,32,32,0,0,0,64,56Zm128,0a32,32,0,1,0,32,32A32,32,0,0,0,192,56Z" opacity="0.2"/><path d="M244.8,150.4a8,8,0,0,1-11.2-1.6A51.6,51.6,0,0,0,192,128a8,8,0,0,1,0-16,24,24,0,1,0-23.24-30,8,8,0,1,1-15.5-4A40,40,0,1,1,219,117.51a67.94,67.94,0,0,1,27.43,21.68A8,8,0,0,1,244.8,150.4ZM190.92,212a8,8,0,1,1-13.85,8,57,57,0,0,0-98.15,0,8,8,0,1,1-13.84-8,72.06,72.06,0,0,1,33.74-29.92,48,48,0,1,1,58.36,0A72.06,72.06,0,0,1,190.92,212ZM128,176a32,32,0,1,0-32-32A32,32,0,0,0,128,176ZM72,120a8,8,0,0,0-8-8A24,24,0,1,1,87.24,82a8,8,0,1,0,15.5-4A40,40,0,1,0,37,117.51,67.94,67.94,0,0,0,9.6,139.19a8,8,0,1,0,12.8,9.61A51.6,51.6,0,0,1,64,128,8,8,0,0,0,72,120Z"/></symbol>
   <symbol id="i-key" viewBox="0 0 256 256"><path d="M232,98.36C230.73,136.92,198.67,168,160.09,168a71.68,71.68,0,0,1-26.92-5.17h0L120,176H96v24H72v24H40a8,8,0,0,1-8-8V187.31a8,8,0,0,1,2.34-5.65l58.83-58.83h0A71.68,71.68,0,0,1,88,95.91c0-38.58,31.08-70.64,69.64-71.87A72,72,0,0,1,232,98.36Z" opacity="0.2"/><path d="M216.57,39.43A80,80,0,0,0,83.91,120.78L28.69,176A15.86,15.86,0,0,0,24,187.31V216a16,16,0,0,0,16,16H72a8,8,0,0,0,8-8V208H96a8,8,0,0,0,8-8V184h16a8,8,0,0,0,5.66-2.34l9.56-9.57A79.73,79.73,0,0,0,160,176h.1A80,80,0,0,0,216.57,39.43ZM224,98.1c-1.09,34.09-29.75,61.86-63.89,61.9H160a63.7,63.7,0,0,1-23.65-4.51,8,8,0,0,0-8.84,1.68L116.69,168H96a8,8,0,0,0-8,8v16H72a8,8,0,0,0-8,8v16H40V187.31l58.83-58.82a8,8,0,0,0,1.68-8.84A63.72,63.72,0,0,1,96,95.92c0-34.14,27.81-62.8,61.9-63.89A64,64,0,0,1,224,98.1ZM192,76a12,12,0,1,1-12-12A12,12,0,0,1,192,76Z"/></symbol>
   <symbol id="i-list" viewBox="0 0 256 256"><path d="M216,64V192H88V64Z" opacity="0.2"/><path d="M80,64a8,8,0,0,1,8-8H216a8,8,0,0,1,0,16H88A8,8,0,0,1,80,64Zm136,56H88a8,8,0,1,0,0,16H216a8,8,0,0,0,0-16Zm0,64H88a8,8,0,1,0,0,16H216a8,8,0,0,0,0-16ZM44,52A12,12,0,1,0,56,64,12,12,0,0,0,44,52Zm0,64a12,12,0,1,0,12,12A12,12,0,0,0,44,116Zm0,64a12,12,0,1,0,12,12A12,12,0,0,0,44,180Z"/></symbol>
@@ -35,18 +69,29 @@
 <div class="shell">
   <aside class="sidebar">
     <div class="brand">
-      <span class="brand-mark">D</span>
-      <span class="brand-text"><strong>Devin2API</strong><small>Admin</small></span>
+      <svg class="brand-mark"><use href="#logo"/></svg>
+      <span class="brand-text"><strong>Devin2API</strong><small>Admin panel</small></span>
     </div>
     <nav class="tab-nav">
-      <button class="tab active" data-tab="accounts"><svg class="icon"><use href="#i-users"/></svg><span>Accounts</span></button>
-      <button class="tab" data-tab="tokens"><svg class="icon"><use href="#i-key"/></svg><span>API Keys</span></button>
+      <span class="nav-label">Workspace</span>
+      <button class="tab active" data-tab="accounts"><svg class="icon"><use href="#i-users"/></svg><span>Accounts</span><span class="nav-count" id="nav-count-accounts"></span></button>
+      <button class="tab" data-tab="tokens"><svg class="icon"><use href="#i-key"/></svg><span>API Keys</span><span class="nav-count" id="nav-count-tokens"></span></button>
       <button class="tab" data-tab="logs"><svg class="icon"><use href="#i-list"/></svg><span>Logs</span></button>
+      <span class="nav-label">System</span>
       <button class="tab" data-tab="settings"><svg class="icon"><use href="#i-gear"/></svg><span>Settings</span></button>
       <button class="tab" data-tab="api"><svg class="icon"><use href="#i-code"/></svg><span>API</span></button>
     </nav>
     <div class="sidebar-foot">
-      <button id="btn-theme" class="btn-ghost" title="Toggle light / dark"><svg class="icon"><use href="#i-moon"/></svg><span>Theme</span></button>
+      <div class="status-card">
+        <div class="status-line"><span class="status-dot"></span><strong>Server online</strong></div>
+        <div class="status-meta" id="status-accounts">—</div>
+        <div class="status-meta mono" id="status-version"></div>
+      </div>
+      <div class="theme-switch" role="radiogroup" aria-label="Theme">
+        <button class="theme-opt" data-theme-choice="light" title="Light" role="radio"><svg class="icon"><use href="#i-sun"/></svg></button>
+        <button class="theme-opt" data-theme-choice="system" title="Follow system" role="radio"><svg class="icon"><use href="#i-monitor"/></svg></button>
+        <button class="theme-opt" data-theme-choice="dark" title="Dark" role="radio"><svg class="icon"><use href="#i-moon"/></svg></button>
+      </div>
       <button id="btn-logout" class="btn-ghost hidden"><svg class="icon"><use href="#i-logout"/></svg><span>Log out</span></button>
     </div>
   </aside>
@@ -221,16 +266,77 @@
 </div>
 
 <!-- Admin login (shown when DEVIN2API_ADMIN_PASSWORD is set) -->
-<div id="login-overlay" class="modal-overlay hidden">
-  <form class="modal modal-sm" id="admin-login-form">
-    <div class="brand brand-center">
-      <span class="brand-mark">D</span>
-      <span class="brand-text"><strong>Devin2API</strong><small>Admin login</small></span>
+<div id="login-overlay" class="login-screen hidden">
+  <div class="login-art">
+    <!-- Illustration (original artwork): clients on the left reach Devin
+         accounts on the right through the gateway in the middle. -->
+    <svg class="login-illustration" viewBox="0 0 640 800" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+    <defs>
+        <linearGradient id="art-bg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#04131a"/><stop offset=".55" stop-color="#062a2e"/><stop offset="1" stop-color="#081624"/>
+        </linearGradient>
+        <radialGradient id="art-glow" cx=".5" cy=".5" r=".5">
+          <stop offset="0" stop-color="#2dd4bf" stop-opacity=".38"/><stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+        </radialGradient>
+        <pattern id="art-dots" width="26" height="26" patternUnits="userSpaceOnUse">
+          <circle cx="2" cy="2" r="1.3" fill="#5eead4" opacity=".16"/>
+        </pattern>
+      </defs>
+      <rect width="640" height="800" fill="url(#art-bg)"/>
+      <rect width="640" height="800" fill="url(#art-dots)"/>
+      <circle cx="320" cy="330" r="300" fill="url(#art-glow)"/>
+      <g class="art-links" fill="none" stroke="#2dd4bf" stroke-width="1.6" stroke-linecap="round">
+        <path d="M320 330 C230 330 200 170 110 170"/>
+        <path d="M320 330 C220 330 190 330 90 330"/>
+        <path d="M320 330 C230 330 200 490 110 490"/>
+        <path d="M320 330 C410 330 440 170 530 170"/>
+        <path d="M320 330 C420 330 450 330 550 330"/>
+        <path d="M320 330 C410 330 440 490 530 490"/>
+      </g>
+      <g class="art-nodes" fill="#0b2228" stroke="#2dd4bf" stroke-width="1.5">
+        <circle cx="110" cy="170" r="9"/><circle cx="90" cy="330" r="9"/><circle cx="110" cy="490" r="9"/>
+        <rect x="518" y="158" width="24" height="24" rx="7"/><rect x="538" y="318" width="24" height="24" rx="7"/><rect x="518" y="478" width="24" height="24" rx="7"/>
+      </g>
+      <g font-family="ui-monospace, Menlo, Consolas, monospace" font-size="13" fill="#99f6e4" opacity=".75">
+        <text x="110" y="148" text-anchor="middle">/v1/chat</text>
+        <text x="90" y="308" text-anchor="middle">/v1/messages</text>
+        <text x="110" y="468" text-anchor="middle">/v1/responses</text>
+        <text x="530" y="148" text-anchor="middle">account</text>
+        <text x="550" y="308" text-anchor="middle">account</text>
+        <text x="530" y="468" text-anchor="middle">account</text>
+      </g>
+      <circle cx="320" cy="330" r="66" fill="#082a2e" stroke="#2dd4bf" stroke-opacity=".5" stroke-width="1.5"/>
+      <circle cx="320" cy="330" r="84" fill="none" stroke="#2dd4bf" stroke-opacity=".18" stroke-width="1.5"/>
+      <use href="#logo" x="276" y="286" width="88" height="88"/>
+    </svg>
+    <div class="login-copy">
+      <h2>One gateway for all your Devin accounts</h2>
+      <p>OpenAI- and Anthropic-compatible API with quota-aware rotation and failover.</p>
+      <ul>
+        <li><svg class="icon"><use href="#i-refresh"/></svg>Rotates accounts by quota left</li>
+        <li><svg class="icon"><use href="#i-code"/></svg>Works with Claude Code and OpenAI SDKs</li>
+        <li><svg class="icon"><use href="#i-server"/></svg>Self-hosted: tokens stay in your data dir</li>
+      </ul>
     </div>
-    <input id="admin-password" type="password" placeholder="Admin password" autocomplete="current-password" required>
-    <button type="submit" class="btn-block">Log in</button>
-    <p id="admin-login-status" class="status-msg"></p>
-  </form>
+  </div>
+  <div class="login-panel">
+    <form class="login-card" id="admin-login-form">
+      <div class="brand">
+        <svg class="brand-mark"><use href="#logo"/></svg>
+        <span class="brand-text"><strong>Devin2API</strong><small>Admin panel</small></span>
+      </div>
+      <div>
+        <h1>Sign in</h1>
+        <p class="lead">Enter the password set in <code>DEVIN2API_ADMIN_PASSWORD</code>.</p>
+      </div>
+      <label class="field">
+        <span>Admin password</span>
+        <input id="admin-password" type="password" placeholder="••••••••" autocomplete="current-password" required>
+      </label>
+      <button type="submit" class="btn-block">Sign in</button>
+      <p id="admin-login-status" class="status-msg login-error"></p>
+    </form>
+  </div>
 </div>
 
 <!-- Add-account modal -->

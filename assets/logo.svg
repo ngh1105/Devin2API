@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- Devin2API logo (original artwork): a robot engineer whose visor reads </>,
+       with an antenna for the API link. -->
+  <defs>
+    <linearGradient id="d2a-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#0369a1"/>
+    </linearGradient>
+    <linearGradient id="d2a-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d9f3ef"/>
+    </linearGradient>
+    <linearGradient id="d2a-visor" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b2f3a"/>
+      <stop offset="1" stop-color="#061a22"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="32" fill="url(#d2a-bg)"/>
+  <path d="M0 32a32 32 0 0 1 32-32h64a32 32 0 0 1 32 32v6c-20-10-44-14-64-14S20 28 0 38z" fill="#fff" opacity=".1"/>
+  <!-- antenna -->
+  <path d="M64 30V19" stroke="#e6fffb" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="64" cy="15" r="7" fill="#99f6e4" stroke="#e6fffb" stroke-width="3"/>
+  <!-- ears -->
+  <rect x="17" y="54" width="10" height="24" rx="5" fill="#cdeee8"/>
+  <rect x="101" y="54" width="10" height="24" rx="5" fill="#cdeee8"/>
+  <!-- head -->
+  <rect x="24" y="30" width="80" height="70" rx="24" fill="url(#d2a-head)"/>
+  <!-- visor with </> -->
+  <rect x="33" y="45" width="62" height="36" rx="18" fill="url(#d2a-visor)"/>
+  <g fill="none" stroke="#2dd4bf" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M52 55l-9 8 9 8"/>
+    <path d="M76 55l9 8-9 8"/>
+  </g>
+  <path d="M68 53l-8 20" stroke="#5eead4" stroke-width="4.5" stroke-linecap="round"/>
+  <!-- mouth / status light -->
+  <rect x="56" y="88" width="16" height="4.5" rx="2.25" fill="#14b8a6" opacity=".55"/>
+</svg>

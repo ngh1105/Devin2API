@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.svg" width="112" alt="Devin2API logo"></p>
+
 # Devin2API
 
 OpenAI-compatible reverse proxy API for Devin — built from scratch in Go.
