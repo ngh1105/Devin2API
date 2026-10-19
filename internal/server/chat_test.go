@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -445,5 +446,77 @@ func TestChatRejectsBadTools(t *testing.T) {
 	}
 	if len(*bodies) != 0 {
 		t.Error("invalid request reached upstream")
+	}
+}
+
+func TestToolCallIDRoundTrip(t *testing.T) {
+	for _, raw := range []string{
+		"get_weather:0#0f07da5621b14638a151fb79bb189774",
+		"call_ebaf1cb8e07a42ca94261a64#622bfa6a1b2448efba7281fc47cea28c",
+		"dv_looks_encoded", // safe but prefixed: must still be encoded
+		"call_plain_123",   // already safe: unchanged
+	} {
+		enc := encodeToolCallID(raw)
+		if !regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(enc) {
+			t.Errorf("encode(%q) = %q is not client-safe", raw, enc)
+		}
+		if got := decodeToolCallID(enc); got != raw {
+			t.Errorf("decode(encode(%q)) = %q", raw, got)
+		}
+	}
+	if encodeToolCallID("call_plain_123") != "call_plain_123" {
+		t.Error("safe id was rewritten")
+	}
+	// Ids the proxy never issued pass through untouched.
+	if got := decodeToolCallID("toolu_01ABC"); got != "toolu_01ABC" {
+		t.Errorf("foreign id changed: %q", got)
+	}
+}
+
+// TestChatToolCallIDsEncodedAndDecoded: an upstream id with '#'/':' reaches
+// the client encoded, and the client's echo reaches upstream as the original.
+func TestChatToolCallIDsEncodedAndDecoded(t *testing.T) {
+	const raw = "get_weather:0#abc123"
+	var mu sync.Mutex
+	var bodies [][]byte
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if strings.HasSuffix(r.URL.Path, "/GetCliModelConfigs") {
+			return
+		}
+		mu.Lock()
+		bodies = append(bodies, b)
+		mu.Unlock()
+		c := append(devin.PwFieldString(1, raw), devin.PwFieldString(2, "get_weather")...)
+		c = append(c, devin.PwFieldString(3, `{"city":"Hue"}`)...)
+		w.Write(connectFrame(0, devin.PwFieldBytes(6, c)))
+		w.Write(connectFrame(2, []byte("{}")))
+	}))
+	defer up.Close()
+	accs := mustAccounts(t)
+	accs.Save(store.AccountFromLogin("u", "usr_id", "org", "eyJtok", "", nil))
+	srv := New(config.Config{Listen: ":0"}, accs, mustTokens(t))
+	srv.loginServerBase = up.URL
+
+	rec := postChat(srv, `{"messages":[{"role":"user","content":"weather?"}],`+weatherTools+`}`)
+	var resp openai.ChatCompletion
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	id := resp.Choices[0].Message.ToolCalls[0].ID
+	if strings.ContainsAny(id, "#:") || !strings.HasPrefix(id, toolIDPrefix) {
+		t.Fatalf("client got unsafe id %q", id)
+	}
+
+	// Stream path encodes the same way.
+	srec := postChat(srv, `{"stream":true,"messages":[{"role":"user","content":"weather?"}],`+weatherTools+`}`)
+	if !strings.Contains(srec.Body.String(), `"id":"`+id+`"`) {
+		t.Errorf("stream id differs from non-stream id %q: %s", id, srec.Body)
+	}
+
+	postChat(srv, `{"messages":[{"role":"user","content":"weather?"},
+		{"role":"assistant","tool_calls":[{"id":"`+id+`","type":"function","function":{"name":"get_weather","arguments":"{}"}}]},
+		{"role":"tool","tool_call_id":"`+id+`","content":"sunny"}],`+weatherTools+`}`)
+	last := string(bodies[len(bodies)-1])
+	if strings.Count(last, raw) != 2 || strings.Contains(last, id) {
+		t.Errorf("upstream did not get the original id twice (call + result)")
 	}
 }

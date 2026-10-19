@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -59,14 +61,14 @@ func toDevinRequest(req openai.ChatRequest) (devin.ChatRequest, error) {
 				if tc.ID == "" || tc.Function.Name == "" {
 					return out, fmt.Errorf("messages[%d].tool_calls[%d]: id and function.name are required", i, j)
 				}
-				p.ToolCalls = append(p.ToolCalls, devin.ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+				p.ToolCalls = append(p.ToolCalls, devin.ToolCall{ID: decodeToolCallID(tc.ID), Name: tc.Function.Name, Arguments: tc.Function.Arguments})
 			}
 			out.Prompts = append(out.Prompts, p)
 		case "tool":
 			if m.ToolCallID == "" {
 				return out, fmt.Errorf("messages[%d]: tool_call_id is required for role \"tool\"", i)
 			}
-			out.Prompts = append(out.Prompts, devin.Prompt{Source: devin.SourceToolResult, Text: text, ToolCallID: m.ToolCallID})
+			out.Prompts = append(out.Prompts, devin.Prompt{Source: devin.SourceToolResult, Text: text, ToolCallID: decodeToolCallID(m.ToolCallID)})
 		default:
 			return out, fmt.Errorf("messages[%d]: role %q is not supported", i, m.Role)
 		}
@@ -327,9 +329,9 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request, dreq d
 			// First fragment of a call carries id/type/name; later ones only
 			// append arguments, matched by index as OpenAI clients expect.
 			idx := tc.Index
-			call := openai.ToolCall{Index: &idx, ID: tc.ID, Function: openai.FunctionCall{Name: tc.Name, Arguments: tc.Arguments}}
+			call := openai.ToolCall{Index: &idx, Function: openai.FunctionCall{Name: tc.Name, Arguments: tc.Arguments}}
 			if tc.ID != "" {
-				call.Type = "function"
+				call.ID, call.Type = encodeToolCallID(tc.ID), "function"
 			}
 			d.ToolCalls = []openai.ToolCall{call}
 		}
@@ -364,6 +366,38 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request, dreq d
 	}
 }
 
+// Upstream tool call ids can contain '#' and ':' (e.g. "get_weather:0#ab12"),
+// which clients that require [A-Za-z0-9_-] ids (Anthropic-format bridges)
+// reject. Such ids are sent to clients as "dv_" + base64url(raw) and decoded
+// back when the client returns them, so upstream always sees its own id.
+const toolIDPrefix = "dv_"
+
+var safeToolID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// encodeToolCallID makes an upstream id safe for clients. Ids that are
+// already safe pass through unchanged, unless they could be mistaken for an
+// encoded id.
+func encodeToolCallID(raw string) string {
+	if safeToolID.MatchString(raw) && !strings.HasPrefix(raw, toolIDPrefix) {
+		return raw
+	}
+	return toolIDPrefix + base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+// decodeToolCallID reverses encodeToolCallID. Ids it did not produce are
+// returned unchanged.
+func decodeToolCallID(id string) string {
+	enc, ok := strings.CutPrefix(id, toolIDPrefix)
+	if !ok {
+		return id
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(enc)
+	if err != nil || len(raw) == 0 {
+		return id
+	}
+	return string(raw)
+}
+
 // openAIToolCalls converts complete upstream tool calls for a non-streaming
 // response.
 func openAIToolCalls(calls []devin.ToolCall) []openai.ToolCall {
@@ -376,7 +410,7 @@ func openAIToolCalls(calls []devin.ToolCall) []openai.ToolCall {
 		if args == "" {
 			args = "{}"
 		}
-		out[i] = openai.ToolCall{ID: c.ID, Type: "function", Function: openai.FunctionCall{Name: c.Name, Arguments: args}}
+		out[i] = openai.ToolCall{ID: encodeToolCallID(c.ID), Type: "function", Function: openai.FunctionCall{Name: c.Name, Arguments: args}}
 	}
 	return out
 }
