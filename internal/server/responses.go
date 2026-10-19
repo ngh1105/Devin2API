@@ -154,7 +154,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.stats.requests.Add(1)
+	ctx, tr := s.startTrace(r, "/v1/responses", req.Model, dreq, req.Stream)
 	model := req.Model
 	if model == "" {
 		model = "devin"
@@ -165,9 +165,9 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	seg := newSegmenter(rw, true)
 
-	res, err := s.streamWithFailover(r.Context(), dreq, seg.feed)
+	res, err := s.streamWithFailover(ctx, dreq, seg.feed)
+	s.finishTrace(ctx, tr, res, err)
 	if err != nil {
-		s.stats.failed.Add(1)
 		status, msg := upstreamStatus(err)
 		if rw.sse == nil || !rw.sse.started {
 			setRetryAfter(w, status, err)

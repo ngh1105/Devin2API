@@ -150,16 +150,25 @@ Refresh per account (Accounts tab → Refresh) or refresh all. Errors surface as
 
 ## Panel
 
-Single-page app with four tabs (URL routes):
+Single-page app at `/web/` with five tabs:
 
-| Tab              | Route                  | Contents                                     |
-|------------------|------------------------|----------------------------------------------|
-| **Accounts**     | `/web/accounts.html`   | Accounts grid, add/rename/delete/import, refresh usage |
-| **API Keys**     | `/web/tokens.html`     | Create/list/delete proxy tokens              |
-| **Settings**     | `/web/settings.html`   | Server URL, port, CLI login button           |
-| **API**          | `/web/api.html`        | Send test POST to `/v1/*` endpoints          |
+| Tab          | Contents                                                        |
+|--------------|-----------------------------------------------------------------|
+| **Accounts** | Account list with usage bars; add (browser login or JSON import), enable/disable, rename, delete, refresh usage |
+| **API Keys** | Create, list (masked) and revoke proxy API keys                 |
+| **Logs**     | The last 200 chat requests: endpoint, model, account, status, duration, time to first output, tokens, failover attempts, upstream error |
+| **Settings** | Listen address and data directory (set via environment variables) |
+| **API**      | Endpoint reference and a curl example                           |
 
-Stats grid (top of Accounts tab): Accounts, Models, Requests, Failed.
+Stats grid at the top: Accounts, Models, Requests, Failed (requests and failures count since the server started).
+
+Every chat request is also logged to the console (stderr) as one line, for example:
+
+```
+INFO chat endpoint=/v1/messages model=claude-sonnet-4-6 stream=true account=acc_... attempts=1 status=200 ms=972 first_ms=889 in=418 out=5 finish=stop
+```
+
+Logs hold metadata only; prompts, outputs and tokens are never recorded.
 
 ---
 

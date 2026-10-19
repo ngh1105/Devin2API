@@ -217,3 +217,8 @@ dl#api-dl dd { color: #cbd5e1; margin-left: 1rem; margin-bottom: .25rem; font-si
 
 .toast-err { border-color: #ef4444; }
 .note { color: #94a3b8; font-size: .82rem; margin-top: .75rem; }
+
+/* Logs tab */
+td.status-ok { color: #34d399; }
+td.status-err { color: #f87171; }
+#log-table td { font-size: .82rem; }

@@ -253,11 +253,14 @@ func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, 
 	if len(accs) == 0 {
 		return nil, errNoAccount
 	}
+	tr := traceFrom(ctx)
 	var lastErr error
 	for _, acc := range accs {
+		tr.attempt(acc.ID, accountLabel(acc))
 		started := false
 		res, err := devin.StreamChat(ctx, s.loginServerBase, acc.Tokens.SessionToken, req, func(d devin.Delta) error {
 			started = true
+			tr.output()
 			return onDelta(d)
 		})
 		if err == nil {
@@ -273,6 +276,16 @@ func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, 
 		}
 	}
 	return nil, lastErr
+}
+
+// accountLabel names an account for logs: nickname, email, user name or id.
+func accountLabel(a *store.Account) string {
+	for _, s := range []string{a.Nickname, a.Email, a.UserName} {
+		if s != "" {
+			return s
+		}
+	}
+	return a.ID
 }
 
 // markTokenExpired records on the account that its session token was rejected,
@@ -400,7 +413,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.stats.requests.Add(1)
+	ctx, tr := s.startTrace(r, "/v1/chat/completions", req.Model, dreq, req.Stream)
 	id := "chatcmpl-" + randID()
 	created := time.Now().Unix()
 	model := req.Model
@@ -409,13 +422,13 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		s.streamCompletion(w, r, dreq, id, model, created)
+		s.streamCompletion(ctx, tr, w, dreq, id, model, created)
 		return
 	}
 
-	text, thinking, res, err := s.collectChat(r.Context(), dreq)
+	text, thinking, res, err := s.collectChat(ctx, dreq)
+	s.finishTrace(ctx, tr, res, err)
 	if err != nil {
-		s.stats.failed.Add(1)
 		status, msg := upstreamStatus(err)
 		setRetryAfter(w, status, err)
 		openai.WriteError(w, status, msg)
@@ -437,7 +450,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 // streamCompletion writes the chat as OpenAI SSE chunks. Headers are only
 // sent once the first delta arrives, so failures before any output still
 // return a proper HTTP error status (and allow account failover).
-func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request, dreq devin.ChatRequest, id, model string, created int64) {
+func (s *Server) streamCompletion(ctx context.Context, tr *chatTrace, w http.ResponseWriter, dreq devin.ChatRequest, id, model string, created int64) {
 	flusher, _ := w.(http.Flusher)
 	headerSent := false
 	send := func(c openai.ChatChunk) error {
@@ -460,7 +473,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request, dreq d
 	}
 
 	first := true
-	res, err := s.streamWithFailover(r.Context(), dreq, func(dd devin.Delta) error {
+	res, err := s.streamWithFailover(ctx, dreq, func(dd devin.Delta) error {
 		d := openai.Delta{Content: dd.Text, ReasoningContent: dd.Thinking}
 		if tc := dd.ToolCall; tc != nil {
 			// First fragment of a call carries id/type/name; later ones only
@@ -478,8 +491,8 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request, dreq d
 		}
 		return send(openai.ChatChunk{Choices: []openai.ChunkChoice{{Delta: d}}})
 	})
+	s.finishTrace(ctx, tr, res, err)
 	if err != nil {
-		s.stats.failed.Add(1)
 		status, msg := upstreamStatus(err)
 		if !headerSent {
 			setRetryAfter(w, status, err)
