@@ -4,12 +4,6 @@
 
   // ---- XSS-safe helpers ----
 
-  function esc(text) {
-    var d = document.createElement("div");
-    d.textContent = String(text);
-    return d.innerHTML;
-  }
-
   function textNode(txt) {
     return document.createTextNode(String(txt));
   }
@@ -224,24 +218,26 @@
     return { label: "Active", cls: "badge badge-active" };
   }
 
+  // usageBarHTML builds markup from numbers only (coerced with Number), so no
+  // server string reaches innerHTML.
   function usageBarHTML(a) {
     if (!a.usage) return "<td>—</td>";
-    var daily = a.usage.daily_remaining_percent;
-    var weekly = a.usage.weekly_remaining_percent;
-    if (daily != null && weekly != null) {
-      var usedPct = 100 - daily;
-      var barCls = "usage-bar high";
+    var daily = Number(a.usage.daily_remaining_percent);
+    var weekly = Number(a.usage.weekly_remaining_percent);
+    if (isFinite(daily) && isFinite(weekly)) {
+      var left = Math.min(daily, weekly); // the tighter limit decides
+      var usedPct = Math.max(0, Math.min(100 - left, 100));
+      var barCls = "usage-bar";
       if (usedPct > 90) barCls = "usage-bar critical";
       else if (usedPct > 70) barCls = "usage-bar high";
-      return "<td><div class='usage-bar-track'><div class='" + barCls + "' style='width:" + Math.min(usedPct, 100) + "%'></div></div><span>Daily: " + daily + "% left</span></td>";
+      return "<td><div class='usage-bar-track'><div class='" + barCls + "' style='width:" + usedPct + "%'></div></div><span>Daily " + daily + "% · weekly " + weekly + "% left</span></td>";
     }
     return "<td>—</td>";
   }
 
+  // identityCell returns plain text; callers insert it as a text node.
   function identityCell(a) {
-    if (a.email) return esc(a.email);
-    if (a.user_name) return esc(a.user_name);
-    return esc(a.id);
+    return a.email || a.user_name || a.id;
   }
 
   var acctCache = [];
@@ -323,15 +319,16 @@
       var delBtn = document.createElement("button");
       delBtn.className = "btn-sm btn-del";
       delBtn.textContent = "Delete";
-      delBtn.onclick = (function (id) {
+      delBtn.onclick = (function (id, label) {
         return function () {
-          if (!confirm("Delete account " + (a.nickname || a.id) + "?")) return;
+          if (!confirm("Delete account " + label + "?")) return;
           apiDelete("/admin/api/accounts/" + id)
-            .then(loadAccounts)
+            .then(function () { loadAccounts(); loadStats(); })
             .catch(function (e) { toast(e.message, "#f87171"); });
         };
-      })(a.id);
+      })(a.id, a.nickname || identityCell(a));
       tdAct.appendChild(delBtn);
+      tr.appendChild(tdAct);
 
       tbody.appendChild(tr);
     }
@@ -351,7 +348,10 @@
     if (ids.length === 0) return toast("No accounts with tokens to refresh", "#f87171");
     var idx = 0;
     function next() {
-      if (idx >= ids.length) return toast("Refresh complete", "#34d399");
+      if (idx >= ids.length) {
+        loadAccounts();
+        return toast("Refresh complete", "#34d399");
+      }
       var id = ids[idx++];
       apiPost("/admin/api/accounts/" + id + "/usage/refresh")
         .then(function () { next(); })
@@ -433,6 +433,8 @@
   }
 
   function pollLoginStatus() {
+    // A second "Start login" replaces the first poll instead of adding one.
+    if (loginPollInterval) clearInterval(loginPollInterval);
     loginPollInterval = setInterval(function () {
       apiGet("/admin/api/login/status").then(function (resp) {
         if (resp.status === "complete") {
@@ -441,6 +443,7 @@
           document.getElementById("login-status").textContent = "Login complete!";
           closeModal();
           loadAccounts();
+          loadStats();
           toast("Account added via login", "#34d399");
         } else if (resp.status === "error") {
           clearInterval(loginPollInterval);
@@ -474,15 +477,29 @@
     document.getElementById("modal-overlay").className = "modal-overlay";
     document.getElementById("import-status").textContent = "";
     document.getElementById("import-ta").value = "";
+    document.getElementById("manual-status").textContent = "";
+    document.getElementById("manual-token").value = "";
     document.getElementById("login-area").className = "login-area hidden";
   }
 
+  // Closing the dialog while a browser login is pending cancels it on the
+  // server too, so it does not stay pending in the background.
   function closeModal() {
     document.getElementById("modal-overlay").className = "modal-overlay hidden";
-    if (loginPollInterval) {
-      clearInterval(loginPollInterval);
-      loginPollInterval = null;
-    }
+    if (loginPollInterval) cancelLogin();
+  }
+
+  function addManualToken() {
+    var status = document.getElementById("manual-status");
+    var tok = document.getElementById("manual-token").value.trim();
+    if (!tok) return status.textContent = "paste a token first";
+    status.textContent = "Checking token…";
+    apiPost("/admin/api/login/manual", JSON.stringify({ token: tok })).then(function () {
+      closeModal();
+      loadAccounts();
+      loadStats();
+      toast("Account added", "#34d399");
+    }).catch(function (e) { status.textContent = e.message; });
   }
 
   // ---- API tab (static content) ----
@@ -535,6 +552,7 @@
     document.getElementById("btn-modal-close").onclick = closeModal;
     document.getElementById("btn-login-start").onclick = startLoginFlow;
     document.getElementById("btn-login-cancel").onclick = cancelLogin;
+    document.getElementById("btn-manual-token").onclick = addManualToken;
     document.getElementById("btn-import").onclick = function () {
       var raw = document.getElementById("import-ta").value.trim();
       if (!raw) return document.getElementById("import-status").textContent = "paste JSON first";
@@ -569,6 +587,7 @@
       apiPost("/admin/api/tokens", "").then(function (tok) {
         codeEl.textContent = tok.token;
         box.className = "new-token-box";
+        loadTokens(); // list the new key (masked)
       }).catch(function (e) {
         box.textContent = e.message;
         box.className = "new-token-box err";

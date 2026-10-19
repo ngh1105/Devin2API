@@ -107,13 +107,20 @@
     <div class="method-cards">
       <div class="method-card">
         <h4>Login with browser</h4>
-        <p>Open a Devin CLI login URL in your browser and authenticate.</p>
+        <p>Open a Devin CLI login URL in your browser and authenticate. The browser must run on the same machine as the server (the login redirects to a local port).</p>
         <button id="btn-login-start">Start login</button>
         <div id="login-area" class="login-area hidden">
           <p id="login-status">Waiting…</p>
           <a id="login-link" href="#" target="_blank" rel="noopener"></a>
           <button id="btn-login-cancel">Cancel</button>
         </div>
+      </div>
+      <div class="method-card">
+        <h4>Paste session token</h4>
+        <p>Paste a Devin session token (from another machine or the CLI). Its profile and usage are fetched automatically.</p>
+        <input id="manual-token" type="password" placeholder="devin-session-token$eyJ… or eyJ…" autocomplete="off">
+        <button id="btn-manual-token">Add token</button>
+        <p id="manual-status" class="status-msg"></p>
       </div>
       <div class="method-card">
         <h4>Import JSON</h4>

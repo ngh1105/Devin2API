@@ -225,3 +225,6 @@ td.status-err { color: #f87171; }
 
 /* Admin login */
 #admin-login-form input { width: 100%; margin-bottom: .75rem; }
+
+/* Manual token */
+#manual-token { width: 100%; margin-bottom: .5rem; }
