@@ -18,7 +18,10 @@ type pkcePair struct {
 // base64url-encoded.
 func newPKCEPair(rng io.Reader) pkcePair {
 	b := make([]byte, 32)
-	io.ReadFull(rng, b)
+	if _, err := io.ReadFull(rng, b); err != nil {
+		// A short read would yield a guessable verifier; never continue.
+		panic("pkce: random source failed: " + err.Error())
+	}
 	raw := base64.RawURLEncoding.EncodeToString(b)
 	hash := sha256.Sum256([]byte(raw))
 	return pkcePair{

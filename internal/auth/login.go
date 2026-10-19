@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"html"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -38,79 +40,98 @@ type AuthError struct {
 
 func (e *AuthError) Error() string { return "auth: " + e.Stage + ": " + e.Message }
 
-// noRedirectClient returns an http.Client that never follows redirects —
-// callers inspect Location headers themselves. Uses a cookie jar so session
-// cookies (did/auth0) set by /authorize persist across requests.
-func noRedirectClient() *http.Client {
+const (
+	// maxHops bounds the redirect/page chain of the hosted login flow.
+	maxHops = 12
+	// maxPageBytes caps how much of an HTML page or error body is read.
+	maxPageBytes = 1 << 20
+	userAgent    = "Devin2API"
+)
+
+var (
+	// stateInputRe matches the hidden state <input>, whatever the attribute order.
+	stateInputRe = regexp.MustCompile(`(?is)<input\b[^>]*\bname=["']state["'][^>]*>`)
+	valueAttrRe  = regexp.MustCompile(`(?is)\bvalue=["']([^"']*)["']`)
+	// errorElemRe matches Universal Login's inline error, e.g.
+	// <span id="error-element-password" ...>Wrong email or password</span>.
+	errorElemRe = regexp.MustCompile(`(?is)id=["']error-element-[^"']*["'][^>]*>\s*([^<]+?)\s*<`)
+)
+
+// flowClient returns a client sharing c's transport that never follows
+// redirects (the flow inspects each Location itself) and keeps session
+// cookies across the hosted-login pages.
+func (c *Client) flowClient() *http.Client {
 	jar, _ := cookiejar.New(nil)
 	return &http.Client{
-		Jar: jar,
+		Transport: c.httpClt.Transport,
+		Timeout:   c.httpClt.Timeout,
+		Jar:       jar,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
 }
 
-// do performs an HTTP request against c's baseURL using cl.
-func (c *Client) do(cl *http.Client, ctx context.Context, method, uri string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+uri, nil)
+// send performs a GET (form == nil) or form POST to u.
+func send(ctx context.Context, cl *http.Client, u *url.URL, form url.Values) (*http.Response, error) {
+	method, body := http.MethodGet, io.Reader(nil)
+	if form != nil {
+		method, body = http.MethodPost, strings.NewReader(form.Encode())
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
 		return nil, err
 	}
+	if form != nil {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	req.Header.Set("User-Agent", userAgent)
 	return cl.Do(req)
 }
 
-// doFormPost performs a POST with application/x-www-form-urlencoded body.
-func (c *Client) doFormPost(cl *http.Client, ctx context.Context, uri string, data url.Values) (*http.Response, error) {
-	bodyStr := data.Encode()
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+uri, strings.NewReader(bodyStr))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Content-Length", strconv.Itoa(len(bodyStr)))
-	req.Header.Set("User-Agent", "Devin2API")
-	return cl.Do(req)
+// readBody reads up to maxPageBytes of resp.Body and closes it.
+func readBody(resp *http.Response) ([]byte, error) {
+	defer resp.Body.Close()
+	return io.ReadAll(io.LimitReader(resp.Body, maxPageBytes))
 }
 
-// expectOK checks resp.StatusCode == want. Caller must close resp.Body.
-func expectOK(resp *http.Response, want int) bool {
-	if resp.StatusCode != want {
-		return false
+// formState returns the HTML-unescaped value of the hidden state input.
+func formState(body []byte) (string, bool) {
+	tag := stateInputRe.Find(body)
+	if tag == nil {
+		return "", false
 	}
-	return true
+	m := valueAttrRe.FindSubmatch(tag)
+	if m == nil {
+		return "", false
+	}
+	return html.UnescapeString(string(m[1])), true
 }
 
-// extractHidden returns the value of the hidden <input name="n"> from body bytes.
-func extractHidden(body []byte, n string) (string, error) {
-	s := string(body)
-	idx := strings.Index(s, `<input name="`+n+`"`)
-	if idx < 0 {
-		return "", &AuthError{"identifier", "hidden field " + n + " not found"}
+// pageError extracts the inline error message of a re-rendered login page.
+func pageError(body []byte) string {
+	if m := errorElemRe.FindSubmatch(body); m != nil {
+		return html.UnescapeString(string(m[1]))
 	}
-	vStart := strings.Index(s[idx:], `value="`)
-	if vStart < 0 {
-		return "", &AuthError{"identifier", "value attribute not found"}
-	}
-	vStart += idx + len(`value="`)
-	vEnd := strings.Index(s[vStart:], `"`)
-	if vEnd < 0 {
-		return "", &AuthError{"identifier", "value unclosed"}
-	}
-	return s[vStart : vStart+vEnd], nil
+	return ""
 }
 
-// queryVal extracts a named value from a URL string.
-func queryVal(loc, key string) (string, error) {
-	u, err := url.Parse(loc)
-	if err != nil {
-		return "", err
+// oauthError formats an error/error_description pair from a query or JSON body.
+func oauthError(code, desc string) string {
+	if desc != "" {
+		return code + ": " + desc
 	}
-	v := u.Query().Get(key)
-	if v == "" {
-		return "", &AuthError{"identifier", "field " + key + " not in query"}
-	}
-	return v, nil
+	return code
+}
+
+// sameEndpoint reports whether a and b share scheme, host and path.
+func sameEndpoint(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host) && a.Path == b.Path
+}
+
+func isRedirect(status int) bool {
+	return status == http.StatusFound || status == http.StatusSeeOther ||
+		status == http.StatusMovedPermanently || status == http.StatusTemporaryRedirect
 }
 
 func (c *Client) pkcePair() pkcePair { return newPKCEPair(rand.Reader) }
@@ -119,170 +140,158 @@ func (c *Client) pkcePair() pkcePair { return newPKCEPair(rand.Reader) }
 // Public API
 // ---------------------------------------------------------------------------
 
-// Login performs the full Auth0 hosted-login flow:
-// authorize -> identifier POST -> password POST -> code capture -> token exchange.
+// Login performs the Auth0 Universal Login flow headlessly. It starts at
+// /authorize and follows every Location the server returns, filling the
+// identifier and password forms it lands on, until Auth0 redirects to
+// RedirectURI with an authorization code — possibly via /authorize/resume.
+// The code is then exchanged for tokens with the PKCE verifier.
 func (c *Client) Login(ctx context.Context, email, password string) (Tokens, error) {
 	var tokens Tokens
-	cl := noRedirectClient()
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return tokens, &AuthError{"authorize", "bad base URL: " + err.Error()}
+	}
+	callback, _ := url.Parse(RedirectURI)
+	cl := c.flowClient()
 	pkce := c.pkcePair()
+	state := randomState()
 
 	params := url.Values{}
 	params.Set("response_type", "code")
 	params.Set("client_id", ClientID)
 	params.Set("redirect_uri", RedirectURI)
 	params.Set("scope", Scope)
-	params.Set("state", randomState())
+	params.Set("state", state)
 	params.Set("audience", Audience)
 	params.Set("code_challenge", pkce.Challenge)
 	params.Set("code_challenge_method", "S256")
 
-	// GET /authorize — gets cookies, redirects to /u/login/identifier.
-	resp, err := c.do(cl, ctx, "GET", "/authorize?"+params.Encode())
-	if err != nil {
-		return tokens, &AuthError{"authorize", err.Error()}
-	}
-	if !expectOK(resp, http.StatusFound) {
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		return tokens, &AuthError{"authorize", "unexpected status " + strconv.Itoa(resp.StatusCode)}
-	}
+	cur := base.ResolveReference(&url.URL{Path: "/authorize", RawQuery: params.Encode()})
+	stage := "authorize"
+	var form url.Values // nil = GET cur, non-nil = POST form to cur
+	var code string
 
-	// Check for error in redirect Location (e.g., access_denied).
-	redirLoc := resp.Header.Get("Location")
-	if strings.Contains(redirLoc, "error=") {
-		eqIdx := strings.Index(redirLoc, "error=")
-		msg := redirLoc[eqIdx+len("error="):]
-		if amp := strings.Index(msg, "&"); amp > 0 {
-			msg = msg[:amp]
+	for hop := 0; code == ""; hop++ {
+		if hop >= maxHops {
+			return tokens, &AuthError{stage, "too many redirects"}
 		}
-		return tokens, &AuthError{"password", msg}
-	}
-
-	stateVal := params.Get("state")
-
-	// GET /u/login/identifier — grab hidden state from HTML.
-	resp, err = c.do(cl, ctx, "GET", "/u/login/identifier?state="+url.PathEscape(stateVal))
-	if err != nil {
-		return tokens, &AuthError{"identifier", err.Error()}
-	}
-	if !expectOK(resp, http.StatusOK) {
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		return tokens, &AuthError{"identifier", "unexpected status " + strconv.Itoa(resp.StatusCode)}
-	}
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return tokens, &AuthError{"identifier", err.Error()}
-	}
-	idState, err := extractHidden(body, "state")
-	if err != nil {
-		return tokens, &AuthError{"identifier", err.Error()}
-	}
-
-	// POST /u/login/identifier — submit email, redirect to /u/login/password.
-	data := url.Values{
-		"state":                       {idState},
-		"username":                    {email},
-		"js-available":                {"true"},
-		"webauthn-available":          {"false"},
-		"is-brave":                    {"false"},
-		"webauthn-platform-available": {"false"},
-		"action":                      {"default"},
-	}
-	resp, err = c.doFormPost(cl, ctx, "/u/login/identifier", data)
-	if err != nil {
-		return tokens, &AuthError{"identifier", err.Error()}
-	}
-	if !expectOK(resp, http.StatusFound) {
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		return tokens, &AuthError{"identifier", "unexpected status " + strconv.Itoa(resp.StatusCode)}
-	}
-
-	pwLoc := resp.Header.Get("Location")
-	pwState, err := queryVal(pwLoc, "state")
-	if err != nil {
-		return tokens, &AuthError{"password", "missing state"}
-	}
-
-	// GET /u/login/password — grab hidden state.
-	resp, err = c.do(cl, ctx, "GET", "/u/login/password?state="+url.PathEscape(pwState))
-	if err != nil {
-		return tokens, &AuthError{"password", err.Error()}
-	}
-	if !expectOK(resp, http.StatusOK) {
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		return tokens, &AuthError{"password", "unexpected status " + strconv.Itoa(resp.StatusCode)}
-	}
-	body, err = io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return tokens, &AuthError{"password", err.Error()}
-	}
-	pwStateHTML, err := extractHidden(body, "state")
-	if err != nil {
-		return tokens, &AuthError{"password", err.Error()}
-	}
-	if pwStateHTML != pwState {
-		return tokens, &AuthError{"password", "state mismatch between query and form"}
-	}
-
-	// POST /u/login/password — submit credentials. Expect 302 to redirect URI with code.
-	pwData := url.Values{
-		"state":    {pwStateHTML},
-		"username": {email},
-		"password": {password},
-		"action":   {"default"},
-	}
-	resp, err = c.doFormPost(cl, ctx, "/u/login/password", pwData)
-	if err != nil {
-		return tokens, &AuthError{"password", err.Error()}
-	}
-	if !expectOK(resp, http.StatusFound) {
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		return tokens, &AuthError{"password", "login failed — status " + strconv.Itoa(resp.StatusCode)}
-	}
-
-	rloc := resp.Header.Get("Location")
-	if strings.Contains(rloc, "error=") {
-		eqIdx := strings.Index(rloc, "error=")
-		msg := rloc[eqIdx+len("error="):]
-		if amp := strings.Index(msg, "&"); amp > 0 {
-			msg = msg[:amp]
+		resp, err := send(ctx, cl, cur, form)
+		if err != nil {
+			return tokens, &AuthError{stage, err.Error()}
 		}
-		return tokens, &AuthError{"password", msg}
+		body, err := readBody(resp)
+		if err != nil {
+			return tokens, &AuthError{stage, err.Error()}
+		}
+
+		if isRedirect(resp.StatusCode) {
+			loc := resp.Header.Get("Location")
+			if loc == "" {
+				return tokens, &AuthError{stage, "redirect without Location"}
+			}
+			next, err := cur.Parse(loc)
+			if err != nil {
+				return tokens, &AuthError{stage, "bad redirect: " + err.Error()}
+			}
+			q := next.Query()
+			if e := q.Get("error"); e != "" {
+				return tokens, &AuthError{stage, oauthError(e, q.Get("error_description"))}
+			}
+			if sameEndpoint(next, callback) {
+				if q.Get("state") != state {
+					return tokens, &AuthError{stage, "state mismatch in callback"}
+				}
+				if code = q.Get("code"); code == "" {
+					return tokens, &AuthError{stage, "no code in redirect location"}
+				}
+				break
+			}
+			if !strings.EqualFold(next.Host, base.Host) {
+				return tokens, &AuthError{stage, "unexpected redirect to " + next.Host}
+			}
+			cur, form = next, nil
+			continue
+		}
+
+		if form != nil {
+			// Auth0 re-renders the page (usually 400) when a form is rejected.
+			msg := pageError(body)
+			if msg == "" {
+				msg = "rejected with status " + strconv.Itoa(resp.StatusCode)
+			}
+			return tokens, &AuthError{stage, msg}
+		}
+		if resp.StatusCode != http.StatusOK {
+			return tokens, &AuthError{stage, "unexpected status " + strconv.Itoa(resp.StatusCode)}
+		}
+
+		pageState, ok := formState(body)
+		if !ok {
+			pageState = cur.Query().Get("state")
+		}
+		if pageState == "" {
+			return tokens, &AuthError{stage, "state not found on " + cur.Path}
+		}
+		switch cur.Path {
+		case "/u/login/identifier":
+			stage = "identifier"
+			form = url.Values{
+				"state":                       {pageState},
+				"username":                    {email},
+				"js-available":                {"true"},
+				"webauthn-available":          {"false"},
+				"is-brave":                    {"false"},
+				"webauthn-platform-available": {"false"},
+				"action":                      {"default"},
+			}
+		case "/u/login/password", "/u/login":
+			stage = "password"
+			form = url.Values{
+				"state":    {pageState},
+				"username": {email},
+				"password": {password},
+				"action":   {"default"},
+			}
+		default:
+			return tokens, &AuthError{stage, "unsupported login page " + cur.Path + " (MFA, captcha and social logins are not supported)"}
+		}
 	}
 
-	// Extract authorization code from redirect Location.
-	codeQ := strings.TrimPrefix(rloc, RedirectURI)
-	codeQ = strings.TrimPrefix(codeQ, "?")
-	parsed, err := url.ParseQuery(codeQ)
-	if err != nil || len(parsed["code"]) == 0 {
-		return tokens, &AuthError{"password", "no code in redirect location"}
-	}
-	authCode := parsed["code"][0]
-
-	// POST /oauth/token — exchange code for tokens.
-	tokenData := url.Values{
+	tokenURL := base.ResolveReference(&url.URL{Path: "/oauth/token"})
+	return c.tokenRequest(ctx, "exchange", tokenURL, url.Values{
 		"grant_type":    {"authorization_code"},
 		"client_id":     {ClientID},
 		"code_verifier": {pkce.Verifier},
-		"code":          {authCode},
+		"code":          {code},
 		"redirect_uri":  {RedirectURI},
-	}
-	resp, err = c.doFormPost(cl, ctx, "/oauth/token", tokenData)
+	})
+}
+
+// tokenRequest POSTs form to the token endpoint and decodes the response.
+// Non-200 responses surface Auth0's error/error_description.
+func (c *Client) tokenRequest(ctx context.Context, stage string, u *url.URL, form url.Values) (Tokens, error) {
+	var tokens Tokens
+	resp, err := send(ctx, c.httpClt, u, form)
 	if err != nil {
-		return tokens, &AuthError{"exchange", err.Error()}
+		return tokens, &AuthError{stage, err.Error()}
 	}
-	defer resp.Body.Close()
-	if !expectOK(resp, http.StatusOK) {
-		return tokens, &AuthError{"exchange", "unexpected status " + strconv.Itoa(resp.StatusCode)}
+	body, err := readBody(resp)
+	if err != nil {
+		return tokens, &AuthError{stage, err.Error()}
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
-		return tokens, &AuthError{"exchange", err.Error()}
+	if resp.StatusCode != http.StatusOK {
+		var e struct {
+			Error       string `json:"error"`
+			Description string `json:"error_description"`
+		}
+		msg := "unexpected status " + strconv.Itoa(resp.StatusCode)
+		if json.Unmarshal(body, &e) == nil && e.Error != "" {
+			msg += " (" + oauthError(e.Error, e.Description) + ")"
+		}
+		return tokens, &AuthError{stage, msg}
+	}
+	if err := json.Unmarshal(body, &tokens); err != nil {
+		return tokens, &AuthError{stage, err.Error()}
 	}
 	return tokens, nil
 }
@@ -290,23 +299,17 @@ func (c *Client) Login(ctx context.Context, email, password string) (Tokens, err
 // Refresh requests a new access token using the provided refresh_token.
 // If the server's response omits refresh_token, the old one is kept.
 func (c *Client) Refresh(ctx context.Context, refreshToken string) (Tokens, error) {
-	var tokens Tokens
-	cl := noRedirectClient()
-	data := url.Values{
+	u, err := url.Parse(c.baseURL + "/oauth/token")
+	if err != nil {
+		return Tokens{}, &AuthError{"refresh", err.Error()}
+	}
+	tokens, err := c.tokenRequest(ctx, "refresh", u, url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {refreshToken},
 		"client_id":     {ClientID},
-	}
-	resp, err := c.doFormPost(cl, ctx, "/oauth/token", data)
+	})
 	if err != nil {
-		return tokens, &AuthError{"refresh", err.Error()}
-	}
-	defer resp.Body.Close()
-	if !expectOK(resp, http.StatusOK) {
-		return tokens, &AuthError{"refresh", "unexpected status " + strconv.Itoa(resp.StatusCode)}
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
-		return tokens, &AuthError{"refresh", err.Error()}
+		return tokens, err
 	}
 	if tokens.RefreshToken == "" {
 		tokens.RefreshToken = refreshToken
@@ -317,21 +320,24 @@ func (c *Client) Refresh(ctx context.Context, refreshToken string) (Tokens, erro
 // UserInfo calls the Auth0 userinfo endpoint with the given access token.
 func (c *Client) UserInfo(ctx context.Context, accessToken string) (Profile, error) {
 	var p Profile
-	cl := noRedirectClient()
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/userinfo", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/userinfo", nil)
 	if err != nil {
 		return p, &AuthError{"userinfo", err.Error()}
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	resp, err := cl.Do(req)
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := c.httpClt.Do(req)
 	if err != nil {
 		return p, &AuthError{"userinfo", err.Error()}
 	}
-	defer resp.Body.Close()
+	body, err := readBody(resp)
+	if err != nil {
+		return p, &AuthError{"userinfo", err.Error()}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return p, &AuthError{"userinfo", "status " + resp.Status}
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
+	if err := json.Unmarshal(body, &p); err != nil {
 		return p, &AuthError{"userinfo", err.Error()}
 	}
 	return p, nil
