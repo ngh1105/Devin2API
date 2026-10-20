@@ -9,8 +9,12 @@ import (
 // Upstream rejects requests whose system prompt carries another agent's
 // identity: a Claude Code system prompt ("You are Claude Code, Anthropic's
 // official CLI for Claude.") fails with permission_denied "an internal
-// error occurred". These line rules drop such lines; the rest of the
-// prompt is kept as sent.
+// error occurred". The same was observed for the other lines listed here,
+// which Claude Code sends alongside: its product blurb, fast-mode note,
+// billing header and the two lines of its security policy. These line
+// rules drop such lines; the rest of the prompt is kept as sent. They are
+// substring matches, so a user's own line containing the same words is
+// dropped too; SanitizeSystemPrompt logs each drop for that reason.
 var (
 	// dropLinePrefixes match the start of a trimmed line.
 	dropLinePrefixes = []string{

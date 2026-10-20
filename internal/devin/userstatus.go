@@ -69,27 +69,31 @@ func clientMetadata(sessionToken, fingerprint string) []byte {
 }
 
 // ParseGetUserStatusResponse decodes the protobuf response from
-// SeatManagementService.GetUserStatus into *store.Usage. Returns nil usage
-// (nil pointer) on malformed input rather than panicking.
+// SeatManagementService.GetUserStatus into *store.Usage. A truncated
+// message, at any level, is an error; fields of an unexpected wire type
+// are skipped rather than read as zero values.
 func ParseGetUserStatusResponse(data []byte) (*store.Usage, error) {
 	usage := &store.Usage{}
 
 	r := &pwReader{data: data}
 	for {
-		field, _, val, _, ok := r.Next()
+		field, wire, val, _, ok := r.Next()
 		if !ok {
 			break
 		}
-		if field != 1 {
+		if field != 1 || wire != wireBytes {
 			continue // skip unknown top-level fields
 		}
 
 		// val is the UserStatus bytes — parse them.
 		sub := &pwReader{data: val}
 		for {
-			sf, _, sval, _, ok := sub.Next()
+			sf, wire, sval, _, ok := sub.Next()
 			if !ok {
 				break
+			}
+			if wire != wireBytes {
+				continue
 			}
 			switch sf {
 			case 3:
@@ -99,7 +103,9 @@ func ParseGetUserStatusResponse(data []byte) (*store.Usage, error) {
 			case 7:
 				usage.Email = string(sval)
 			case 13:
-				parsePlanStatus(sval, usage)
+				if err := parsePlanStatus(sval, usage); err != nil {
+					return nil, err
+				}
 			case 36:
 				usage.UserID = string(sval)
 			}
@@ -108,44 +114,58 @@ func ParseGetUserStatusResponse(data []byte) (*store.Usage, error) {
 			return nil, fmt.Errorf("parse UserStatus: %w", err)
 		}
 	}
+	if err := r.Done(); err != nil {
+		return nil, fmt.Errorf("parse GetUserStatus: %w", err)
+	}
 
 	return usage, nil
 }
 
-func parsePlanStatus(data []byte, u *store.Usage) {
+func parsePlanStatus(data []byte, u *store.Usage) error {
 	sub := &pwReader{data: data}
 	for {
-		sf, _, sval, svarint, ok := sub.Next()
+		sf, wire, sval, svarint, ok := sub.Next()
 		if !ok {
 			break
 		}
-		switch sf {
-		case 1: // PlanInfo
+		switch {
+		case sf == 1 && wire == wireBytes: // PlanInfo
 			pinfo := make([]byte, len(sval))
 			copy(pinfo, sval)
-			parsePlanInfo(pinfo, u)
-		case 2: // plan_start (seconds, varint)
+			if err := parsePlanInfo(pinfo, u); err != nil {
+				return err
+			}
+		case wire != wireVarint:
+			continue
+		case sf == 2: // plan_start (seconds, varint)
 			u.PlanStart = time.Unix(int64(svarint), 0).UTC()
-		case 3: // plan_end (seconds, varint)
+		case sf == 3: // plan_end (seconds, varint)
 			u.PlanEnd = time.Unix(int64(svarint), 0).UTC()
-		case 14: // daily_quota_remaining_percent
+		case sf == 14: // daily_quota_remaining_percent
 			u.DailyRemainingPercent = int64(svarint)
-		case 15: // weekly_quota_remaining_percent
+		case sf == 15: // weekly_quota_remaining_percent
 			u.WeeklyRemainingPercent = int64(svarint)
-		case 17: // daily_quota_reset_at (seconds)
+		case sf == 17: // daily_quota_reset_at (seconds)
 			u.DailyResetAt = time.Unix(int64(svarint), 0).UTC()
-		case 18: // weekly_quota_reset_at (seconds)
+		case sf == 18: // weekly_quota_reset_at (seconds)
 			u.WeeklyResetAt = time.Unix(int64(svarint), 0).UTC()
 		}
 	}
+	if err := sub.Done(); err != nil {
+		return fmt.Errorf("parse PlanStatus: %w", err)
+	}
+	return nil
 }
 
-func parsePlanInfo(data []byte, u *store.Usage) {
+func parsePlanInfo(data []byte, u *store.Usage) error {
 	sub := &pwReader{data: data}
 	for {
-		sf, _, sval, _, ok := sub.Next()
+		sf, wire, sval, _, ok := sub.Next()
 		if !ok {
 			break
+		}
+		if wire != wireBytes {
+			continue
 		}
 		switch sf {
 		case 2:
@@ -153,17 +173,26 @@ func parsePlanInfo(data []byte, u *store.Usage) {
 		case 33: // OrgInfo embedded in PlanInfo
 			orgInfo := make([]byte, len(sval))
 			copy(orgInfo, sval)
-			parseOrgInfo(orgInfo, u)
+			if err := parseOrgInfo(orgInfo, u); err != nil {
+				return err
+			}
 		}
 	}
+	if err := sub.Done(); err != nil {
+		return fmt.Errorf("parse PlanInfo: %w", err)
+	}
+	return nil
 }
 
-func parseOrgInfo(data []byte, u *store.Usage) {
+func parseOrgInfo(data []byte, u *store.Usage) error {
 	sub := &pwReader{data: data}
 	for {
-		sf, _, sval, _, ok := sub.Next()
+		sf, wire, sval, _, ok := sub.Next()
 		if !ok {
 			break
+		}
+		if wire != wireBytes {
+			continue
 		}
 		switch sf {
 		case 4:
@@ -172,6 +201,10 @@ func parseOrgInfo(data []byte, u *store.Usage) {
 			u.OrgName = string(sval)
 		}
 	}
+	if err := sub.Done(); err != nil {
+		return fmt.Errorf("parse OrgInfo: %w", err)
+	}
+	return nil
 }
 
 // FetchUserStatus POSTs to <serverBase>/exa.seat_management_pb.SeatManagementService/GetUserStatus
@@ -182,8 +215,7 @@ func FetchUserStatus(ctx context.Context, serverBase, sessionToken string) (*sto
 		serverBase = ServerBaseURL
 	}
 
-	fingerprint := GenerateFingerprint("devin2api-cli")
-	reqData := BuildGetUserStatusRequest(sessionToken, fingerprint)
+	reqData := BuildGetUserStatusRequest(sessionToken, Fingerprint(sessionToken))
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		serverBase+"/exa.seat_management_pb.SeatManagementService/GetUserStatus",
@@ -207,8 +239,9 @@ func FetchUserStatus(ctx context.Context, serverBase, sessionToken string) (*sto
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, maxJSONBytes))
-		return nil, fmt.Errorf("user status: status %d", resp.StatusCode)
+		// Keep the Connect error (quota, permission_denied...) so callers
+		// can tell a 429 from a 5xx.
+		return nil, fmt.Errorf("user status: %w", httpStatusError(resp))
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJSONBytes))

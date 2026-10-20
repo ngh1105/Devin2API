@@ -27,7 +27,7 @@ func FetchModels(ctx context.Context, serverBase, sessionToken string) ([]ModelI
 	if serverBase == "" {
 		serverBase = ServerBaseURL
 	}
-	body := PwFieldBytes(1, clientMetadata(sessionToken, GenerateFingerprint("devin2api-cli")))
+	body := PwFieldBytes(1, clientMetadata(sessionToken, Fingerprint(sessionToken)))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, serverBase+modelsPath, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("new request: %w", err)

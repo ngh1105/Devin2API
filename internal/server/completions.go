@@ -180,6 +180,5 @@ func (s *Server) streamTextCompletion(ctx context.Context, tr *chatTrace, w http
 // embeddings answers POST /v1/embeddings: Devin offers no embedding model,
 // so the proxy says so in the OpenAI error shape instead of a bare 404.
 func (s *Server) embeddings(w http.ResponseWriter, r *http.Request) {
-	io.Copy(io.Discard, r.Body)
 	openai.WriteError(w, http.StatusNotImplemented, "embeddings are not supported: Devin offers no embedding models; use a separate embeddings provider")
 }

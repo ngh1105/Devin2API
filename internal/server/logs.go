@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ngh1105/Devin2API/internal/devin"
+	"github.com/ngh1105/Devin2API/internal/store"
 )
 
 // requestLogSize is how many recent chat requests the panel can show.
@@ -76,6 +77,13 @@ func (l *requestLog) load(dataDir string) {
 			l.push(e)
 		}
 	}
+	if err := sc.Err(); err != nil {
+		// An over-long or unreadable line stops the scan; the rest of the
+		// file is unknown, so rewrite it from what was read.
+		slog.Warn("request log damaged, rewriting it", "file", l.path, "error", err)
+		l.compact()
+		return
+	}
 	if l.lines > 2*requestLogSize {
 		l.compact()
 	}
@@ -125,13 +133,7 @@ func (l *requestLog) compact() {
 		b, _ := json.Marshal(recent[i])
 		buf = append(append(buf, b...), '\n')
 	}
-	tmp := l.path + ".tmp"
-	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
-		slog.Warn("compact request log", "error", err)
-		return
-	}
-	if err := os.Rename(tmp, l.path); err != nil {
-		os.Remove(tmp)
+	if err := store.WriteFileAtomic(l.path, buf, 0o600); err != nil {
 		slog.Warn("compact request log", "error", err)
 		return
 	}
@@ -202,6 +204,7 @@ func (s *Server) startTrace(r *http.Request, endpoint, model string, dreq devin.
 	if k, ok := apiKeyFrom(r.Context()); ok {
 		tr.entry.Key = keyLabel(k)
 	}
+	keepCharge(r.Context(), true)
 	return context.WithValue(r.Context(), traceKey{}, tr), tr
 }
 
@@ -244,6 +247,9 @@ func (s *Server) finishTrace(ctx context.Context, tr *chatTrace, res *devin.Chat
 		e.Status, e.Error = 499, "client closed the request"
 	default:
 		e.Status, e.Error = upstreamStatus(err)
+	}
+	if errors.Is(err, errNoAccount) {
+		keepCharge(ctx, false) // never reached upstream
 	}
 	if e.Status != http.StatusOK {
 		s.stats.failed.Add(1)

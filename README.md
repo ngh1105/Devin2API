@@ -189,7 +189,7 @@ Single-page app at `/web/` with five tabs:
 | **Accounts** | Account list with usage bars, search, status filter and pages of 10–100; add (browser login, pasted session token or JSON import), enable/disable, delete, refresh usage. Tick rows (or the header box for the page, then "Select all matching") to refresh, enable, disable or delete many at once. |
 | **API Keys** | Create keys with a name, expiry date, model allow list and request quota; edit, disable, reset the counter or revoke them. Shows each key's status, requests used and last use. |
 | **Logs**     | A chart of the last 24 hours (succeeded / failed requests per hour, tokens in and out), the top models, accounts and API keys, and the last 1000 chat requests with search, filters, pages and auto-refresh. Click a row for every detail: endpoint, models, account, API key, attempts, status, duration, time to first output, tokens, tool calls, finish reason and upstream error. |
-| **Settings** | Devin endpoints, global system prompt, and the listen address / data directory (read-only, set via environment variables) |
+| **Settings** | Devin endpoints (https only, except localhost), global system prompt, and the listen address / data directory (read-only, set via environment variables) |
 | **API**      | Endpoint reference and a curl example                           |
 
 The panel follows the OS light/dark setting; the Light / System / Dark switch in the sidebar overrides it for that browser. Destructive actions (deleting accounts, revoking keys, clearing the log) ask for confirmation first.
@@ -203,7 +203,9 @@ Stats grid at the top: Accounts, Models, Requests (with a 24-hour sparkline), Fa
 
 The request log keeps the last 1000 chat requests in memory and appends each one to `<data>/logs.jsonl`, so it survives restarts; the file is trimmed back to 1000 lines once it reaches 2000. **Clear** in the Logs tab (or `DELETE /admin/api/logs`) empties it.
 
-On Ctrl+C or SIGTERM the server stops accepting connections, gives open requests up to 5 s, and writes the counters it otherwise saves with a short delay.
+On Ctrl+C or SIGTERM the server stops accepting connections, gives open requests up to 5 s, then cancels any streams still running (they are logged as failed) and waits up to 2 s more before writing the counters it otherwise saves with a short delay. Files under the data directory are written through a temporary file, fsynced and renamed, so a crash leaves the old or the new version, never a truncated one.
+
+A chat stream that sends no frame for 3 minutes (or no response headers within 60 s) is abandoned with a 504 and the next endpoint or account is tried, instead of hanging until the client gives up. Each account sends its own device fingerprint upstream.
 
 Every chat request is also logged to the console (stderr) as one line, for example:
 

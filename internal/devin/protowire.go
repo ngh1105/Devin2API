@@ -1,6 +1,7 @@
-// Package devin provides a hand-rolled protobuf client for Devin's upstream
-// APIs (CLI OAuth, GetUserStatus). No external protobuf libraries — just
-// encoding/binary and crypto/sha256.
+// Package devin is a hand-rolled client for Devin's upstream APIs: CLI
+// OAuth, GetUserStatus, the model catalog and the GetChatMessage stream.
+// The protobuf wire format is encoded and decoded here with encoding/binary
+// alone; no protobuf library is used.
 package devin
 
 import (
@@ -11,7 +12,8 @@ import (
 
 // ---------- wire helpers ----------------------------------------------------
 
-var (
+// Protobuf wire types.
+const (
 	WireVarint    = 0
 	WireFixed64   = 1
 	WireFixed32   = 5
@@ -19,10 +21,13 @@ var (
 )
 
 // Internal unexported aliases for backward compatibility with existing callers.
+const (
+	wireVarint  = WireVarint
+	wireFixed32 = WireFixed32
+	wireBytes   = WireTypeBytes
+)
+
 var (
-	wireVarint    = WireVarint
-	wireFixed32   = WireFixed32
-	wireBytes     = WireTypeBytes
 	pwTag         = PwTag
 	pwVarint      = PwVarint
 	pwString      = PwString
@@ -185,8 +190,8 @@ func (r *pwReader) Next() (field, wire int, val []byte, varint uint64, ok bool) 
 	}
 }
 
-// Done returns nil when no more fields are left; returns errors.Truncated
-// when the stream is too short.
+// Done returns nil when the message was read to its end, or an error when
+// it was cut short (a truncated field or an unskippable wire type).
 func (r *pwReader) Done() error {
 	if !r.ok {
 		if r.truncated {
@@ -198,11 +203,15 @@ func (r *pwReader) Done() error {
 }
 
 // readVarint decodes a varint from the beginning of data.
-// Returns the decoded value and number of bytes consumed (0 on truncation).
+// Returns the decoded value and number of bytes consumed (0 on truncation
+// or when the value does not fit in 64 bits).
 func readVarint(data []byte) (uint64, int) {
 	var v uint64
 	for i := 0; i < 10 && i < len(data); i++ {
 		b := data[i]
+		if i == 9 && b > 1 {
+			return 0, 0 // the tenth byte holds only the top bit
+		}
 		if b < 0x80 {
 			return v | uint64(b)<<uint(i*7), i + 1
 		}

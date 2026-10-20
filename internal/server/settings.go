@@ -94,12 +94,7 @@ func (st *settingsStore) set(v runtimeSettings) (runtimeSettings, error) {
 	defer st.mu.Unlock()
 	if st.path != "" {
 		b, _ := json.MarshalIndent(v, "", "  ")
-		tmp := st.path + ".tmp"
-		if err := os.WriteFile(tmp, b, 0o600); err != nil {
-			return v, fmt.Errorf("save settings: %w", err)
-		}
-		if err := os.Rename(tmp, st.path); err != nil {
-			os.Remove(tmp)
+		if err := store.WriteFileAtomic(st.path, b, 0o600); err != nil {
 			return v, fmt.Errorf("save settings: %w", err)
 		}
 	}
@@ -149,6 +144,11 @@ func normalizeUpstream(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 		return "", fmt.Errorf("%q is not an http(s) URL", raw)
+	}
+	// Every account's session token goes to the upstream, so plain http is
+	// only allowed to a local address (tests, a local proxy).
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		return "", fmt.Errorf("%q must use https (http is allowed for localhost only)", raw)
 	}
 	if u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 		return "", fmt.Errorf("%q must not carry a query, fragment or credentials", raw)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,6 +18,8 @@ const (
 	// so a password exposed on the LAN cannot be brute-forced quickly and
 	// one noisy client cannot lock everyone else out.
 	loginFailsPerMinute = 10
+	// loginFailsPerMinuteAll caps login attempts from all clients together.
+	loginFailsPerMinuteAll = 60
 )
 
 // loginFailDelay is a var so tests can skip the wait.
@@ -46,19 +49,30 @@ func (a *adminAuth) checkPassword(p string) bool {
 	return subtle.ConstantTimeCompare(want[:], got[:]) == 1
 }
 
-// clientIP is the request's remote address without the port. Behind a
-// reverse proxy every client shares the proxy's IP, which only makes the
-// limit stricter.
+// clientIP is the request's remote address without the port, as the key of
+// the login limit. An IPv6 address is reduced to its /64, since one host
+// usually controls the whole block and could otherwise rotate through it.
+// Behind a reverse proxy every client shares the proxy's IP, which only
+// makes the limit stricter.
 func clientIP(r *http.Request) string {
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		host = h
 	}
-	return r.RemoteAddr
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	}
+	return host
 }
+
+// allClientsKey counts attempts from every client together, so many
+// addresses cannot each take their own share.
+const allClientsKey = "*"
 
 // takeAttempt reserves one login attempt for ip, counting it before the
 // password is checked so parallel requests cannot all slip under the cap.
-// A successful login clears the count again (clearAttempts).
+// A successful login clears the count again (clearAttempts). A global cap
+// (loginFailsPerMinuteAll) bounds attempts across all clients.
 func (a *adminAuth) takeAttempt(ip string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -71,15 +85,19 @@ func (a *adminAuth) takeAttempt(ip string) bool {
 	if a.fails == nil {
 		a.fails = map[string]failWindow{}
 	}
-	w := a.fails[ip]
-	if w.count >= loginFailsPerMinute {
+	w, all := a.fails[ip], a.fails[allClientsKey]
+	if w.count >= loginFailsPerMinute || all.count >= loginFailsPerMinuteAll {
 		return false
 	}
 	if w.count == 0 {
 		w.start = now
 	}
+	if all.count == 0 {
+		all.start = now
+	}
 	w.count++
-	a.fails[ip] = w
+	all.count++
+	a.fails[ip], a.fails[allClientsKey] = w, all
 	return true
 }
 
@@ -134,10 +152,14 @@ func (a *adminAuth) endSession(r *http.Request) {
 	}
 }
 
-func setSessionCookie(w http.ResponseWriter, value string, maxAge int) {
+// setSessionCookie sets (or clears) the session cookie. Over TLS, direct or
+// through a proxy that says so, the cookie is marked Secure so a browser
+// never sends it over plain HTTP.
+func setSessionCookie(w http.ResponseWriter, r *http.Request, value string, maxAge int) {
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: value, Path: "/",
 		MaxAge: maxAge, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+		Secure: r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
 	})
 }
 
@@ -184,7 +206,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.auth.clearAttempts(ip)
-	setSessionCookie(w, s.auth.newSession(), int(sessionTTL/time.Second))
+	setSessionCookie(w, r, s.auth.newSession(), int(sessionTTL/time.Second))
 	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
 }
 
@@ -195,6 +217,6 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.auth.endSession(r)
-	setSessionCookie(w, "", -1)
+	setSessionCookie(w, r, "", -1)
 	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": false})
 }

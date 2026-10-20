@@ -47,6 +47,7 @@ func toDevinFromResponses(req openai.ResponsesRequest, prior conversation) (devi
 	if err != nil {
 		return fail(err)
 	}
+	newInput := false // the input adds something for the model to answer
 	for i, it := range items {
 		typ := it.Type
 		if typ == "" && it.Role != "" {
@@ -69,6 +70,7 @@ func toDevinFromResponses(req openai.ResponsesRequest, prior conversation) (devi
 					p.Images = append(p.Images, devin.Image{MimeType: img.MimeType, Base64: img.Base64})
 				}
 				out.Prompts = append(out.Prompts, p)
+				newInput = newInput || hasInput([]devin.Prompt{p})
 			case "assistant":
 				out.Prompts = appendAssistantText(out.Prompts, text)
 			default:
@@ -96,6 +98,7 @@ func toDevinFromResponses(req openai.ResponsesRequest, prior conversation) (devi
 				p.Images = append(p.Images, devin.Image{MimeType: img.MimeType, Base64: img.Base64})
 			}
 			out.Prompts = append(out.Prompts, p)
+			newInput = true
 		case "reasoning":
 			// Upstream takes no reasoning history.
 		default:
@@ -116,6 +119,10 @@ func toDevinFromResponses(req openai.ResponsesRequest, prior conversation) (devi
 	}
 	if !hasInput(out.Prompts) {
 		return out, "", errors.New("input needs at least one non-empty user message")
+	}
+	if len(prior.prompts) > 0 && !newInput {
+		// The stored history already ends on the assistant's turn.
+		return out, "", errors.New("input must add a user message or function_call_output to continue previous_response_id")
 	}
 	return out, strings.Join(convSystem, "\n\n"), nil
 }

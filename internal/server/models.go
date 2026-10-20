@@ -105,3 +105,15 @@ func (s *Server) cachedModels() []devin.ModelInfo {
 	defer s.models.mu.Unlock()
 	return s.models.models
 }
+
+// catalogRefreshable reports whether a fetch would try upstream now: the
+// catalog is older than modelsTTL (or missing), no attempt was made very
+// recently, and the catalog has been fetched at least once (Start warms
+// it; a server that never tried has nothing to refresh).
+func (s *Server) catalogRefreshable() bool {
+	c := &s.models
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fresh := c.models != nil && time.Since(c.fetchedAt) < modelsTTL
+	return !fresh && !c.lastAttempt.IsZero() && time.Since(c.lastAttempt) >= modelsRetryAfter && c.inflight == nil
+}

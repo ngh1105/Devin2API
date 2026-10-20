@@ -48,8 +48,7 @@ func (s *Server) handleV1(w http.ResponseWriter, r *http.Request) {
 // v1Middleware enforces token verification for every /v1/* request.
 func (s *Server) v1Middleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		tokens, err := s.tokens.List()
-		if err != nil || len(tokens) == 0 {
+		if s.tokens.Empty() {
 			// Keyless mode spends real Devin quota, so only local non-browser
 			// style callers are let in: loopback Host (blocks DNS rebinding)
 			// and no foreign Origin (blocks cross-site requests).
@@ -62,6 +61,7 @@ func (s *Server) v1Middleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		var key store.Token
+		var err error
 		authed := false
 		if scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " "); ok && strings.EqualFold(scheme, "Bearer") {
 			key, authed = s.tokens.Match(strings.TrimSpace(token))
@@ -73,7 +73,8 @@ func (s *Server) v1Middleware(next http.HandlerFunc) http.HandlerFunc {
 			writeV1AuthError(w, r, "invalid or missing token")
 			return
 		}
-		key, err = s.tokens.Use(key.ID, counted(r))
+		charged := counted(r)
+		key, err = s.tokens.Use(key.ID, charged)
 		switch {
 		case errors.Is(err, store.ErrKeyQuota):
 			writeV1Error(w, r, http.StatusTooManyRequests, err.Error())
@@ -82,7 +83,16 @@ func (s *Server) v1Middleware(next http.HandlerFunc) http.HandlerFunc {
 			writeV1AuthError(w, r, err.Error())
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(withAPIKey(r.Context(), key)))
+		// The request is counted up front, so the quota check and the count
+		// are one atomic step; a request that is refused before it reaches
+		// upstream (bad JSON, unknown route or model, no account) is
+		// refunded once the handler returns.
+		charge := &keyCharge{}
+		ctx := withKeyCharge(withAPIKey(r.Context(), key), charge)
+		next.ServeHTTP(w, r.WithContext(ctx))
+		if charged && !charge.keep {
+			s.tokens.Refund(key.ID)
+		}
 	}
 }
 

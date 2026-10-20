@@ -11,9 +11,12 @@ import (
 
 // Stop sequence limits: OpenAI documents 4; Anthropic sets no small limit,
 // so its cap only guards against abuse (each one is checked per delta).
+// maxStopLen bounds one sequence: safeLen is quadratic in it per delta and
+// holds back up to that much output.
 const (
 	maxOpenAIStops    = 4
 	maxAnthropicStops = 32
+	maxStopLen        = 1024
 )
 
 // errStopSequence aborts the upstream stream once a stop sequence appears.
@@ -107,6 +110,9 @@ func (s *stopWatcher) safeLen(text string) int {
 func stopList(stops []string, limit int) ([]string, error) {
 	var out []string
 	for _, s := range stops {
+		if len(s) > maxStopLen {
+			return nil, fmt.Errorf("stop sequences may be at most %d bytes", maxStopLen)
+		}
 		if s != "" {
 			out = append(out, s)
 		}

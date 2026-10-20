@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/ngh1105/Devin2API/internal/store"
 )
 
 // statsHours is how many hours of per-hour counts are kept.
@@ -103,13 +105,7 @@ func (c *chatStats) save() {
 		Requests: c.requests.Load(), Failed: c.failed.Load(), Since: c.since,
 		Hours: c.hourly(statsHours, time.Now(), true),
 	}, "", "  ")
-	tmp := c.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		slog.Warn("save stats", "error", err)
-		return
-	}
-	if err := os.Rename(tmp, c.path); err != nil {
-		os.Remove(tmp)
+	if err := store.WriteFileAtomic(c.path, b, 0o600); err != nil {
 		slog.Warn("save stats", "error", err)
 	}
 }

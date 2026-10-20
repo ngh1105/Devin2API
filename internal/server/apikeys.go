@@ -52,19 +52,35 @@ func modelAllowed(ctx context.Context, names ...string) bool {
 	return false
 }
 
+// keyCharge records whether the request's counted use of its API key is to
+// be kept. v1Middleware counts the request up front and refunds it unless
+// startTrace marked it kept, i.e. it went upstream.
+type keyCharge struct{ keep bool }
+
+type keyChargeKey struct{}
+
+func withKeyCharge(ctx context.Context, c *keyCharge) context.Context {
+	return context.WithValue(ctx, keyChargeKey{}, c)
+}
+
+// keepCharge marks the request as having reached upstream (keep=true), or
+// as refused before that (keep=false).
+func keepCharge(ctx context.Context, keep bool) {
+	if c, ok := ctx.Value(keyChargeKey{}).(*keyCharge); ok {
+		c.keep = keep
+	}
+}
+
 // keyModelCheck refuses, with 403, a model outside the allow list of the
 // request's API key; names are the ones the model goes by (as requested,
-// matched to the catalog, resolved upstream). The refused request does not
-// use quota. A zero status means the request may proceed.
+// matched to the catalog, resolved upstream). An empty requested model
+// means the "devin" alias. A zero status means the request may proceed.
 func (s *Server) keyModelCheck(ctx context.Context, requested string, names ...string) (int, string) {
-	if modelAllowed(ctx, append(names, requested)...) {
-		return 0, ""
-	}
-	if k, ok := apiKeyFrom(ctx); ok {
-		s.tokens.Refund(k.ID)
-	}
 	if requested == "" {
 		requested = "devin"
+	}
+	if modelAllowed(ctx, append(names, requested)...) {
+		return 0, ""
 	}
 	return http.StatusForbidden, fmt.Sprintf("this API key is not allowed to use model %q", requested)
 }
@@ -106,16 +122,20 @@ func decodeTokenBody(r *http.Request, v any) error {
 		return err
 	}
 	if len(strings.TrimSpace(string(b))) == 0 {
-		return nil
+		return errEmptyBody
 	}
 	dec := json.NewDecoder(strings.NewReader(string(b)))
 	dec.DisallowUnknownFields()
 	return dec.Decode(v)
 }
 
+// errEmptyBody is returned by decodeTokenBody for a blank body: fine for
+// create (all defaults), refused for update, which replaces every option.
+var errEmptyBody = errors.New("empty body")
+
 func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
 	var opts store.TokenOptions
-	if err := decodeTokenBody(r, &opts); err != nil {
+	if err := decodeTokenBody(r, &opts); err != nil && !errors.Is(err, errEmptyBody) {
 		writeErr(w, http.StatusBadRequest, "invalid API key JSON: "+err.Error())
 		return
 	}
@@ -133,6 +153,11 @@ func (s *Server) updateToken(w http.ResponseWriter, r *http.Request, id string) 
 		ResetRequests bool `json:"reset_requests"`
 	}
 	if err := decodeTokenBody(r, &body); err != nil {
+		if errors.Is(err, errEmptyBody) {
+			// PUT replaces every option, so a blank body would clear them.
+			writeErr(w, http.StatusBadRequest, "PUT needs the key's full options (name, disabled, expires_at, models, quota)")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, "invalid API key JSON: "+err.Error())
 		return
 	}

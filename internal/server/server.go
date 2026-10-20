@@ -102,10 +102,14 @@ func (m *loginManager) isCurrent(gen uint64) bool {
 	return m.gen == gen
 }
 
+// Cancel stops the pending login and bumps gen, so a Resolve* or account
+// upsert from its goroutine that lands later is stale and ignored.
 func (m *loginManager) Cancel() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stop()
+	m.gen++
+	m.current = nil
 	m.statusCode = "idle"
 	m.accountID = ""
 	m.errorMsg = ""
@@ -168,6 +172,10 @@ const (
 
 // Start runs the HTTP server on the configured address.
 func (s *Server) Start(addr string) error {
+	// Handlers derive their contexts from baseCtx, so a shutdown that
+	// outlasts the grace period can end streams still running.
+	baseCtx, cancelBase := context.WithCancel(context.Background())
+	defer cancelBase()
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           s.Handler(),
@@ -175,6 +183,7 @@ func (s *Server) Start(addr string) error {
 		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		// No WriteTimeout: streamed chat completions can run for minutes.
+		BaseContext: func(net.Listener) context.Context { return baseCtx },
 	}
 	// Warm the model catalog so the first chat can map family names.
 	go s.fetchModels(context.Background())
@@ -195,13 +204,25 @@ func (s *Server) Start(addr string) error {
 	slog.Info("shutting down")
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
-	srv.Shutdown(sctx)
+	if err := srv.Shutdown(sctx); err != nil {
+		// Streams still open after the grace period: cancel their contexts
+		// so they finish (and get logged), then give them a moment to do so.
+		slog.Warn("shutdown: ending open streams", "error", err)
+		cancelBase()
+		fctx, fcancel := context.WithTimeout(context.Background(), shutdownFinal)
+		defer fcancel()
+		srv.Shutdown(fctx)
+	}
 	s.flush()
 	return nil
 }
 
-// shutdownGrace bounds how long shutdown waits for open requests.
-const shutdownGrace = 5 * time.Second
+// shutdownGrace bounds how long shutdown waits for open requests to finish
+// on their own; shutdownFinal is the extra wait after cancelling them.
+const (
+	shutdownGrace = 5 * time.Second
+	shutdownFinal = 2 * time.Second
+)
 
 // flush writes state that is otherwise saved after a delay.
 func (s *Server) flush() {
@@ -285,6 +306,7 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strings.HasPrefix(path, "/web/") {
+		noFraming(w)
 		if path == "/web/" {
 			data, err := web.FS.ReadFile("index.html")
 			if err != nil {
@@ -313,6 +335,7 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strings.HasPrefix(path, "/admin/api/") {
+		noFraming(w)
 		if msg := adminRequestError(r, s.auth.enabled()); msg != "" {
 			writeErr(w, http.StatusForbidden, msg)
 			return
@@ -327,6 +350,17 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.NotFound(w, r)
+}
+
+// noFraming forbids embedding the panel in another site's frame. Without a
+// password the admin checks (loopback peer and Host, same Origin, the
+// X-Devin2API header) all pass for a framed panel, so a page that frames it
+// could trick clicks onto delete or revoke buttons.
+func noFraming(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Content-Security-Policy", "frame-ancestors 'none'")
+	h.Set("X-Content-Type-Options", "nosniff")
 }
 
 // webFileServer serves embedded web assets from index.html through styles.css.

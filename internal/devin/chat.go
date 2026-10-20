@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -132,18 +133,50 @@ func (e *UpstreamError) Error() string {
 }
 
 // chatHTTPClient has no overall timeout: streams can run for minutes and are
-// bounded by the request context instead.
-var chatHTTPClient = &http.Client{}
+// bounded by the request context instead. Upstream must answer with headers
+// within responseHeaderTimeout, and send a frame at least every
+// streamIdleTimeout, or the call fails and the proxy can try elsewhere
+// instead of hanging until the client gives up.
+var chatHTTPClient = &http.Client{Transport: &http.Transport{
+	Proxy:                 http.ProxyFromEnvironment,
+	ForceAttemptHTTP2:     true,
+	MaxIdleConns:          100,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ResponseHeaderTimeout: responseHeaderTimeout,
+}}
+
+const responseHeaderTimeout = 60 * time.Second
+
+// streamIdleTimeout is a var so tests can shorten it.
+var streamIdleTimeout = 3 * time.Minute
+
+// errStreamStalled is the stall error, mapped to 504 so endpoint failover
+// treats it as the endpoint's failure.
+func errStreamStalled() error {
+	return &UpstreamError{Status: http.StatusGatewayTimeout, Code: "deadline_exceeded",
+		Message: fmt.Sprintf("upstream sent nothing for %v", streamIdleTimeout)}
+}
 
 // ResolveModel maps a client-facing model name to the upstream model UID.
 // "devin" and "" select DefaultModel; a "devin/" prefix is dropped and dots
 // become dashes ("claude-sonnet-4.6" -> "claude-sonnet-4-6").
 func ResolveModel(name string) string {
-	name = strings.TrimPrefix(strings.TrimSpace(name), "devin/")
-	if name == "" || name == "devin" {
+	name = strings.TrimSpace(name)
+	if len(name) >= 6 && strings.EqualFold(name[:6], "devin/") {
+		name = name[6:]
+	}
+	if name == "" || strings.EqualFold(name, "devin") {
 		return DefaultModel
 	}
 	return strings.ReplaceAll(name, ".", "-")
+}
+
+// Fingerprint is the device fingerprint sent with an account's requests.
+// It is derived from the account's session token, so each account looks
+// like its own device upstream instead of the whole pool sharing one.
+func Fingerprint(sessionToken string) string {
+	return GenerateFingerprint("devin2api-" + sessionToken)
 }
 
 // BuildChatRequest encodes a GetChatMessageRequest. Field layout:
@@ -261,7 +294,20 @@ func StreamChat(ctx context.Context, serverBase, sessionToken string, req ChatRe
 		serverBase = ServerBaseURL
 	}
 	sessionID := newUUID()
-	payload := BuildChatRequest(sessionToken, GenerateFingerprint("devin2api-cli"), sessionID, req)
+	payload := BuildChatRequest(sessionToken, Fingerprint(sessionToken), sessionID, req)
+
+	// Cancel the request when no frame arrives for streamIdleTimeout.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stalled := false
+	idle := time.AfterFunc(streamIdleTimeout, func() { stalled = true; cancel() })
+	defer idle.Stop()
+	stallErr := func(err error) error {
+		if stalled && ctx.Err() != nil {
+			return errStreamStalled()
+		}
+		return err
+	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, serverBase+chatPath, bytes.NewReader(envelope(payload)))
 	if err != nil {
@@ -277,7 +323,7 @@ func StreamChat(ctx context.Context, serverBase, sessionToken string, req ChatRe
 
 	resp, err := chatHTTPClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("chat request: %w", err)
+		return nil, stallErr(fmt.Errorf("chat request: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -290,11 +336,12 @@ func StreamChat(ctx context.Context, serverBase, sessionToken string, req ChatRe
 	defer func() { res.ToolCalls = tools.calls }()
 	for {
 		flag, frame, err := readFrame(resp.Body)
+		idle.Reset(streamIdleTimeout)
 		if err == io.EOF {
 			return res, errors.New("devin: stream ended without end-of-stream frame")
 		}
 		if err != nil {
-			return res, fmt.Errorf("devin: read frame: %w", err)
+			return res, stallErr(fmt.Errorf("devin: read frame: %w", err))
 		}
 		if flag&flagEndStream != 0 {
 			if err := trailerError(frame); err != nil {
@@ -641,7 +688,29 @@ func httpStatusError(resp *http.Response) error {
 	if status != http.StatusTooManyRequests && status < 500 {
 		status = http.StatusBadGateway
 	}
-	return &UpstreamError{Status: status, Code: "http_" + fmt.Sprint(resp.StatusCode), Message: strings.TrimSpace(string(body))}
+	return &UpstreamError{Status: status, Code: "http_" + fmt.Sprint(resp.StatusCode), Message: bodyExcerpt(body)}
+}
+
+// maxErrExcerpt bounds how much of a non-JSON error body (often an HTML
+// page) goes into an error message.
+const maxErrExcerpt = 512
+
+// bodyExcerpt trims a raw error body to a short, printable excerpt.
+func bodyExcerpt(body []byte) string {
+	s := strings.Map(func(r rune) rune {
+		if r < ' ' && r != '\n' && r != '\t' {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(string(body)))
+	if len(s) > maxErrExcerpt {
+		cut := maxErrExcerpt
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + "…"
+	}
+	return s
 }
 
 // utf8Buffer holds back a trailing incomplete UTF-8 sequence so a delta

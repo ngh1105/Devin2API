@@ -225,15 +225,20 @@ func (l *LoginState) Stop() {
 }
 
 // Wait blocks until the callback receives an authorization code (or an error)
-// or ctx is cancelled / timeout elapses. Returns the result.
+// or ctx is cancelled / timeout elapses. A timeout <= 0 means no timeout
+// (ctx alone bounds the wait). Returns the result.
 func (l *LoginState) Wait(ctx context.Context, timeout time.Duration) (Result, error) {
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	var timeoutC <-chan time.Time
+	if timeout > 0 {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timeoutC = timer.C
+	}
 
 	select {
 	case <-ctx.Done():
 		return Result{}, fmt.Errorf("login: context cancelled: %w", ctx.Err())
-	case <-timer.C:
+	case <-timeoutC:
 		return Result{}, errors.New("login timed out")
 	case res := <-l.resultCh:
 		if res.error != "" {

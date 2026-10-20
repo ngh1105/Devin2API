@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ngh1105/Devin2API/internal/devin"
 	"github.com/ngh1105/Devin2API/internal/openai"
@@ -154,12 +155,18 @@ func validateTools(tools []devin.Tool) error {
 			return fmt.Errorf("tools[%d]: duplicate tool name %q", i, t.Name)
 		}
 		seen[t.Name] = true
+		if isJSONNull(t.Parameters) {
+			tools[i].Parameters = nil // "parameters": null means none
+			continue
+		}
 		if len(t.Parameters) > 0 && !isJSONObject(t.Parameters) {
 			return fmt.Errorf("tools[%d]: parameters must be a JSON schema object", i)
 		}
 	}
 	return nil
 }
+
+func isJSONNull(b []byte) bool { return strings.TrimSpace(string(b)) == "null" }
 
 func isJSONObject(b []byte) bool {
 	return json.Valid(b) && strings.HasPrefix(strings.TrimSpace(string(b)), "{")
@@ -202,6 +209,17 @@ func readBody(r *http.Request) ([]byte, int, string) {
 func (s *Server) checkModel(ctx context.Context, dreq *devin.ChatRequest, requested string) (int, string) {
 	catalog := s.cachedModels()
 	dreq.Model = devin.MatchModel(dreq.Model, catalog)
+	// Chat clients rarely call /v1/models, so the catalog is refreshed from
+	// here too: in the background once it is old, and before rejecting a
+	// model it does not list, in case the model is new.
+	if s.catalogRefreshable() {
+		if len(catalog) > 0 && !devin.HasModel(dreq.Model, catalog) {
+			catalog = s.fetchModels(ctx)
+			dreq.Model = devin.MatchModel(dreq.Model, catalog)
+		} else {
+			go s.fetchModels(context.WithoutCancel(ctx))
+		}
+	}
 	if status, msg := s.keyModelCheck(ctx, requested, dreq.Model, devin.ResolveModel(dreq.Model)); status != 0 {
 		return status, msg
 	}
@@ -283,13 +301,24 @@ func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, 
 		var sw *stopWatcher
 		if len(req.Stop) > 0 {
 			sw = newStopWatcher(req.Stop, deliver)
-			deliver = sw.feed
 		}
 		var res *devin.ChatResult
 		var err error
+		// started marks output the client has seen (after any stop-sequence
+		// hold-back); until then another endpoint or account may be tried.
+		forward := deliver
+		deliver = func(d devin.Delta) error {
+			started = true
+			return forward(d)
+		}
+		if sw != nil {
+			sw.next = deliver
+		}
 		for i, base := range bases {
 			res, err = devin.StreamChat(ctx, base, acc.Tokens.SessionToken, req, func(d devin.Delta) error {
-				started = true
+				if sw != nil {
+					return sw.feed(d)
+				}
 				return deliver(d)
 			})
 			if started || i == len(bases)-1 || !endpointFailure(err) {
@@ -317,6 +346,14 @@ func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, 
 			}
 		}
 		if err == nil {
+			if acc.UsageErr == tokenExpiredMsg {
+				// The token works again (re-login): stop ranking it last.
+				s.accounts.Mutate(acc.ID, func(a *store.Account) {
+					if a.UsageErr == tokenExpiredMsg {
+						a.UsageErr = ""
+					}
+				})
+			}
 			return res, nil
 		}
 		lastErr = err
@@ -460,18 +497,42 @@ func upstreamStatus(err error) (int, string) {
 	case errors.Is(err, errNoAccount):
 		return http.StatusServiceUnavailable, err.Error()
 	case errors.As(err, &ue):
+		msg := clientMessage(ue.Message)
 		switch ue.Status {
 		case 499:
 			return http.StatusBadGateway, "upstream canceled the request"
 		case http.StatusUnauthorized:
-			return http.StatusBadGateway, "devin rejected the account token (re-login in the panel): " + ue.Message
+			return http.StatusBadGateway, "devin rejected the account token (re-login in the panel): " + msg
 		case http.StatusForbidden:
-			return http.StatusBadGateway, "devin refused the request: " + ue.Message
+			return http.StatusBadGateway, "devin refused the request: " + msg
 		}
-		return ue.Status, "devin: " + ue.Message
+		return ue.Status, "devin: " + msg
 	default:
-		return http.StatusBadGateway, err.Error()
+		return http.StatusBadGateway, clientMessage(err.Error())
 	}
+}
+
+// maxClientMsg bounds upstream text relayed to API clients: a raw error
+// body can be a whole HTML page.
+const maxClientMsg = 400
+
+// clientMessage shortens an upstream message for the client and drops
+// control characters; the full text stays in the server log.
+func clientMessage(msg string) string {
+	msg = strings.Map(func(r rune) rune {
+		if r < ' ' && r != '\n' && r != '\t' {
+			return -1
+		}
+		return r
+	}, msg)
+	if len(msg) > maxClientMsg {
+		cut := maxClientMsg
+		for cut > 0 && !utf8.RuneStart(msg[cut]) {
+			cut--
+		}
+		msg = msg[:cut] + "…"
+	}
+	return msg
 }
 
 // contentOrNull returns the reply text, or nil (JSON null) when the reply
@@ -604,7 +665,11 @@ func (s *Server) streamCompletion(ctx context.Context, tr *chatTrace, w http.Res
 		return
 	}
 	reason := finishReason(res)
-	if err := send(openai.ChatChunk{Choices: []openai.ChunkChoice{{Delta: openai.Delta{}, FinishReason: &reason}}}); err != nil {
+	last := openai.Delta{}
+	if first {
+		last.Role = "assistant" // nothing was streamed: the role goes here
+	}
+	if err := send(openai.ChatChunk{Choices: []openai.ChunkChoice{{Delta: last, FinishReason: &reason}}}); err != nil {
 		return
 	}
 	// With stream_options.include_usage, usage comes in its own final chunk

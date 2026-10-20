@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -136,7 +137,20 @@ func (s *responseStore) get(id, owner string) (conversation, bool) {
 	if !ok || it.owner != owner || time.Since(it.at) > ttl {
 		return conversation{}, false
 	}
-	return conversation{system: it.conv.system, prompts: append([]devin.Prompt(nil), it.conv.prompts...)}, true
+	return conversation{system: it.conv.system, prompts: clonePrompts(it.conv.prompts)}, true
+}
+
+// clonePrompts copies prompts and their slices, so a follow-up appending
+// tool calls to the last turn never writes into the stored history (two
+// concurrent follow-ups would otherwise share one backing array).
+func clonePrompts(prompts []devin.Prompt) []devin.Prompt {
+	out := make([]devin.Prompt, len(prompts))
+	for i, p := range prompts {
+		p.ToolCalls = slices.Clone(p.ToolCalls)
+		p.Images = slices.Clone(p.Images)
+		out[i] = p
+	}
+	return out
 }
 
 // assistantTurn rebuilds the assistant prompt from a finished response:

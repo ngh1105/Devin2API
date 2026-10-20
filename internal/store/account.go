@@ -131,14 +131,14 @@ func (a *Account) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	hasSchemaKey := false
 	schemaVer := int64(2) // default to v2 for unknown records
 	if raw, ok := parsed["schema"]; ok {
 		json.Unmarshal(raw, &schemaVer)
-		hasSchemaKey = true
 	}
 
-	isV1 := schemaVer < 2 || !hasSchemaKey || hasV1TokenMarker(parsed)
+	// A record without a schema key is v1 only if it has the v1 token shape;
+	// a hand-placed v2-shaped file keeps all its fields.
+	isV1 := schemaVer < 2 || hasV1TokenMarker(parsed)
 
 	if isV1 {
 		return a.migrateFromV1(data, parsed)
@@ -329,13 +329,8 @@ func (s *AccountStore) saveLocked(a *Account) error {
 		return fmt.Errorf("marshal account %s: %w", a.ID, err)
 	}
 	path := filepath.Join(s.dir, a.ID+".json")
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return fmt.Errorf("write tmp %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("rename %s → %s: %w", tmp, path, err)
+	if err := WriteFileAtomic(path, data, 0600); err != nil {
+		return fmt.Errorf("save account %s: %w", a.ID, err)
 	}
 	cp := *a
 	s.accounts[a.ID] = &cp
