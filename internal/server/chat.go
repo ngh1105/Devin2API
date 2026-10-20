@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/ngh1105/Devin2API/internal/devin"
 	"github.com/ngh1105/Devin2API/internal/openai"
@@ -315,6 +314,10 @@ func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, 
 			sw.next = deliver
 		}
 		for i, base := range bases {
+			if sw != nil {
+				// Text held back from a failed endpoint belongs to it.
+				sw.held, sw.hit = "", ""
+			}
 			res, err = devin.StreamChat(ctx, base, acc.Tokens.SessionToken, req, func(d devin.Delta) error {
 				if sw != nil {
 					return sw.feed(d)
@@ -518,22 +521,7 @@ const maxClientMsg = 400
 
 // clientMessage shortens an upstream message for the client and drops
 // control characters; the full text stays in the server log.
-func clientMessage(msg string) string {
-	msg = strings.Map(func(r rune) rune {
-		if r < ' ' && r != '\n' && r != '\t' {
-			return -1
-		}
-		return r
-	}, msg)
-	if len(msg) > maxClientMsg {
-		cut := maxClientMsg
-		for cut > 0 && !utf8.RuneStart(msg[cut]) {
-			cut--
-		}
-		msg = msg[:cut] + "…"
-	}
-	return msg
-}
+func clientMessage(msg string) string { return devin.Excerpt(msg, maxClientMsg) }
 
 // contentOrNull returns the reply text, or nil (JSON null) when the reply
 // is only tool calls, as the OpenAI API does.

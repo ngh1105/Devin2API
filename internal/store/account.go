@@ -159,6 +159,9 @@ func (a *Account) UnmarshalJSON(data []byte) error {
 	a.Plan = p.Plan
 	a.Nickname = p.Nickname
 	a.Enabled = p.Enabled
+	if _, ok := parsed["enabled"]; !ok {
+		a.Enabled = true // a hand-placed file without the key is usable
+	}
 	a.AuthKind = p.AuthKind
 	a.CreatedAt = p.CreatedAt
 	a.Tokens = p.Tokens

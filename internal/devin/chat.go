@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -139,6 +141,7 @@ func (e *UpstreamError) Error() string {
 // instead of hanging until the client gives up.
 var chatHTTPClient = &http.Client{Transport: &http.Transport{
 	Proxy:                 http.ProxyFromEnvironment,
+	DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 	ForceAttemptHTTP2:     true,
 	MaxIdleConns:          100,
 	IdleConnTimeout:       90 * time.Second,
@@ -299,11 +302,11 @@ func StreamChat(ctx context.Context, serverBase, sessionToken string, req ChatRe
 	// Cancel the request when no frame arrives for streamIdleTimeout.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	stalled := false
-	idle := time.AfterFunc(streamIdleTimeout, func() { stalled = true; cancel() })
+	var stalled atomic.Bool
+	idle := time.AfterFunc(streamIdleTimeout, func() { stalled.Store(true); cancel() })
 	defer idle.Stop()
 	stallErr := func(err error) error {
-		if stalled && ctx.Err() != nil {
+		if stalled.Load() && ctx.Err() != nil {
 			return errStreamStalled()
 		}
 		return err
@@ -513,7 +516,8 @@ func (t *toolTracker) feed(raw rawToolDelta) *ToolCallDelta {
 // after the active call's arguments already form complete JSON (the same
 // tool called twice). A repeated name whose arguments open a new JSON
 // object while the active call's arguments are still incomplete also
-// starts a new call: a continuation fragment carries no name.
+// starts a new call, unless those arguments end where a nested object
+// could begin ('[', ',' or ':'): a continuation fragment carries no name.
 func (t *toolTracker) continues(raw rawToolDelta) bool {
 	if raw.id != "" && t.upIDs[t.active] != "" {
 		return false
@@ -527,7 +531,9 @@ func (t *toolTracker) continues(raw rawToolDelta) bool {
 		if args == "" {
 			args = raw.invalidArgs
 		}
-		if cur.Arguments != "" && strings.HasPrefix(strings.TrimSpace(args), "{") {
+		have := strings.TrimSpace(cur.Arguments)
+		nested := strings.HasSuffix(have, "[") || strings.HasSuffix(have, ",") || strings.HasSuffix(have, ":")
+		if have != "" && !nested && strings.HasPrefix(strings.TrimSpace(args), "{") {
 			return false
 		}
 	}
@@ -688,23 +694,25 @@ func httpStatusError(resp *http.Response) error {
 	if status != http.StatusTooManyRequests && status < 500 {
 		status = http.StatusBadGateway
 	}
-	return &UpstreamError{Status: status, Code: "http_" + fmt.Sprint(resp.StatusCode), Message: bodyExcerpt(body)}
+	return &UpstreamError{Status: status, Code: "http_" + fmt.Sprint(resp.StatusCode), Message: Excerpt(string(body), maxErrExcerpt)}
 }
 
 // maxErrExcerpt bounds how much of a non-JSON error body (often an HTML
 // page) goes into an error message.
 const maxErrExcerpt = 512
 
-// bodyExcerpt trims a raw error body to a short, printable excerpt.
-func bodyExcerpt(body []byte) string {
-	s := strings.Map(func(r rune) rune {
-		if r < ' ' && r != '\n' && r != '\t' {
+// Excerpt trims s for a log line or an error message: control characters
+// (other than newline and tab) are dropped, and text past max bytes is
+// cut at a character boundary and marked with an ellipsis.
+func Excerpt(s string, max int) string {
+	s = strings.Map(func(r rune) rune {
+		if (r < ' ' && r != '\n' && r != '\t') || r == 0x7f {
 			return -1
 		}
 		return r
-	}, strings.TrimSpace(string(body)))
-	if len(s) > maxErrExcerpt {
-		cut := maxErrExcerpt
+	}, strings.TrimSpace(s))
+	if len(s) > max {
+		cut := max
 		for cut > 0 && !utf8.RuneStart(s[cut]) {
 			cut--
 		}

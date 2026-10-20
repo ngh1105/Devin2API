@@ -101,7 +101,7 @@ func TestParseUserStatusWireGuard(t *testing.T) {
 
 func TestBodyExcerpt(t *testing.T) {
 	long := strings.Repeat("<html>", 200) + "\x00\x01"
-	got := bodyExcerpt([]byte(long))
+	got := Excerpt(long, maxErrExcerpt)
 	if len(got) > maxErrExcerpt+4 || strings.ContainsAny(got, "\x00\x01") {
 		t.Errorf("excerpt len %d: %q", len(got), got[:40])
 	}
@@ -115,5 +115,16 @@ func TestLoginWaitNoTimeout(t *testing.T) {
 	_, err := l.Wait(ctx, 0)
 	if err == nil || !strings.Contains(err.Error(), "context") {
 		t.Errorf("err = %v, want a context error", err)
+	}
+}
+
+// TestToolTrackerNestedObjectContinues: a same-named fragment that opens
+// an object right where a nested one may start continues the call.
+func TestToolTrackerNestedObjectContinues(t *testing.T) {
+	tr := newToolTracker()
+	tr.feed(rawToolDelta{name: "write", args: `{"items": [`})
+	tr.feed(rawToolDelta{name: "write", args: `{"id":1}]}`})
+	if len(tr.calls) != 1 || tr.calls[0].Arguments != `{"items": [{"id":1}]}` {
+		t.Errorf("calls = %+v", tr.calls)
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -242,5 +244,46 @@ func TestLoginCancelBumpsGen(t *testing.T) {
 	m.Cancel()
 	if m.isCurrent(gen) {
 		t.Error("cancelled login still current")
+	}
+}
+
+// TestSettingsLoadDropsBadUpstream: an upstream the current rules refuse
+// is dropped on load; the other settings are kept.
+func TestSettingsLoadDropsBadUpstream(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"upstreams":["http://192.168.1.5:9000","https://ok.example"],"system_prompt":"keep me","system_prompt_enabled":true}`), 0o600)
+	var st settingsStore
+	st.load(dir)
+	v := st.get()
+	if v.SystemPrompt != "keep me" || len(v.Upstreams) != 1 || v.Upstreams[0] != "https://ok.example" {
+		t.Errorf("settings = %+v", v)
+	}
+}
+
+// TestStopWatcherResetBetweenEndpoints: text held back from an endpoint
+// that failed is not replayed into the next endpoint's output.
+func TestStopWatcherResetBetweenEndpoints(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/connect+proto")
+		w.Write(connectFrame(0, devin.PwFieldString(3, "There"))) // a stop prefix, all held
+		w.Write(connectFrame(2, []byte(`{"error":{"code":"unavailable","message":"down"}}`)))
+	}))
+	defer bad.Close()
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/connect+proto")
+		w.Write(connectFrame(0, devin.PwFieldString(3, "The answer is 4.")))
+		w.Write(connectFrame(0, devin.PwFieldVarint(5, 2)))
+		w.Write(connectFrame(2, []byte("{}")))
+	}))
+	defer good.Close()
+	// Distinct URLs: the settings de-duplicate upstreams.
+	srv := settingsChatServer(t, runtimeSettings{Upstreams: []string{bad.URL, good.URL}})
+	rec := postChat(srv, `{"model":"devin","stop":["There is"],"messages":[{"role":"user","content":"2+2?"}]}`)
+	var out struct {
+		Choices []struct{ Message struct{ Content string } }
+	}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if rec.Code != 200 || len(out.Choices) != 1 || out.Choices[0].Message.Content != "The answer is 4." {
+		t.Errorf("status %d body %s", rec.Code, rec.Body)
 	}
 }

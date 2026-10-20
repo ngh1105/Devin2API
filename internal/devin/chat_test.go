@@ -443,7 +443,7 @@ func TestSanitizeReportsDroppedLines(t *testing.T) {
 		t.Errorf("dropped %q from a clean prompt", dropped)
 	}
 	long := strings.Repeat("ă", 50)
-	if got := lineStart(long); utf8.ValidString(got) == false || len([]rune(got)) > 31 {
-		t.Errorf("lineStart = %q", got)
+	if got := Excerpt(long, 60); utf8.ValidString(got) == false || len([]rune(got)) > 31 {
+		t.Errorf("Excerpt = %q", got)
 	}
 }

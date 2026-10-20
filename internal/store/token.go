@@ -246,8 +246,6 @@ func (s *TokenStore) Use(id string, counted bool) (Token, error) {
 	return t, nil
 }
 
-// Refund takes back a request Use counted, for a request that was then
-// refused before reaching upstream.
 // Empty reports whether no API keys exist (keyless mode).
 func (s *TokenStore) Empty() bool {
 	s.mu.RLock()
@@ -255,6 +253,8 @@ func (s *TokenStore) Empty() bool {
 	return len(s.tokens) == 0
 }
 
+// Refund takes back a request Use counted, for a request that was then
+// refused before reaching upstream.
 func (s *TokenStore) Refund(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

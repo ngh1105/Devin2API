@@ -67,7 +67,6 @@ func (l *requestLog) load(dataDir string) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	for sc.Scan() {
@@ -77,6 +76,9 @@ func (l *requestLog) load(dataDir string) {
 			l.push(e)
 		}
 	}
+	// Close before compact may rename over the file: Windows refuses to
+	// replace a file that is still open.
+	f.Close()
 	if err := sc.Err(); err != nil {
 		// An over-long or unreadable line stops the scan; the rest of the
 		// file is unknown, so rewrite it from what was read.

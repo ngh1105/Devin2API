@@ -68,6 +68,18 @@ func (st *settingsStore) load(dataDir string) {
 		slog.Warn("settings: invalid settings.json, using defaults", "err", err)
 		return
 	}
+	// An upstream the current rules refuse (e.g. a plain-http LAN address
+	// saved by an older version) is dropped on its own, so the rest of the
+	// settings survive.
+	kept := v.Upstreams[:0]
+	for _, raw := range v.Upstreams {
+		if _, err := normalizeUpstream(raw); err != nil {
+			slog.Warn("settings: dropping upstream endpoint", "err", err)
+			continue
+		}
+		kept = append(kept, raw)
+	}
+	v.Upstreams = kept
 	if v, err = normalizeSettings(v); err != nil {
 		slog.Warn("settings: invalid settings.json, using defaults", "err", err)
 		return

@@ -3,7 +3,7 @@ package devin
 import (
 	"log/slog"
 	"strings"
-	"unicode/utf8"
+	"sync"
 )
 
 // Upstream rejects requests whose system prompt carries another agent's
@@ -14,7 +14,8 @@ import (
 // billing header and the two lines of its security policy. These line
 // rules drop such lines; the rest of the prompt is kept as sent. They are
 // substring matches, so a user's own line containing the same words is
-// dropped too; SanitizeSystemPrompt logs each drop for that reason.
+// dropped too; SanitizeSystemPrompt logs each distinct dropped line once
+// for that reason.
 var (
 	// dropLinePrefixes match the start of a trimmed line.
 	dropLinePrefixes = []string{
@@ -30,16 +31,42 @@ var (
 	}
 )
 
+// droppedSeen remembers which dropped lines were already logged, so the
+// lines Claude Code sends with every request are reported once, not on
+// every call. It is bounded; when full it starts over.
+var droppedSeen = struct {
+	sync.Mutex
+	lines map[string]struct{}
+}{lines: map[string]struct{}{}}
+
+const droppedSeenMax = 256
+
 // SanitizeSystemPrompt removes lines upstream refuses (see dropLinePrefixes
-// and dropLineSubstrings), normalises CRLF, and trims the result. Dropped
-// lines are logged (start only), since a prompt of the user's own that
-// happens to match would otherwise lose text silently.
+// and dropLineSubstrings), normalises CRLF, and trims the result. Each
+// distinct dropped line is logged once (its start only), since a prompt of
+// the user's own that happens to match would otherwise lose text silently.
 func SanitizeSystemPrompt(prompt string) string {
 	out, dropped := sanitizeSystemPrompt(prompt)
-	if len(dropped) > 0 {
-		slog.Warn("system prompt lines dropped (upstream refuses them)", "lines", len(dropped), "first", lineStart(dropped[0]))
+	for _, line := range dropped {
+		if firstDrop(line) {
+			slog.Warn("system prompt line dropped (upstream refuses it)", "line", Excerpt(line, 60))
+		}
 	}
 	return out
+}
+
+// firstDrop reports whether line has not been logged before.
+func firstDrop(line string) bool {
+	droppedSeen.Lock()
+	defer droppedSeen.Unlock()
+	if _, ok := droppedSeen.lines[line]; ok {
+		return false
+	}
+	if len(droppedSeen.lines) >= droppedSeenMax {
+		droppedSeen.lines = map[string]struct{}{}
+	}
+	droppedSeen.lines[line] = struct{}{}
+	return true
 }
 
 // sanitizeSystemPrompt is SanitizeSystemPrompt returning the dropped lines.
@@ -59,19 +86,6 @@ func sanitizeSystemPrompt(prompt string) (string, []string) {
 		kept = append(kept, line)
 	}
 	return strings.TrimSpace(strings.Join(kept, "\n")), dropped
-}
-
-// lineStart shortens a line for the log, so prompt text is not dumped.
-func lineStart(line string) string {
-	const n = 60
-	if len(line) <= n {
-		return line
-	}
-	cut := n
-	for cut > 0 && !utf8.RuneStart(line[cut]) {
-		cut--
-	}
-	return line[:cut] + "…"
 }
 
 func dropLine(trimmed string) bool {
