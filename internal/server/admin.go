@@ -369,41 +369,42 @@ func (s *Server) usageRefresh(w http.ResponseWriter, r *http.Request, id string)
 // ---------------------------------------------------------------------------
 
 func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request, id string) {
+	// A JSON null decodes into a nil pointer, so a field is only present
+	// when its pointer is set and does not spell "null".
 	rawBody := make(map[string]*json.RawMessage)
 	if err := json.NewDecoder(r.Body).Decode(&rawBody); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-
-	hasModifiable := false
-	if v, ok := rawBody["nickname"]; ok && *v != nil && string(*v) != "null" {
-		hasModifiable = true
-	}
-	if v, ok := rawBody["enabled"]; ok && *v != nil && string(*v) != "null" {
-		hasModifiable = true
-	}
-	if !hasModifiable {
-		writeErr(w, http.StatusBadRequest, "empty patch")
-		return
+	field := func(name string) (json.RawMessage, bool) {
+		v, ok := rawBody[name]
+		if !ok || v == nil || string(*v) == "null" {
+			return nil, false
+		}
+		return *v, true
 	}
 
 	var nickname *string
 	var enabled *bool
-	if v, ok := rawBody["nickname"]; ok && *v != nil && string(*v) != "null" {
+	if raw, ok := field("nickname"); ok {
 		var val string
-		if err := json.Unmarshal(*v, &val); err != nil {
+		if err := json.Unmarshal(raw, &val); err != nil {
 			writeErr(w, http.StatusBadRequest, "invalid nickname")
 			return
 		}
 		nickname = &val
 	}
-	if v, ok := rawBody["enabled"]; ok && *v != nil && string(*v) != "null" {
+	if raw, ok := field("enabled"); ok {
 		var val bool
-		if err := json.Unmarshal(*v, &val); err != nil {
+		if err := json.Unmarshal(raw, &val); err != nil {
 			writeErr(w, http.StatusBadRequest, "invalid enabled")
 			return
 		}
 		enabled = &val
+	}
+	if nickname == nil && enabled == nil {
+		writeErr(w, http.StatusBadRequest, "empty patch")
+		return
 	}
 
 	// Patch applies the change under the store lock, so a concurrent

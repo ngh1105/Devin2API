@@ -287,3 +287,36 @@ func TestStopWatcherResetBetweenEndpoints(t *testing.T) {
 		t.Errorf("status %d body %s", rec.Code, rec.Body)
 	}
 }
+
+// TestPatchAccountNullField: a JSON null for a field decodes into a nil
+// pointer; it must count as absent, not crash the handler.
+func TestPatchAccountNullField(t *testing.T) {
+	srv := chatTestServer(t, &fakeDevin{}, "eyJtok1")
+	accs, _ := srv.accounts.List()
+	id := accs[0].ID
+	for _, body := range []string{`{"nickname":null}`, `{"nickname":null,"enabled":null}`} {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, adminRequest(http.MethodPatch, "/admin/api/accounts/"+id, strings.NewReader(body)))
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "empty patch") {
+			t.Errorf("%s: %d %s", body, rec.Code, rec.Body)
+		}
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, adminRequest(http.MethodPatch, "/admin/api/accounts/"+id, strings.NewReader(`{"nickname":null,"enabled":false}`)))
+	if rec.Code != 200 {
+		t.Fatalf("patch enabled: %d %s", rec.Code, rec.Body)
+	}
+	if a, _ := srv.accounts.Get(id); a.Enabled {
+		t.Error("enabled=false not applied")
+	}
+}
+
+// TestUpstreamTestRejectsPlainHTTP: the endpoint test gives the real reason.
+func TestUpstreamTestRejectsPlainHTTP(t *testing.T) {
+	srv := chatTestServer(t, &fakeDevin{})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, adminRequest(http.MethodPost, "/admin/api/settings/upstream-test", strings.NewReader(`{"url":"http://devin.example.com"}`)))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "https") {
+		t.Errorf("%d %s", rec.Code, rec.Body)
+	}
+}

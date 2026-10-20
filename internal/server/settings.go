@@ -306,8 +306,12 @@ func (s *Server) handleUpstreamTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	base, err := normalizeUpstream(body.URL)
-	if err != nil || base == "" {
-		writeErr(w, http.StatusBadRequest, "url must be an http(s) URL")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if base == "" {
+		writeErr(w, http.StatusBadRequest, "url is required")
 		return
 	}
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, base+"/exa.api_server_pb.ApiServerService/GetCliModelConfigs", strings.NewReader(""))

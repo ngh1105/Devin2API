@@ -838,3 +838,21 @@ func TestMutateKeepsID(t *testing.T) {
 		t.Errorf("missing: %v", err)
 	}
 }
+
+// TestUpsertNewTokenClearsUsageErr: logging in again with a fresh token
+// drops the "token expired" mark left by the old one.
+func TestUpsertNewTokenClearsUsageErr(t *testing.T) {
+	s := mustStore(t)
+	old := AccountFromLogin("u", "usr_1", "org", "devin-session-token$old", "u@x", nil)
+	old.UsageErr = "token expired or revoked"
+	if err := s.Save(old); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Upsert(AccountFromLogin("u", "usr_1", "org", "devin-session-token$new", "u@x", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != old.ID || got.UsageErr != "" || got.Tokens.SessionToken != "devin-session-token$new" {
+		t.Errorf("merged = id %s err %q token set %v", got.ID, got.UsageErr, got.Tokens.SessionToken != "")
+	}
+}

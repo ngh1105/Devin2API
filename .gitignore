@@ -9,3 +9,4 @@
 # Tool state
 /.omc/
 /.claude/
+.codegraph/
