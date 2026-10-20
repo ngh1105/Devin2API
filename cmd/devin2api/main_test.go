@@ -19,7 +19,7 @@ import (
 // Devin endpoints.
 func TestRunLoginSavesAccount(t *testing.T) {
 	tmp := t.TempDir()
-	portCh := make(chan int, 1)
+	loginCh := make(chan *devin.LoginState, 1)
 
 	appServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/auth/cli/continue" {
@@ -72,15 +72,15 @@ func TestRunLoginSavesAccount(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runLogin(context.Background(), os.Stdout, cfg, func(p int) { portCh <- p })
+		errCh <- runLogin(context.Background(), os.Stdout, cfg, func(s *devin.LoginState) { loginCh <- s })
 	}()
 
-	port := <-portCh
+	login := <-loginCh
 	time.Sleep(100 * time.Millisecond)
 
 	cbReq, _ := http.NewRequest(http.MethodGet,
 		fmt.Sprintf("http://127.0.0.1:%d/callback?code=fake-code&state=%s",
-			port, devin.LastState()), nil)
+			login.Port, login.State), nil)
 	if _, err := http.DefaultClient.Do(cbReq); err != nil {
 		t.Fatal(err)
 	}

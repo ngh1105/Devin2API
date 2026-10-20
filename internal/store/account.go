@@ -737,6 +737,7 @@ func mergeOnlyExplicitFields(dst, src *Account) {
 	dst.Schema = src.Schema
 
 	// Token: only copy when the source actually carries one.
+	newToken := src.Tokens.SessionToken != "" && src.Tokens.SessionToken != dst.Tokens.SessionToken
 	if src.Tokens.SessionToken != "" {
 		dst.Tokens.SessionToken = src.Tokens.SessionToken
 	}
@@ -771,9 +772,13 @@ func mergeOnlyExplicitFields(dst, src *Account) {
 	if src.Usage != nil {
 		dst.Usage = src.Usage
 	}
-	// UsageError: only when the source has one.
-	if src.UsageErr != "" {
+	// UsageError: only when the source has one. A new token makes an old
+	// "token expired" mark stale, so a re-login clears it.
+	switch {
+	case src.UsageErr != "":
 		dst.UsageErr = src.UsageErr
+	case newToken:
+		dst.UsageErr = ""
 	}
 }
 

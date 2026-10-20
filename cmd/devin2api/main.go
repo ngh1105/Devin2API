@@ -51,8 +51,9 @@ func main() {
 // runLogin runs the CLI OAuth flow: start a local callback server, print the
 // login URL to stdout, wait for authentication, exchange code for token, fetch
 // profile, best-effort usage, save account, and print filepath.
-// For tests, pass notifyPort non-nil to receive the bound callback port.
-func runLogin(ctx context.Context, stdout io.Writer, cfg config.Config, notifyPort ...func(int)) error {
+// For tests, pass notify non-nil to receive the started login (its
+// callback port and OAuth state).
+func runLogin(ctx context.Context, stdout io.Writer, cfg config.Config, notify ...func(*devin.LoginState)) error {
 	appBase := ""
 	if cfg.BaseURL != "" {
 		appBase = cfg.BaseURL
@@ -63,8 +64,8 @@ func runLogin(ctx context.Context, stdout io.Writer, cfg config.Config, notifyPo
 		return fmt.Errorf("start login: %w", err)
 	}
 
-	if len(notifyPort) > 0 && notifyPort[0] != nil {
-		notifyPort[0](s.Port)
+	if len(notify) > 0 && notify[0] != nil {
+		notify[0](s)
 	}
 	defer s.Stop()
 
