@@ -737,6 +737,7 @@ func mergeOnlyExplicitFields(dst, src *Account) {
 	dst.Schema = src.Schema
 
 	// Token: only copy when the source actually carries one.
+	newToken := src.Tokens.SessionToken != "" && src.Tokens.SessionToken != dst.Tokens.SessionToken
 	if src.Tokens.SessionToken != "" {
 		dst.Tokens.SessionToken = src.Tokens.SessionToken
 	}
@@ -776,7 +777,7 @@ func mergeOnlyExplicitFields(dst, src *Account) {
 	switch {
 	case src.UsageErr != "":
 		dst.UsageErr = src.UsageErr
-	case src.Tokens.SessionToken != "" && src.Tokens.SessionToken != dst.Tokens.SessionToken:
+	case newToken:
 		dst.UsageErr = ""
 	}
 }
