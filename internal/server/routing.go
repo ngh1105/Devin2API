@@ -111,7 +111,15 @@ func (c *cooldowns) set(account, model string, d time.Duration) {
 	if c.until == nil {
 		c.until = map[string]time.Time{}
 	}
-	c.until[cooldownKey(account, model)] = time.Now().Add(d)
+	now := time.Now()
+	// Sweep ended cooldowns here, so the map does not grow with every
+	// account and model that was ever rate-limited.
+	for k, end := range c.until {
+		if now.After(end) {
+			delete(c.until, k)
+		}
+	}
+	c.until[cooldownKey(account, model)] = now.Add(d)
 }
 
 // get returns when the cooldown ends, or the zero time if none is active.

@@ -148,6 +148,7 @@ func New(cfg config.Config, accounts *store.AccountStore, tokens *store.TokenSto
 	s.reqLog.load(cfg.DataDir)
 	s.settings.load(cfg.DataDir)
 	s.auth.password = cfg.AdminPassword
+	s.storedResponses.configure(cfg.ResponsesKeep, cfg.ResponsesTTL, cfg.ResponsesMB)
 	return s
 }
 

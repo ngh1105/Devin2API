@@ -464,14 +464,25 @@ func (t *toolTracker) feed(raw rawToolDelta) *ToolCallDelta {
 // extends the active call. It starts a new call instead when it carries a
 // different upstream id, names a different function, or repeats the name
 // after the active call's arguments already form complete JSON (the same
-// tool called twice).
+// tool called twice). A repeated name whose arguments open a new JSON
+// object while the active call's arguments are still incomplete also
+// starts a new call: a continuation fragment carries no name.
 func (t *toolTracker) continues(raw rawToolDelta) bool {
 	if raw.id != "" && t.upIDs[t.active] != "" {
 		return false
 	}
 	cur := t.calls[t.active]
-	if raw.name != "" && cur.Name != "" && (raw.name != cur.Name || json.Valid([]byte(cur.Arguments))) {
-		return false
+	if raw.name != "" && cur.Name != "" {
+		if raw.name != cur.Name || json.Valid([]byte(cur.Arguments)) {
+			return false
+		}
+		args := raw.args
+		if args == "" {
+			args = raw.invalidArgs
+		}
+		if cur.Arguments != "" && strings.HasPrefix(strings.TrimSpace(args), "{") {
+			return false
+		}
 	}
 	return true
 }

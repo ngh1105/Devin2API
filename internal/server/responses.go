@@ -121,10 +121,11 @@ func toDevinFromResponses(req openai.ResponsesRequest, prior conversation) (devi
 }
 
 // appendAssistantText adds assistant text, merging into a directly
-// preceding assistant turn. Responses splits one turn into separate
-// message and function_call items; upstream wants them in one prompt.
+// preceding assistant turn whether or not it already holds tool calls.
+// Responses splits one turn into separate message and function_call items,
+// in either order; upstream wants them in one prompt.
 func appendAssistantText(prompts []devin.Prompt, text string) []devin.Prompt {
-	if n := len(prompts); n > 0 && prompts[n-1].Source == devin.SourceAssistant && len(prompts[n-1].ToolCalls) == 0 {
+	if n := len(prompts); n > 0 && prompts[n-1].Source == devin.SourceAssistant {
 		if prompts[n-1].Text != "" && text != "" {
 			prompts[n-1].Text += "\n"
 		}
@@ -157,10 +158,12 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var prior conversation
+	owner := responseOwner(r.Context())
 	if req.PreviousResponseID != "" {
 		var ok bool
-		if prior, ok = s.storedResponses.get(req.PreviousResponseID); !ok {
-			openai.WriteError(w, http.StatusBadRequest, fmt.Sprintf("previous_response_id %q not found: responses are kept in memory for %v and lost on restart; send the full conversation in input instead", req.PreviousResponseID, responseTTL))
+		if prior, ok = s.storedResponses.get(req.PreviousResponseID, owner); !ok {
+			_, _, ttl := s.storedResponses.limits()
+			openai.WriteError(w, http.StatusBadRequest, fmt.Sprintf("previous_response_id %q not found: responses are kept in memory for %v, per API key, and lost on restart; send the full conversation in input instead", req.PreviousResponseID, ttl))
 			return
 		}
 	}
@@ -204,7 +207,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ShouldStore() {
 		history := append(append([]devin.Prompt(nil), dreq.Prompts...), assistantTurn(seg.segs, res))
-		s.storedResponses.put(rw.id, conversation{system: convSystem, prompts: history})
+		s.storedResponses.put(rw.id, owner, conversation{system: convSystem, prompts: history})
 	}
 	statusStr, incompleteReason := "completed", ""
 	switch finishReason(res) {

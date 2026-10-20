@@ -406,3 +406,44 @@ func TestSanitizeSystemPrompt(t *testing.T) {
 		}
 	}
 }
+
+// TestToolTrackerSameNameRestartsIncompleteCall: the same tool named again
+// with arguments that open a new object starts a new call even when the
+// previous call's arguments never completed (a continuation carries no
+// name).
+func TestToolTrackerSameNameRestartsIncompleteCall(t *testing.T) {
+	tr := newToolTracker()
+	tr.feed(rawToolDelta{name: "write", args: `{"path":"a", "text":"unfinished`})
+	tr.feed(rawToolDelta{name: "write", args: `{"path":`})
+	tr.feed(rawToolDelta{args: `"b"}`})
+	if len(tr.calls) != 2 {
+		t.Fatalf("got %d calls: %+v", len(tr.calls), tr.calls)
+	}
+	if tr.calls[1].Arguments != `{"path":"b"}` {
+		t.Errorf("second call args = %q", tr.calls[1].Arguments)
+	}
+	// A nameless fragment, or a named one that does not open an object,
+	// still continues the call.
+	tr2 := newToolTracker()
+	tr2.feed(rawToolDelta{name: "f", args: `{"a":`})
+	tr2.feed(rawToolDelta{name: "f", args: `1}`})
+	if len(tr2.calls) != 1 || tr2.calls[0].Arguments != `{"a":1}` {
+		t.Errorf("calls = %+v", tr2.calls)
+	}
+}
+
+// TestSanitizeReportsDroppedLines: the dropped lines are returned (and
+// logged), shortened for the log.
+func TestSanitizeReportsDroppedLines(t *testing.T) {
+	out, dropped := sanitizeSystemPrompt("Keep.\nYou are Claude Code, Anthropic's official CLI for Claude.\nAlso keep.")
+	if out != "Keep.\nAlso keep." || len(dropped) != 1 || !strings.HasPrefix(dropped[0], "You are Claude Code") {
+		t.Errorf("out %q dropped %q", out, dropped)
+	}
+	if _, dropped := sanitizeSystemPrompt("nothing to drop"); dropped != nil {
+		t.Errorf("dropped %q from a clean prompt", dropped)
+	}
+	long := strings.Repeat("ă", 50)
+	if got := lineStart(long); utf8.ValidString(got) == false || len([]rune(got)) > 31 {
+		t.Errorf("lineStart = %q", got)
+	}
+}

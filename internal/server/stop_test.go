@@ -148,7 +148,7 @@ func TestResponsesPreviousResponseID(t *testing.T) {
 	}
 
 	// The stored conversation is the first exchange plus the new turn.
-	conv, ok := srv.storedResponses.get(second.ID)
+	conv, ok := srv.storedResponses.get(second.ID, "")
 	prompts := conv.prompts
 	want := []string{"first question", "pong", "second question", "pong"}
 	if !ok || len(prompts) != len(want) {
@@ -172,15 +172,15 @@ func TestResponsesPreviousResponseID(t *testing.T) {
 func TestResponseStoreEviction(t *testing.T) {
 	var s responseStore
 	for i := 0; i < responseStoreSize+10; i++ {
-		s.put(fmt.Sprintf("resp_%d", i), conversation{})
+		s.put(fmt.Sprintf("resp_%d", i), "", conversation{})
 	}
 	if len(s.items) != responseStoreSize {
 		t.Errorf("store holds %d, cap %d", len(s.items), responseStoreSize)
 	}
-	if _, ok := s.get("resp_0"); ok {
+	if _, ok := s.get("resp_0", ""); ok {
 		t.Error("oldest entry not evicted")
 	}
-	if _, ok := s.get(fmt.Sprintf("resp_%d", responseStoreSize+9)); !ok {
+	if _, ok := s.get(fmt.Sprintf("resp_%d", responseStoreSize+9), ""); !ok {
 		t.Error("newest entry missing")
 	}
 }

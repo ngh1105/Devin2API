@@ -1,29 +1,38 @@
 package server
 
 import (
+	"context"
 	"sync"
 	"time"
 
 	"github.com/ngh1105/Devin2API/internal/devin"
 )
 
-// Responses kept for previous_response_id. They live in memory only, so a
-// restart forgets them; clients can always send the full history instead.
-// Histories can carry base64 images (up to 32 MB per request), so the
-// store is capped by total size as well as by count.
+// Default bounds of the responses kept for previous_response_id. They live
+// in memory only, so a restart forgets them; clients can always send the
+// full history instead. Histories can carry base64 images (up to 32 MB per
+// request), so the store is capped by total size as well as by count. The
+// server configuration (DEVIN2API_RESPONSES_*) overrides them.
 const (
-	responseStoreSize  = 256
+	responseStoreSize  = 1024
 	responseStoreBytes = 64 << 20
-	responseTTL        = time.Hour
+	responseTTL        = 24 * time.Hour
 )
 
 // responseStore maps a response id to the conversation it ended: the input
-// prompts (including any earlier turns) plus the assistant's reply.
+// prompts (including any earlier turns) plus the assistant's reply. Each
+// entry remembers the API key that made it, so a follow-up from another
+// key does not find it.
 type responseStore struct {
 	mu    sync.Mutex
 	items map[string]storedResponse
 	order []string // insertion order, oldest first
 	bytes int      // total size of stored histories
+
+	// Bounds; zero means the default above.
+	maxItems int
+	maxBytes int
+	ttl      time.Duration
 }
 
 // conversation is what a stored response continues: the system text from
@@ -34,9 +43,40 @@ type conversation struct {
 }
 
 type storedResponse struct {
-	conv conversation
-	at   time.Time
-	size int
+	conv  conversation
+	owner string // API key id, "" in keyless mode
+	at    time.Time
+	size  int
+}
+
+// configure sets the bounds; zero values keep the defaults.
+func (s *responseStore) configure(keep int, ttl time.Duration, mb int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxItems, s.ttl, s.maxBytes = keep, ttl, mb<<20
+}
+
+func (s *responseStore) limits() (items, bytes int, ttl time.Duration) {
+	items, bytes, ttl = s.maxItems, s.maxBytes, s.ttl
+	if items <= 0 {
+		items = responseStoreSize
+	}
+	if bytes <= 0 {
+		bytes = responseStoreBytes
+	}
+	if ttl <= 0 {
+		ttl = responseTTL
+	}
+	return items, bytes, ttl
+}
+
+// responseOwner identifies the caller a stored response belongs to: the API
+// key id, or "" when /v1 runs without keys.
+func responseOwner(ctx context.Context) string {
+	if k, ok := apiKeyFrom(ctx); ok {
+		return k.ID
+	}
+	return ""
 }
 
 // promptsSize approximates a history's memory use by its text payloads.
@@ -54,26 +94,28 @@ func promptsSize(prompts []devin.Prompt) int {
 	return n
 }
 
-// put stores a history; one larger than the whole budget is not kept.
-func (s *responseStore) put(id string, conv conversation) {
-	size := len(conv.system) + promptsSize(conv.prompts)
-	if size > responseStoreBytes {
-		return
-	}
+// put stores a history for owner; one larger than the whole budget is not
+// kept.
+func (s *responseStore) put(id, owner string, conv conversation) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	maxItems, maxBytes, ttl := s.limits()
+	size := len(conv.system) + promptsSize(conv.prompts)
+	if size > maxBytes {
+		return
+	}
 	if s.items == nil {
 		s.items = map[string]storedResponse{}
 	}
-	s.items[id] = storedResponse{conv: conv, at: time.Now(), size: size}
+	s.items[id] = storedResponse{conv: conv, owner: owner, at: time.Now(), size: size}
 	s.order = append(s.order, id)
 	s.bytes += size
 	// Drop expired entries and the oldest beyond the count or size cap.
-	cutoff := time.Now().Add(-responseTTL)
+	cutoff := time.Now().Add(-ttl)
 	for len(s.order) > 0 {
 		oldest := s.order[0]
 		it, ok := s.items[oldest]
-		if ok && len(s.items) <= responseStoreSize && s.bytes <= responseStoreBytes && it.at.After(cutoff) {
+		if ok && len(s.items) <= maxItems && s.bytes <= maxBytes && it.at.After(cutoff) {
 			break
 		}
 		if ok {
@@ -84,12 +126,14 @@ func (s *responseStore) put(id string, conv conversation) {
 	}
 }
 
-// get returns a copy of the stored conversation, if still kept.
-func (s *responseStore) get(id string) (conversation, bool) {
+// get returns a copy of the stored conversation, if still kept and made by
+// the same owner.
+func (s *responseStore) get(id, owner string) (conversation, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_, _, ttl := s.limits()
 	it, ok := s.items[id]
-	if !ok || time.Since(it.at) > responseTTL {
+	if !ok || it.owner != owner || time.Since(it.at) > ttl {
 		return conversation{}, false
 	}
 	return conversation{system: it.conv.system, prompts: append([]devin.Prompt(nil), it.conv.prompts...)}, true
