@@ -79,12 +79,12 @@
     </div>
     <nav class="tab-nav">
       <span class="nav-label">Workspace</span>
-      <button class="tab active" data-tab="accounts"><svg class="icon"><use href="#i-users"/></svg><span>Accounts</span><span class="nav-count" id="nav-count-accounts"></span></button>
-      <button class="tab" data-tab="tokens"><svg class="icon"><use href="#i-key"/></svg><span>API Keys</span><span class="nav-count" id="nav-count-tokens"></span></button>
-      <button class="tab" data-tab="logs"><svg class="icon"><use href="#i-list"/></svg><span>Logs</span></button>
+      <button class="tab active" data-tab="accounts" aria-label="Accounts"><svg class="icon"><use href="#i-users"/></svg><span>Accounts</span><span class="nav-count" id="nav-count-accounts"></span></button>
+      <button class="tab" data-tab="tokens" aria-label="API Keys"><svg class="icon"><use href="#i-key"/></svg><span>API Keys</span><span class="nav-count" id="nav-count-tokens"></span></button>
+      <button class="tab" data-tab="logs" aria-label="Logs"><svg class="icon"><use href="#i-list"/></svg><span>Logs</span></button>
       <span class="nav-label">System</span>
-      <button class="tab" data-tab="settings"><svg class="icon"><use href="#i-gear"/></svg><span>Settings</span></button>
-      <button class="tab" data-tab="api"><svg class="icon"><use href="#i-code"/></svg><span>API</span></button>
+      <button class="tab" data-tab="settings" aria-label="Settings"><svg class="icon"><use href="#i-gear"/></svg><span>Settings</span></button>
+      <button class="tab" data-tab="api" aria-label="API"><svg class="icon"><use href="#i-code"/></svg><span>API</span></button>
     </nav>
     <div class="sidebar-foot">
       <div class="status-card">
@@ -97,7 +97,7 @@
         <button class="theme-opt" data-theme-choice="system" title="Follow system" role="radio"><svg class="icon"><use href="#i-monitor"/></svg></button>
         <button class="theme-opt" data-theme-choice="dark" title="Dark" role="radio"><svg class="icon"><use href="#i-moon"/></svg></button>
       </div>
-      <button id="btn-logout" class="btn-ghost hidden"><svg class="icon"><use href="#i-logout"/></svg><span>Log out</span></button>
+      <button id="btn-logout" class="btn-ghost hidden" aria-label="Log out"><svg class="icon"><use href="#i-logout"/></svg><span>Log out</span></button>
     </div>
   </aside>
 
@@ -494,7 +494,7 @@
 </div>
 
 <!-- Toast container -->
-<div id="toast-container"></div>
+<div id="toast-container" role="status" aria-live="polite"></div>
 
 <script src="/web/app.js"></script>
 </body>

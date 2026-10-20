@@ -65,6 +65,7 @@ jobs:
 
   image:
     if: github.ref_type == 'tag'
+    needs: binaries # never publish an image whose tests failed
     runs-on: ubuntu-latest
     permissions:
       contents: read

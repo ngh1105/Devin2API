@@ -34,9 +34,15 @@ func (s *Server) refreshUsage(ctx context.Context, id string) (*store.Account, e
 	if err != nil {
 		return nil, err
 	}
-	usage, err := s.fetchUserStatus(ctx, acct.Tokens.SessionToken)
+	token := acct.Tokens.SessionToken
+	usage, err := s.fetchUserStatus(ctx, token)
+	// A re-login during the fetch replaces the token; the result then
+	// describes the old one and must not be written over the new account.
 	if errors.Is(err, devin.ErrTokenExpired) {
 		s.accounts.Mutate(id, func(a *store.Account) {
+			if a.Tokens.SessionToken != token {
+				return
+			}
 			a.UsageErr = tokenExpiredMsg
 			a.Usage = nil
 		})
@@ -49,6 +55,9 @@ func (s *Server) refreshUsage(ctx context.Context, id string) (*store.Account, e
 		usage.CheckedAt = time.Now().Unix()
 	}
 	return s.accounts.Mutate(id, func(a *store.Account) {
+		if a.Tokens.SessionToken != token {
+			return
+		}
 		a.Usage = usage
 		a.UsageErr = ""
 	})
@@ -111,7 +120,15 @@ func (c *cooldowns) set(account, model string, d time.Duration) {
 	if c.until == nil {
 		c.until = map[string]time.Time{}
 	}
-	c.until[cooldownKey(account, model)] = time.Now().Add(d)
+	now := time.Now()
+	// Sweep ended cooldowns here, so the map does not grow with every
+	// account and model that was ever rate-limited.
+	for k, end := range c.until {
+		if now.After(end) {
+			delete(c.until, k)
+		}
+	}
+	c.until[cooldownKey(account, model)] = now.Add(d)
 }
 
 // get returns when the cooldown ends, or the zero time if none is active.

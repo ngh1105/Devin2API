@@ -154,44 +154,87 @@
   // dismiss whichever dialog is on top.
   var dialogClose = null;
 
-  function showDialog(id, onClose) {
-    document.getElementById(id).classList.remove("hidden");
-    dialogClose = function () {
-      document.getElementById(id).classList.add("hidden");
-      dialogClose = null;
-      if (onClose) onClose();
+  // showDialog opens the overlay `id`. opts.onClose runs when it closes;
+  // opts.sticky keeps Escape and backdrop clicks from closing it (used for
+  // the one-time key reveal, whose value cannot be shown again). Focus is
+  // kept inside the dialog and returned to the opener on close.
+  function showDialog(id, opts) {
+    opts = opts || {};
+    if (typeof opts === "function") opts = { onClose: opts };
+    var el = document.getElementById(id);
+    var opener = document.activeElement;
+    el.classList.remove("hidden");
+    var close = function () {
+      el.classList.add("hidden");
+      if (dialogClose === close) dialogClose = null;
+      if (opts.onClose) opts.onClose();
+      if (opener && opener.focus && document.body.contains(opener)) opener.focus();
     };
+    close.sticky = !!opts.sticky;
+    close.el = el;
+    dialogClose = close;
   }
 
   // confirmDialog asks a yes/no question in a styled dialog; it resolves
-  // true when the action is confirmed.
+  // true when the action is confirmed and false when it is dismissed.
   function confirmDialog(title, message, action) {
     return new Promise(function (resolve) {
       document.getElementById("confirm-title").textContent = title;
       document.getElementById("confirm-msg").textContent = message;
       var ok = document.getElementById("confirm-ok");
+      var cancel = document.getElementById("confirm-cancel");
       ok.textContent = action || "Delete";
-      var done = function (v) {
+      var settled = false;
+      var settle = function (v) {
+        if (settled) return;
+        settled = true;
         ok.onclick = null;
-        document.getElementById("confirm-cancel").onclick = null;
-        if (dialogClose) dialogClose();
+        cancel.onclick = null;
         resolve(v);
       };
-      showDialog("confirm-overlay", function () { resolve(false); });
+      var done = function (v) {
+        settle(v);
+        if (dialogClose) dialogClose();
+      };
+      showDialog("confirm-overlay", { onClose: function () { settle(false); } });
       ok.onclick = function () { done(true); };
-      document.getElementById("confirm-cancel").onclick = function () { done(false); };
-      ok.focus();
+      cancel.onclick = function () { done(false); };
+      // Focus the safe choice: Enter must not delete by accident.
+      cancel.focus();
+    });
+  }
+
+  // focusable lists the elements Tab can reach inside a dialog.
+  function focusable(root) {
+    var nodes = root.querySelectorAll("button, [href], input, select, textarea, [tabindex]");
+    return Array.prototype.filter.call(nodes, function (n) {
+      return !n.disabled && n.tabIndex >= 0 && n.offsetParent !== null;
     });
   }
 
   function setupDialogs() {
     document.addEventListener("keydown", function (ev) {
-      if (ev.key === "Escape" && dialogClose) dialogClose();
+      if (!dialogClose) return;
+      if (ev.key === "Escape") {
+        if (!dialogClose.sticky) dialogClose();
+        return;
+      }
+      if (ev.key !== "Tab") return;
+      // Trap Tab inside the open dialog.
+      var items = focusable(dialogClose.el);
+      if (!items.length) return;
+      var first = items[0], last = items[items.length - 1];
+      if (ev.shiftKey && (document.activeElement === first || !dialogClose.el.contains(document.activeElement))) {
+        ev.preventDefault(); last.focus();
+      } else if (!ev.shiftKey && (document.activeElement === last || !dialogClose.el.contains(document.activeElement))) {
+        ev.preventDefault(); first.focus();
+      }
     });
-    ["confirm-overlay", "key-overlay"].forEach(function (id) {
+    ["confirm-overlay", "key-overlay", "reveal-overlay", "modal-overlay"].forEach(function (id) {
       var el = document.getElementById(id);
+      if (!el) return;
       el.addEventListener("mousedown", function (ev) {
-        if (ev.target === el && dialogClose) dialogClose();
+        if (ev.target === el && dialogClose && !dialogClose.sticky) dialogClose();
       });
     });
   }
@@ -420,7 +463,8 @@
   function logKey(e) { return e.time + "|" + e.endpoint + "|" + e.account; }
 
   function loadLogs() {
-    Promise.all([apiGet("/admin/api/logs?limit=1000"), apiGet("/admin/api/stats")]).then(function (r) {
+    logLoading = true;
+    Promise.all([apiGet("/admin/api/logs?limit=1000"), apiGet("/admin/api/stats")]).finally(function () { logLoading = false; }).then(function (r) {
       logCache = r[0] || [];
       lastHourly = r[1].hourly || [];
       renderActivity();
@@ -632,9 +676,20 @@
 
   // setLogAuto turns the 5-second refresh on or off; it only fetches while
   // the Logs tab is open.
+  // canPoll tells a background timer whether to fetch: not while the page is
+  // hidden or the admin login is showing (a 401 would only repeat).
+  function canPoll() {
+    return !document.hidden && document.getElementById("login-overlay").classList.contains("hidden");
+  }
+
+  var logLoading = false;
+
   function setLogAuto(on) {
     if (logTimer) { clearInterval(logTimer); logTimer = null; }
-    if (on) logTimer = setInterval(function () { if (activeTab === "logs" && !document.hidden) loadLogs(); }, 5000);
+    if (on) logTimer = setInterval(function () {
+      // Skip a tick while the previous load is still running.
+      if (activeTab === "logs" && canPoll() && !logLoading) loadLogs();
+    }, 5000);
     try { localStorage.setItem("devin2api-log-auto", on ? "1" : ""); } catch (e) { /* storage unavailable */ }
   }
 
@@ -962,7 +1017,15 @@
   }
 
   function setupBulk() {
-    var redraw = function () { acctPage = 0; drawAccounts(); };
+    // A new search or filter drops selected accounts it hides, so a bulk
+    // action never touches rows the user cannot see.
+    var redraw = function () {
+      acctPage = 0;
+      var vis = {};
+      visibleAccounts().forEach(function (a) { vis[a.id] = true; });
+      Object.keys(selected).forEach(function (id) { if (!vis[id]) delete selected[id]; });
+      drawAccounts();
+    };
     document.getElementById("acct-search").oninput = redraw;
     document.getElementById("acct-filter").onchange = redraw;
     document.getElementById("acct-check-all").onchange = function (ev) {
@@ -1238,7 +1301,8 @@
   // revealKey shows a new key's value once, with a copy button.
   function revealKey(value) {
     document.getElementById("reveal-value").textContent = value;
-    showDialog("reveal-overlay", function () { document.getElementById("reveal-value").textContent = ""; });
+    // Sticky: the value is shown once, so only Done may close this.
+    showDialog("reveal-overlay", { sticky: true, onClose: function () { document.getElementById("reveal-value").textContent = ""; } });
     document.getElementById("reveal-copy").focus();
   }
 
@@ -1446,7 +1510,10 @@
   }
 
   function setupSettings() {
+    // draft is null until the settings have loaded; until then the controls
+    // have nothing to edit.
     document.getElementById("btn-upstream-add").onclick = function () {
+      if (!draft) return;
       // The first added row starts from the default so the order is explicit.
       if (!draft.upstreams.length && defaultUpstream) draft.upstreams.push(defaultUpstream);
       draft.upstreams.push("");
@@ -1456,10 +1523,15 @@
       if (inputs.length) inputs[inputs.length - 1].focus();
     };
     document.getElementById("sp-enabled").onchange = function (ev) {
+      if (!draft) return;
       draft.system_prompt_enabled = ev.target.checked; updatePromptCount(); markDirty();
     };
-    document.getElementById("sp-mode").onchange = function (ev) { draft.system_prompt_mode = ev.target.value; markDirty(); };
+    document.getElementById("sp-mode").onchange = function (ev) {
+      if (!draft) return;
+      draft.system_prompt_mode = ev.target.value; markDirty();
+    };
     document.getElementById("sp-text").oninput = function (ev) {
+      if (!draft) return;
       draft.system_prompt = ev.target.value; updatePromptCount(); markDirty();
     };
     document.getElementById("btn-settings-save").onclick = saveSettings;
@@ -1528,18 +1600,23 @@
   // ---- Modal ----
 
   function openModal() {
-    document.getElementById("modal-overlay").className = "modal-overlay";
     document.getElementById("import-status").textContent = "";
     document.getElementById("import-ta").value = "";
     document.getElementById("manual-status").textContent = "";
     document.getElementById("manual-token").value = "";
     document.getElementById("login-area").className = "login-area hidden";
+    // Closing the dialog while a browser login is pending cancels it on
+    // the server too, so it does not stay pending in the background.
+    showDialog("modal-overlay", { onClose: function () { if (loginPollInterval) cancelLogin(); } });
   }
 
-  // Closing the dialog while a browser login is pending cancels it on the
-  // server too, so it does not stay pending in the background.
   function closeModal() {
-    document.getElementById("modal-overlay").className = "modal-overlay hidden";
+    var el = document.getElementById("modal-overlay");
+    if (dialogClose && dialogClose.el === el) {
+      dialogClose();
+      return;
+    }
+    el.classList.add("hidden");
     if (loginPollInterval) cancelLogin();
   }
 
@@ -1566,7 +1643,7 @@
       ["/v1/models", "GET", "List available models (OpenAI-compatible)"],
       ["/v1/chat/completions", "POST", 'Chat completions via Devin (stream + non-stream, tool calls)'],
       ["/v1/messages", "POST", "Anthropic Messages API (Claude Code, Anthropic SDKs)"],
-      ["/v1/responses", "POST", "OpenAI Responses API (previous_response_id kept 1 h in memory)"],
+      ["/v1/responses", "POST", "OpenAI Responses API (previous_response_id kept 24 h in memory, per API key)"],
       ["/v1/completions", "POST", "Legacy text completions, emulated on the chat models"],
       ["/admin/api/accounts", "GET / POST", "List or import accounts"],
       ["/admin/api/stats", "GET", "Totals plus request counts for each of the last 24 hours"],
@@ -1602,6 +1679,14 @@
     loadAccounts();
     loadTokens(); // for the sidebar count
     loadVersion();
+    // After a re-login the open tab may be stale or empty.
+    if (activeTab !== "accounts" && activeTab !== "tokens" && tabLoaders[activeTab]) tabLoaders[activeTab]();
+  }
+
+  // The status card only knows what the last stats request saw, so poll
+  // it; a failed poll marks the server unreachable.
+  function setupStatusPoll() {
+    setInterval(function () { if (canPoll()) loadStats(); }, 30000);
   }
 
   function boot() {
@@ -1612,6 +1697,7 @@
     setupDialogs();
     setupLogs();
     setupKeys();
+    setupStatusPoll();
     renderTokens([]); // placeholder until tab clicked
     setupAdminLogin(loadInitialData).then(function (ready) {
       if (ready) loadInitialData();

@@ -18,20 +18,20 @@ func TestResponseStoreByteCap(t *testing.T) {
 	img := strings.Repeat("A", responseStoreBytes/4)
 	big := []devin.Prompt{{Source: devin.SourceUser, Images: []devin.Image{{MimeType: "image/png", Base64: img}}}}
 	for i := 0; i < 10; i++ {
-		s.put(fmt.Sprintf("resp_%d", i), conversation{prompts: big})
+		s.put(fmt.Sprintf("resp_%d", i), "", conversation{prompts: big})
 	}
 	if s.bytes > responseStoreBytes {
 		t.Errorf("stored %d bytes, budget %d", s.bytes, responseStoreBytes)
 	}
-	if _, ok := s.get("resp_9"); !ok {
+	if _, ok := s.get("resp_9", ""); !ok {
 		t.Error("newest entry evicted")
 	}
-	if _, ok := s.get("resp_0"); ok {
+	if _, ok := s.get("resp_0", ""); ok {
 		t.Error("oldest entry kept past the budget")
 	}
 	huge := []devin.Prompt{{Source: devin.SourceUser, Text: strings.Repeat("x", responseStoreBytes+1)}}
-	s.put("resp_huge", conversation{prompts: huge})
-	if _, ok := s.get("resp_huge"); ok {
+	s.put("resp_huge", "", conversation{prompts: huge})
+	if _, ok := s.get("resp_huge", ""); ok {
 		t.Error("history larger than the budget was kept")
 	}
 }

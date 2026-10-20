@@ -52,6 +52,9 @@ DEVIN2API_LISTEN="127.0.0.1:8080" DEVIN2API_DATA="./data" ./devin2api
 | `DEVIN2API_LISTEN` | `127.0.0.1:8080` | Address to bind the HTTP server.             |
 | `DEVIN2API_DATA`   | `./data`         | Root directory for accounts, tokens, config. |
 | `DEVIN2API_ADMIN_PASSWORD` | (unset) | Protects the panel and admin API with a login, and allows using them from other hosts (e.g. the LAN). |
+| `DEVIN2API_RESPONSES_KEEP` | `1024` | How many `/v1/responses` histories to keep for `previous_response_id`. |
+| `DEVIN2API_RESPONSES_TTL` | `24h` | How long to keep them (a Go duration such as `2h` or `30m`). |
+| `DEVIN2API_RESPONSES_MB` | `64` | Total size budget of the kept histories, in MB. |
 
 The server exposes:
 
@@ -186,7 +189,7 @@ Single-page app at `/web/` with five tabs:
 | **Accounts** | Account list with usage bars, search, status filter and pages of 10–100; add (browser login, pasted session token or JSON import), enable/disable, delete, refresh usage. Tick rows (or the header box for the page, then "Select all matching") to refresh, enable, disable or delete many at once. |
 | **API Keys** | Create keys with a name, expiry date, model allow list and request quota; edit, disable, reset the counter or revoke them. Shows each key's status, requests used and last use. |
 | **Logs**     | A chart of the last 24 hours (succeeded / failed requests per hour, tokens in and out), the top models, accounts and API keys, and the last 1000 chat requests with search, filters, pages and auto-refresh. Click a row for every detail: endpoint, models, account, API key, attempts, status, duration, time to first output, tokens, tool calls, finish reason and upstream error. |
-| **Settings** | Devin endpoints, global system prompt, and the listen address / data directory (read-only, set via environment variables) |
+| **Settings** | Devin endpoints (https only, except localhost), global system prompt, and the listen address / data directory (read-only, set via environment variables) |
 | **API**      | Endpoint reference and a curl example                           |
 
 The panel follows the OS light/dark setting; the Light / System / Dark switch in the sidebar overrides it for that browser. Destructive actions (deleting accounts, revoking keys, clearing the log) ask for confirmation first.
@@ -200,7 +203,9 @@ Stats grid at the top: Accounts, Models, Requests (with a 24-hour sparkline), Fa
 
 The request log keeps the last 1000 chat requests in memory and appends each one to `<data>/logs.jsonl`, so it survives restarts; the file is trimmed back to 1000 lines once it reaches 2000. **Clear** in the Logs tab (or `DELETE /admin/api/logs`) empties it.
 
-On Ctrl+C or SIGTERM the server stops accepting connections, gives open requests up to 5 s, and writes the counters it otherwise saves with a short delay.
+On Ctrl+C or SIGTERM the server stops accepting connections, gives open requests up to 5 s, then cancels any streams still running (they are logged as failed) and waits up to 2 s more before writing the counters it otherwise saves with a short delay. Files under the data directory are written through a temporary file, fsynced and renamed, so a crash leaves the old or the new version, never a truncated one.
+
+A chat stream that sends no frame for 3 minutes (or no response headers within 60 s) is abandoned with a 504 and the next endpoint or account is tried, instead of hanging until the client gives up. Each account sends its own device fingerprint upstream.
 
 Every chat request is also logged to the console (stderr) as one line, for example:
 
@@ -251,7 +256,7 @@ If the token store is **empty** (no tokens created), `/v1/*` accepts requests wi
 | `POST /v1/chat/completions`          | POST     | Chat completion through Devin. Supports `stream: true` (SSE). |
 | `POST /v1/messages`                  | POST     | Anthropic Messages API (Claude Code, Anthropic SDKs). Stream + non-stream. |
 | `POST /v1/messages/count_tokens`     | POST     | Rough estimate (~4 bytes per token); upstream has no counting endpoint. |
-| `POST /v1/responses`                 | POST     | OpenAI Responses API. Stream + non-stream; `previous_response_id` supported (kept 1 h in memory). |
+| `POST /v1/responses`                 | POST     | OpenAI Responses API. Stream + non-stream; `previous_response_id` supported (kept in memory, per API key). |
 | `POST /v1/completions`               | POST     | Legacy text completions, emulated on the chat models. Stream + non-stream. |
 | `POST /v1/embeddings`                | POST     | Not supported: returns 501. Devin offers no embedding models. |
 
@@ -267,7 +272,7 @@ How chat works:
 - `model` accepts the ids from `/v1/models`. A `devin/` prefix is dropped and dots become dashes (`claude-sonnet-4.6` → `claude-sonnet-4-6`). A family name without an effort level picks one from the catalog, trying medium, then high, then low (`gpt-5-4` → `gpt-5-4-medium`).
 - `system`/`developer` messages become the system prompt; `user` and `assistant` messages become the conversation. `max_completion_tokens` (or the older `max_tokens`; default 32000), `temperature` and `top_p` are forwarded. Streams include usage only when `stream_options.include_usage` is set, in a final chunk with empty `choices`.
 - `stop` (a string or up to 4 strings) is applied by the proxy, since upstream has no stop option: the output is cut before the first match and the upstream stream is closed. `finish_reason` is `"stop"`. Only answer text is checked, not thinking or tool arguments. Upstream sends token usage only at the end of its stream, so after a stop the usage is estimated (about 4 bytes per token).
-- System prompts are cleaned before going upstream: Devin rejects prompts that carry another agent's identity (e.g. "You are Claude Code, ...") with a misleading 403, so such lines, Claude Code billing headers and a few related lines are dropped. This applies to all three chat endpoints.
+- System prompts are cleaned before going upstream: Devin rejects prompts that carry another agent's identity (e.g. "You are Claude Code, ...") with a misleading 403, so such lines, Claude Code billing headers and a few related lines are dropped. This applies to all three chat endpoints. Each drop is logged (line count and the start of the first line), so a prompt of your own that matches one of the rules does not lose text unnoticed.
 - Thinking text, when the model produces it, is returned as `reasoning_content`.
 - Tool calling follows the OpenAI format: `tools` (function type) are forwarded with their JSON schema; the model's calls come back as `tool_calls` (streamed as indexed fragments) with `finish_reason: "tool_calls"`; send results back as `role: "tool"` messages with `tool_call_id`.
 - `tool_choice`: `"none"` drops the tools; `"auto"` is the default. Upstream cannot force a tool call, so `"required"` and a named function are best effort: a named choice narrows the tools to that one, and both add an instruction to the system prompt telling the model to call a tool. Models follow it reliably in testing, but it is not guaranteed.
@@ -289,7 +294,7 @@ How chat works:
 - `input` as a string or items: `message` (roles user/assistant/system/developer, `input_text`/`output_text`/`input_image` with a data URL), `function_call`, `function_call_output`. `reasoning` items are ignored. `instructions` becomes the system prompt.
 - Function tools are forwarded; built-in tools (`web_search`, `file_search`, ...) are skipped. `tool_choice` works as for chat completions (named form `{"type":"function","name":...}`). `max_output_tokens`, `temperature` and `top_p` are forwarded.
 - Output items: `reasoning` (summary text), `message` (`output_text`), `function_call`. Streaming emits the standard `response.*` events with `sequence_number`.
-- `previous_response_id`: responses are kept in memory for 1 hour (up to 256, oldest dropped first), so a follow-up can send just the new input. They are lost on restart; an unknown id returns 400. `store: false` skips keeping a response. Instructions are not carried over, as in the OpenAI API.
+- `previous_response_id`: responses are kept in memory for 24 hours (up to 1024 and 64 MB in total, oldest dropped first; see `DEVIN2API_RESPONSES_*`), so a follow-up can send just the new input. Each response belongs to the API key that made it, so another key cannot continue it. They are lost on restart; an unknown id returns 400. `store: false` skips keeping a response. Instructions are not carried over, as in the OpenAI API.
 
 `/v1/completions` (legacy OpenAI text completions):
 

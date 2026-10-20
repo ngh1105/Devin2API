@@ -246,6 +246,13 @@ func (s *TokenStore) Use(id string, counted bool) (Token, error) {
 	return t, nil
 }
 
+// Empty reports whether no API keys exist (keyless mode).
+func (s *TokenStore) Empty() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.tokens) == 0
+}
+
 // Refund takes back a request Use counted, for a request that was then
 // refused before reaching upstream.
 func (s *TokenStore) Refund(id string) {
@@ -294,15 +301,7 @@ func (s *TokenStore) saveTokens() error {
 	if err != nil {
 		return fmt.Errorf("marshal tokens: %w", err)
 	}
-	tmp := s.idxPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return fmt.Errorf("write tmp: %w", err)
-	}
-	if err := os.Rename(tmp, s.idxPath); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("rename: %w", err)
-	}
-	return nil
+	return WriteFileAtomic(s.idxPath, data, 0600)
 }
 
 // loadTokens reads the index. Keys saved in plaintext by older versions are

@@ -1,12 +1,16 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.26-alpine AS build
+# Build on the host platform and cross-compile, so the arm64 image is not
+# compiled under QEMU emulation.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath \
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
       -ldflags "-s -w -X github.com/ngh1105/Devin2API/internal/buildinfo.Version=${VERSION}" \
       -o /out/devin2api ./cmd/devin2api \
  && mkdir -p /out/data

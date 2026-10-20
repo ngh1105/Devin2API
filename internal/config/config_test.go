@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/ngh1105/Devin2API/internal/config"
 )
@@ -33,5 +34,22 @@ func TestLoadEnvOverrides(t *testing.T) {
 	}
 	if cfg.DataDir != "/tmp/devin2api" {
 		t.Errorf("DataDir = %q, want %q", cfg.DataDir, "/tmp/devin2api")
+	}
+}
+
+func TestLoadResponsesLimits(t *testing.T) {
+	os.Clearenv()
+	os.Setenv("DEVIN2API_RESPONSES_KEEP", "50")
+	os.Setenv("DEVIN2API_RESPONSES_TTL", "2h")
+	os.Setenv("DEVIN2API_RESPONSES_MB", "128")
+	cfg := config.Load()
+	if cfg.ResponsesKeep != 50 || cfg.ResponsesTTL != 2*time.Hour || cfg.ResponsesMB != 128 {
+		t.Errorf("responses limits = %d %v %d", cfg.ResponsesKeep, cfg.ResponsesTTL, cfg.ResponsesMB)
+	}
+	os.Setenv("DEVIN2API_RESPONSES_KEEP", "-1")
+	os.Setenv("DEVIN2API_RESPONSES_TTL", "soon")
+	cfg = config.Load()
+	if cfg.ResponsesKeep != 0 || cfg.ResponsesTTL != 0 {
+		t.Errorf("bad values not ignored: %d %v", cfg.ResponsesKeep, cfg.ResponsesTTL)
 	}
 }

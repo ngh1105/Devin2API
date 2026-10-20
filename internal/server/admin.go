@@ -157,12 +157,18 @@ func (s *Server) startLogin(ctx context.Context) (string, error) {
 		useDone()
 
 		// A cancel (or a newer login) after the code arrived must not still
-		// add the account.
-		if !s.loginMngr.isCurrent(mgrGen) {
-			return
+		// add the account: check and upsert under the manager's lock, so a
+		// cancel cannot slip in between.
+		var acc *store.Account
+		s.loginMngr.mu.Lock()
+		if s.loginMngr.gen == mgrGen {
+			// Upsert: logging in again with the same Devin user updates it in place.
+			acc, err = s.accounts.Upsert(store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, usage))
 		}
-		// Upsert: logging in again with the same Devin user updates it in place.
-		acc, err := s.accounts.Upsert(store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, usage))
+		s.loginMngr.mu.Unlock()
+		if acc == nil && err == nil {
+			return // cancelled
+		}
 		if err != nil {
 			s.loginMngr.ResolveError(err.Error(), mgrGen)
 			return
@@ -175,14 +181,14 @@ func (s *Server) startLogin(ctx context.Context) (string, error) {
 }
 
 // handleLoginManualDirect executes the full manual login business logic given a token.
-func handleLoginManualDirect(s *Server, rawToken string) (*store.Account, error) {
+func handleLoginManualDirect(ctx context.Context, s *Server, rawToken string) (*store.Account, error) {
 	sessToken := devin.FormatSessionToken(rawToken)
-	profile, err := devin.FetchSelfProfile(context.Background(), s.loginAPIBase, sessToken)
+	profile, err := devin.FetchSelfProfile(ctx, s.loginAPIBase, sessToken)
 	if err != nil {
 		return nil, err
 	}
 	var usage *store.Usage
-	useCtx, useDone := context.WithTimeout(context.Background(), time.Second*120)
+	useCtx, useDone := context.WithTimeout(ctx, time.Second*120)
 	usage, _ = s.fetchUserStatus(useCtx, sessToken)
 	useDone()
 	return s.accounts.Upsert(store.AccountFromLogin(profile.UserName, profile.UserID, profile.OrgID, rawToken, profile.Email, usage))
@@ -281,16 +287,6 @@ func (s *Server) handleLoginCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.loginMngr.Cancel()
-	// Post-cancel gen bump: ensures any concurrent Resolve* from async goroutines
-	// sees a mismatched mgrGen and is treated as stale → ignored. This guarantees
-	// that cancel always wins the race against background resolves.
-	s.loginMngr.mu.Lock()
-	s.loginMngr.gen++
-	s.loginMngr.statusCode = "idle"
-	s.loginMngr.current = nil
-	s.loginMngr.accountID = ""
-	s.loginMngr.errorMsg = ""
-	s.loginMngr.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{})
 }
@@ -313,7 +309,7 @@ func (s *Server) handleLoginManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	acc, err := handleLoginManualDirect(s, req.Token)
+	acc, err := handleLoginManualDirect(r.Context(), s, req.Token)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return

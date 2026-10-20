@@ -103,6 +103,12 @@ func (s *segmenter) appendTool(tc *devin.ToolCallDelta) error {
 		return nil
 	}
 	seg.text.WriteString(tc.Arguments)
+	if seg.closed {
+		// The block was already closed because another segment started in
+		// between; its stream events are done, so the fragment only goes
+		// into the final (non-streamed) form.
+		return nil
+	}
 	return s.w.delta(i, seg, tc.Arguments)
 }
 

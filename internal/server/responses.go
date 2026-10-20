@@ -47,6 +47,7 @@ func toDevinFromResponses(req openai.ResponsesRequest, prior conversation) (devi
 	if err != nil {
 		return fail(err)
 	}
+	newInput := false // the input adds something for the model to answer
 	for i, it := range items {
 		typ := it.Type
 		if typ == "" && it.Role != "" {
@@ -69,6 +70,7 @@ func toDevinFromResponses(req openai.ResponsesRequest, prior conversation) (devi
 					p.Images = append(p.Images, devin.Image{MimeType: img.MimeType, Base64: img.Base64})
 				}
 				out.Prompts = append(out.Prompts, p)
+				newInput = newInput || hasInput([]devin.Prompt{p})
 			case "assistant":
 				out.Prompts = appendAssistantText(out.Prompts, text)
 			default:
@@ -96,6 +98,7 @@ func toDevinFromResponses(req openai.ResponsesRequest, prior conversation) (devi
 				p.Images = append(p.Images, devin.Image{MimeType: img.MimeType, Base64: img.Base64})
 			}
 			out.Prompts = append(out.Prompts, p)
+			newInput = true
 		case "reasoning":
 			// Upstream takes no reasoning history.
 		default:
@@ -117,14 +120,19 @@ func toDevinFromResponses(req openai.ResponsesRequest, prior conversation) (devi
 	if !hasInput(out.Prompts) {
 		return out, "", errors.New("input needs at least one non-empty user message")
 	}
+	if len(prior.prompts) > 0 && !newInput {
+		// The stored history already ends on the assistant's turn.
+		return out, "", errors.New("input must add a user message or function_call_output to continue previous_response_id")
+	}
 	return out, strings.Join(convSystem, "\n\n"), nil
 }
 
 // appendAssistantText adds assistant text, merging into a directly
-// preceding assistant turn. Responses splits one turn into separate
-// message and function_call items; upstream wants them in one prompt.
+// preceding assistant turn whether or not it already holds tool calls.
+// Responses splits one turn into separate message and function_call items,
+// in either order; upstream wants them in one prompt.
 func appendAssistantText(prompts []devin.Prompt, text string) []devin.Prompt {
-	if n := len(prompts); n > 0 && prompts[n-1].Source == devin.SourceAssistant && len(prompts[n-1].ToolCalls) == 0 {
+	if n := len(prompts); n > 0 && prompts[n-1].Source == devin.SourceAssistant {
 		if prompts[n-1].Text != "" && text != "" {
 			prompts[n-1].Text += "\n"
 		}
@@ -157,10 +165,12 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var prior conversation
+	owner := responseOwner(r.Context())
 	if req.PreviousResponseID != "" {
 		var ok bool
-		if prior, ok = s.storedResponses.get(req.PreviousResponseID); !ok {
-			openai.WriteError(w, http.StatusBadRequest, fmt.Sprintf("previous_response_id %q not found: responses are kept in memory for %v and lost on restart; send the full conversation in input instead", req.PreviousResponseID, responseTTL))
+		if prior, ok = s.storedResponses.get(req.PreviousResponseID, owner); !ok {
+			_, _, ttl := s.storedResponses.limits()
+			openai.WriteError(w, http.StatusBadRequest, fmt.Sprintf("previous_response_id %q not found: responses are kept in memory for %v, per API key, and lost on restart; send the full conversation in input instead", req.PreviousResponseID, ttl))
 			return
 		}
 	}
@@ -204,7 +214,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ShouldStore() {
 		history := append(append([]devin.Prompt(nil), dreq.Prompts...), assistantTurn(seg.segs, res))
-		s.storedResponses.put(rw.id, conversation{system: convSystem, prompts: history})
+		s.storedResponses.put(rw.id, owner, conversation{system: convSystem, prompts: history})
 	}
 	statusStr, incompleteReason := "completed", ""
 	switch finishReason(res) {
