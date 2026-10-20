@@ -260,4 +260,3 @@ func (l *LoginState) Wait(ctx context.Context, timeout time.Duration) (Result, e
 type Result struct {
 	Code string
 }
-
