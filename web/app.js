@@ -330,7 +330,8 @@
       var when = new Date(h.hour * 1000);
       col.title = when.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }) + "\n"
         + h.requests + " requests, " + h.failed + " failed\n"
-        + fmtNum(h.input_tokens) + " in / " + fmtNum(h.output_tokens) + " out tokens";
+        + fmtNum(h.input_tokens) + " in / " + fmtNum(h.output_tokens) + " out tokens"
+        + (h.cached ? "\n" + h.cached + " from cache, " + fmtNum((h.saved_input_tokens || 0) + (h.saved_output_tokens || 0)) + " tokens saved" : "");
       var okH = (h.requests - h.failed) / max * 100, errH = h.failed / max * 100;
       var err = document.createElement("div");
       err.className = "bar-err";
@@ -369,8 +370,11 @@
         { label: "Accounts", val: d.accounts, sub: (d.enabled != null ? (d.enabled + "/" + d.accounts + " enabled") : "") },
         { label: "Models", val: (d.models ? d.models : "—"), sub: "" },
         { label: "Requests", val: (d.requests != null ? d.requests : 0), sub: since },
-        { label: "Failed", val: (d.failed != null ? d.failed : 0), sub: since }
+        { label: "Failed", val: (d.failed != null ? d.failed : 0), sub: since },
+        { label: "Cache hits", val: cacheHitRate(d), sub: cacheSavings(d.cache) }
       ];
+      lastCache = d.cache || null;
+      renderCacheState();
       lastHourly = d.hourly || [];
       var day = lastHourly.reduce(function (n, h) { return n + h.requests; }, 0);
       items[2].sub = day + " in the last 24 h";
@@ -402,6 +406,38 @@
       console.warn("loadStats:", e.message);
       if (!e.status) setServerOnline(false); // network error: server unreachable
     });
+  }
+
+  var lastCache = null;
+
+  // cacheHitRate is the share of all requests answered from the cache.
+  function cacheHitRate(d) {
+    var c = d.cache || {};
+    var hits = c.hits || 0, total = d.requests || 0;
+    if (!total || !hits) return c.enabled === false ? "off" : "0%";
+    return Math.round(hits / total * 100) + "%";
+  }
+
+  // cacheSavings describes what the cache has saved.
+  function cacheSavings(c) {
+    if (!c) return "";
+    var saved = (c.saved_input_tokens || 0) + (c.saved_output_tokens || 0);
+    return fmtNum(c.hits || 0) + " hits · " + fmtNum(saved) + " tokens saved";
+  }
+
+  // renderCacheState shows the cache's size under its settings.
+  function renderCacheState() {
+    var el = document.getElementById("cache-state");
+    if (!el || !lastCache) return;
+    var c = lastCache;
+    el.textContent = fmtNum(c.entries || 0) + " answers · " + fmtMB(c.bytes || 0) + " · " + cacheSavings(c)
+      + (c.enabled ? "" : " · off");
+  }
+
+  function fmtMB(b) {
+    if (b >= 1 << 20) return (b / (1 << 20)).toFixed(1).replace(/\.0$/, "") + " MB";
+    if (b >= 1024) return Math.round(b / 1024) + " KB";
+    return b + " B";
   }
 
   function setServerOnline(on) {
@@ -477,14 +513,16 @@
   // accounts and keys of the last 24 hours of the log.
   function renderActivity() {
     drawBars(document.getElementById("chart-24h"), lastHourly, true);
-    var tot = { requests: 0, failed: 0, input_tokens: 0, output_tokens: 0 };
+    var tot = { requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cached: 0, saved_input_tokens: 0, saved_output_tokens: 0 };
     lastHourly.forEach(function (h) { for (var k in tot) tot[k] += h[k] || 0; });
     var totals = document.getElementById("chart-totals");
     totals.innerHTML = "";
     [["Requests", fmtNum(tot.requests)],
      ["Failed", fmtNum(tot.failed) + (tot.requests ? " · " + Math.round(tot.failed / tot.requests * 100) + "%" : "")],
      ["Tokens in", fmtNum(tot.input_tokens)],
-     ["Tokens out", fmtNum(tot.output_tokens)]].forEach(function (p) {
+     ["Tokens out", fmtNum(tot.output_tokens)],
+     ["Cached", fmtNum(tot.cached) + (tot.requests ? " · " + Math.round(tot.cached / tot.requests * 100) + "%" : "")],
+     ["Tokens saved", fmtNum(tot.saved_input_tokens + tot.saved_output_tokens)]].forEach(function (p) {
       var d = document.createElement("div");
       var b = document.createElement("strong");
       b.appendChild(textNode(p[1]));
@@ -576,7 +614,7 @@
       if (st === "err" && e.status === 200) return false;
       if (ep && e.endpoint !== ep) return false;
       if (!q) return true;
-      return [e.model, e.upstream_model, e.account_label, e.account, e.key, e.error, e.endpoint, e.finish].some(function (v) {
+      return [e.model, e.upstream_model, e.account_label, e.account, e.key, e.error, e.endpoint, e.finish, e.cached ? "cache" : ""].some(function (v) {
         return v && String(v).toLowerCase().indexOf(q) !== -1;
       });
     });
@@ -598,7 +636,7 @@
         t.toLocaleDateString() === new Date().toLocaleDateString() ? t.toLocaleTimeString() : t.toLocaleString(),
         e.endpoint,
         e.model === e.upstream_model ? e.model : e.model + " → " + e.upstream_model,
-        e.account_label || e.account || "—",
+        e.cached ? "cache" : (e.account_label || e.account || "—"),
         e.key || "—",
         String(e.status),
         fmtMs(e.duration_ms),
@@ -612,6 +650,12 @@
           b.appendChild(textNode(c));
           td.appendChild(b);
           if (e.error) td.title = e.error;
+        } else if (i === 3 && e.cached) {
+          var cb = document.createElement("span");
+          cb.className = "badge badge-cache";
+          cb.title = "Answered from the response cache; no account usage spent";
+          cb.appendChild(textNode(c));
+          td.appendChild(cb);
         } else {
           td.appendChild(textNode(c));
         }
@@ -648,13 +692,13 @@
       ["Endpoint", e.endpoint + (e.stream ? " (stream)" : "")],
       ["Model requested", e.model],
       ["Upstream model", e.upstream_model],
-      ["Account", (e.account_label || "—") + (e.account && e.account !== e.account_label ? " · " + e.account : "")],
+      ["Account", e.cached ? "response cache (no usage spent)" : (e.account_label || "—") + (e.account && e.account !== e.account_label ? " · " + e.account : "")],
       ["API key", e.key || "none (local client)"],
       ["Attempts", String(e.attempts || 0) + (e.attempts > 1 ? " (failover)" : "")],
       ["Status", String(e.status)],
       ["Duration", fmtMs(e.duration_ms)],
       ["First output", e.first_output_ms ? fmtMs(e.first_output_ms) : "—"],
-      ["Tokens in / out", (e.input_tokens || 0) + " / " + (e.output_tokens || 0)],
+      ["Tokens in / out", (e.input_tokens || 0) + " / " + (e.output_tokens || 0) + (e.cached ? " (saved)" : "")],
       ["Tool calls", String(e.tool_calls || 0)],
       ["Finish", e.finish || "—"],
       ["Error", e.error || "—"]
@@ -1363,8 +1407,24 @@
       upstreams: (s.upstreams || []).slice(),
       system_prompt: s.system_prompt || "",
       system_prompt_enabled: !!s.system_prompt_enabled,
-      system_prompt_mode: s.system_prompt_mode || "prepend"
+      system_prompt_mode: s.system_prompt_mode || "prepend",
+      cache_enabled: !!s.cache_enabled,
+      cache_ttl_minutes: s.cache_ttl_minutes || 0,
+      cache_max_entries: s.cache_max_entries || 0,
+      cache_max_mb: s.cache_max_mb || 0
     };
+  }
+
+  // Cache number fields: 0 means the default and shows as an empty field.
+  var cacheFields = [["cache-ttl", "cache_ttl_minutes"], ["cache-entries", "cache_max_entries"], ["cache-mb", "cache_max_mb"]];
+
+  function renderCacheForm() {
+    document.getElementById("cache-enabled").checked = draft.cache_enabled;
+    cacheFields.forEach(function (f) {
+      var el = document.getElementById(f[0]);
+      el.value = draft[f[1]] ? String(draft[f[1]]) : "";
+      el.disabled = !draft.cache_enabled;
+    });
   }
 
   function isDirty() {
@@ -1482,6 +1542,7 @@
     }
     renderUpstreams();
     renderPromptForm();
+    renderCacheForm();
     markDirty();
   }
 
@@ -1534,11 +1595,33 @@
       if (!draft) return;
       draft.system_prompt = ev.target.value; updatePromptCount(); markDirty();
     };
+    document.getElementById("cache-enabled").onchange = function (ev) {
+      if (!draft) return;
+      draft.cache_enabled = ev.target.checked; renderCacheForm(); markDirty();
+    };
+    cacheFields.forEach(function (f) {
+      document.getElementById(f[0]).oninput = function (ev) {
+        if (!draft) return;
+        var n = parseInt(ev.target.value, 10);
+        draft[f[1]] = isNaN(n) || n < 0 ? 0 : n;
+        markDirty();
+      };
+    });
+    document.getElementById("btn-cache-clear").onclick = function () {
+      var n = lastCache ? (lastCache.entries || 0) : 0;
+      confirmDialog("Clear the response cache?", "All " + n + " cached answers are dropped; the next identical requests go upstream again. Hit totals are kept.", "Clear cache")
+        .then(function (yes) {
+          if (!yes) return;
+          apiDelete("/admin/api/cache").then(function () { toast("Response cache cleared", "#34d399"); loadStats(); })
+            .catch(function (e) { toast(e.message, "#f87171"); });
+        });
+    };
     document.getElementById("btn-settings-save").onclick = saveSettings;
     document.getElementById("btn-settings-reset").onclick = function () {
       draft = editable(savedSettings);
       renderUpstreams();
       renderPromptForm();
+      renderCacheForm();
       markDirty();
     };
   }
@@ -1646,7 +1729,8 @@
       ["/v1/responses", "POST", "OpenAI Responses API (previous_response_id kept 24 h in memory, per API key)"],
       ["/v1/completions", "POST", "Legacy text completions, emulated on the chat models"],
       ["/admin/api/accounts", "GET / POST", "List or import accounts"],
-      ["/admin/api/stats", "GET", "Totals plus request counts for each of the last 24 hours"],
+      ["/admin/api/stats", "GET", "Totals, cache hits and savings, plus request counts for each of the last 24 hours"],
+      ["/admin/api/cache", "GET / DELETE", "Response cache state (entries, size, hits, tokens saved); DELETE drops every cached answer"],
       ["/admin/api/logs", "GET / DELETE", "Last 1000 chat requests (metadata only), newest first; DELETE clears them"],
       ["/admin/api/tokens", "GET / POST", "List API keys, or create one with a name, expiry, model list and quota"],
       ["/admin/api/tokens/{id}", "PUT / DELETE", "Edit or revoke an API key"]

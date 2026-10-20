@@ -238,7 +238,7 @@
         <div class="panel-head">
           <div>
             <h1>Settings</h1>
-            <p class="lead">Endpoint and prompt settings apply immediately and are saved in the data dir.</p>
+            <p class="lead">Endpoint, prompt and cache settings apply immediately and are saved in the data dir.</p>
           </div>
           <div class="toolbar">
             <span id="settings-dirty" class="dirty hidden">Unsaved changes</span>
@@ -271,6 +271,34 @@
             </label>
             <textarea id="sp-text" rows="9" placeholder="e.g. Always answer in Vietnamese."></textarea>
             <div class="field-foot"><span id="sp-count"></span></div>
+          </div>
+
+          <div class="card">
+            <h2 class="card-title"><svg class="icon"><use href="#i-pulse"/></svg>Response cache</h2>
+            <p class="card-desc">A request identical to an earlier one (same model, system prompt, messages, tools and sampling settings) is answered from memory and spends no account usage. Like Anthropic's prompt cache, every hit extends the answer's lifetime and reports its input as <code>cache_read_input_tokens</code> (<code>cached_tokens</code> on the OpenAI endpoints).</p>
+            <label class="switch-row">
+              <input type="checkbox" id="cache-enabled" class="switch">
+              <span>Answer repeated requests from the cache</span>
+            </label>
+            <div class="cache-fields">
+              <label class="field">
+                <span>Keep unused answers for (minutes)</span>
+                <input type="number" id="cache-ttl" min="0" max="10080" step="1" placeholder="5">
+              </label>
+              <label class="field">
+                <span>Max answers</span>
+                <input type="number" id="cache-entries" min="0" max="100000" step="1" placeholder="1000">
+              </label>
+              <label class="field">
+                <span>Max size (MB)</span>
+                <input type="number" id="cache-mb" min="0" max="4096" step="1" placeholder="64">
+              </label>
+            </div>
+            <p class="note">Leave a field empty for its default (5 minutes, like Anthropic's ephemeral cache; 60 matches its 1-hour cache). Answers are kept in <code>cache.json</code> in the data dir and survive restarts.</p>
+            <div class="cache-state">
+              <span id="cache-state" class="note">—</span>
+              <button id="btn-cache-clear" class="btn-secondary btn-danger"><svg class="icon"><use href="#i-trash"/></svg>Clear cache</button>
+            </div>
           </div>
 
           <div class="card">

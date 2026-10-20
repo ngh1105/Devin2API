@@ -40,6 +40,7 @@ type LogEntry struct {
 	OutputTokens  int       `json:"output_tokens,omitempty"`
 	ToolCalls     int       `json:"tool_calls,omitempty"`
 	Finish        string    `json:"finish,omitempty"`
+	Cached        bool      `json:"cached,omitempty"` // answered from the response cache
 }
 
 // requestLog is a fixed-size ring of recent entries, also appended to
@@ -219,6 +220,13 @@ func (tr *chatTrace) attempt(id, label string) {
 	tr.entry.Account, tr.entry.AccountLabel = id, label
 }
 
+// cached records that the response cache answered the request.
+func (tr *chatTrace) cached() {
+	if tr != nil {
+		tr.entry.Cached = true
+	}
+}
+
 // output records the first streamed output.
 func (tr *chatTrace) output() {
 	if tr != nil && tr.firstOut.IsZero() {
@@ -256,6 +264,11 @@ func (s *Server) finishTrace(ctx context.Context, tr *chatTrace, res *devin.Chat
 	if e.Status != http.StatusOK {
 		s.stats.failed.Add(1)
 	}
+	if e.Cached && e.Status == http.StatusOK {
+		s.stats.cacheHits.Add(1)
+		s.stats.savedIn.Add(int64(e.InputTokens))
+		s.stats.savedOut.Add(int64(e.OutputTokens))
+	}
 	s.stats.record(e)
 	s.reqLog.add(e)
 	s.stats.changed() // covers this request's count from startTrace too
@@ -265,6 +278,9 @@ func (s *Server) finishTrace(ctx context.Context, tr *chatTrace, res *devin.Chat
 		"account", e.Account, "attempts", e.Attempts, "status", e.Status,
 		"ms", e.DurationMs, "first_ms", e.FirstOutputMs,
 		"in", e.InputTokens, "out", e.OutputTokens,
+	}
+	if e.Cached {
+		attrs = append(attrs, "cached", true)
 	}
 	if e.ToolCalls > 0 {
 		attrs = append(attrs, "tool_calls", e.ToolCalls)

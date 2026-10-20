@@ -121,6 +121,9 @@ type ChatResult struct {
 	Model            string     // model name reported upstream
 	ToolCalls        []ToolCall // complete tool calls, in order
 	StopSequence     string     // client stop sequence that ended the output, if any
+	// CachedPromptTokens is how many of PromptTokens were served from the
+	// proxy's response cache instead of upstream (all of them on a hit).
+	CachedPromptTokens int
 }
 
 // UpstreamError is a failure reported by Devin, mapped to an HTTP status.

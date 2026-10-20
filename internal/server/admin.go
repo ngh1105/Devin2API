@@ -55,6 +55,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 	case prefix == "/stats":
 		s.handleStats(w, r)
+	case prefix == "/cache":
+		s.handleCache(w, r)
 	case prefix == "/session":
 		s.handleSession(w, r)
 	case prefix == "/login":
@@ -452,9 +454,27 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"failed":   s.stats.failed.Load(),
 		"since":    s.stats.since,
 		"hourly":   s.stats.hourly(24, time.Now(), false),
+		"cache":    s.cacheView(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// handleCache serves GET /admin/api/cache (state and totals) and DELETE,
+// which drops every cached answer.
+func (s *Server) handleCache(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeAdminJSON(w, http.StatusOK, s.cacheView())
+	case http.MethodDelete:
+		if err := s.cache.clear(); err != nil {
+			writeErr(w, http.StatusInternalServerError, "unable to clear the response cache")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
 }
 
 // writeErr writes a JSON {"error":"..."} response with status code and content-type.

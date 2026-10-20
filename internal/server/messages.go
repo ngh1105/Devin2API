@@ -220,7 +220,11 @@ func anthropicUsage(res *devin.ChatResult) anthropic.Usage {
 	if res == nil {
 		return anthropic.Usage{}
 	}
-	return anthropic.Usage{InputTokens: res.PromptTokens, OutputTokens: res.CompletionTokens}
+	return anthropic.Usage{
+		InputTokens:          res.PromptTokens - res.CachedPromptTokens,
+		OutputTokens:         res.CompletionTokens,
+		CacheReadInputTokens: res.CachedPromptTokens,
+	}
 }
 
 // messages handles POST /v1/messages, streaming or not.
