@@ -171,10 +171,6 @@ func StartLogin(appBaseOverride string) (*LoginState, error) {
 		ln:       ln, // store for idempotent shutdown
 	}
 
-	lastStateMu.Lock()
-	lastState = oauthState // test-only accessor
-	lastStateMu.Unlock()
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -265,17 +261,3 @@ type Result struct {
 	Code string
 }
 
-// lastState stores the OAuth state from the most recent StartLogin call.
-// Only intended for use in tests via LastState().
-var (
-	lastStateMu sync.Mutex
-	lastState   string
-)
-
-// LastState returns the OAuth state of the most recent StartLogin call.
-// Only intended for use in tests.
-func LastState() string {
-	lastStateMu.Lock()
-	defer lastStateMu.Unlock()
-	return lastState
-}
