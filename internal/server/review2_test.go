@@ -44,15 +44,25 @@ func TestQuotaOnlyForUpstreamRequests(t *testing.T) {
 	if m, _ := srv.tokens.Match(key.Token); m.Requests != 1 {
 		t.Errorf("served request counted %d times", m.Requests)
 	}
-	// No usable account: 503 before upstream, not counted either.
+	// The same request again is served from the response cache: the key
+	// made a request and got an answer, so it counts.
+	if rec := keyPost(srv, key.Token, "/v1/chat/completions", gptChat); rec.Code != 200 {
+		t.Fatalf("cached chat: %d %s", rec.Code, rec.Body)
+	}
+	if m, _ := srv.tokens.Match(key.Token); m.Requests != 2 {
+		t.Errorf("cached request counted %d times, want 2", m.Requests)
+	}
+	// No usable account: 503 before upstream, not counted. A new message
+	// misses the cache.
 	accs, _ := srv.accounts.List()
 	for _, a := range accs {
 		srv.accounts.Delete(a.ID)
 	}
-	if rec := keyPost(srv, key.Token, "/v1/chat/completions", gptChat); rec.Code != http.StatusServiceUnavailable {
+	newChat := `{"model":"gpt-5.4","messages":[{"role":"user","content":"hi again"}]}`
+	if rec := keyPost(srv, key.Token, "/v1/chat/completions", newChat); rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("no account: %d", rec.Code)
 	}
-	if m, _ := srv.tokens.Match(key.Token); m.Requests != 1 {
+	if m, _ := srv.tokens.Match(key.Token); m.Requests != 2 {
 		t.Errorf("no-account request used quota: %d", m.Requests)
 	}
 }

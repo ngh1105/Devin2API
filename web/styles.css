@@ -499,6 +499,10 @@ tbody tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .settings-grid > .card:first-child { grid-column: 1 / -1; }
 .settings-grid .card { display: flex; flex-direction: column; gap: .8rem; padding: 1.15rem 1.25rem; }
 .settings-grid .card > button { align-self: flex-start; }
+.cache-fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: .8rem; }
+.cache-fields input { width: 100%; }
+.cache-state { display: flex; align-items: center; justify-content: space-between; gap: .8rem; flex-wrap: wrap; }
+.badge-cache { background: var(--accent-soft); color: var(--accent); }
 .card-title { display: flex; align-items: center; gap: .5rem; font-size: 1rem; font-weight: 600; }
 .card-title .icon { color: var(--accent); }
 .card-desc { color: var(--muted); font-size: .85rem; margin-top: -.4rem; }

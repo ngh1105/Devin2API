@@ -117,10 +117,14 @@ func SystemText(raw json.RawMessage) (string, error) {
 	return strings.Join(texts, "\n\n"), nil
 }
 
-// Usage is the token accounting of a message.
+// Usage is the token accounting of a message. As in the Anthropic API,
+// InputTokens excludes tokens read from the cache, which are reported in
+// CacheReadInputTokens.
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 }
 
 // MessageResponse is a non-streaming /v1/messages response. Content holds

@@ -404,9 +404,10 @@ func (rw *responsesWriter) object(segs []*segment, status string, res *devin.Cha
 		obj["incomplete_details"] = map[string]any{"reason": rw.incompleteReason}
 	}
 	if res != nil {
-		obj["usage"] = map[string]int{
+		obj["usage"] = map[string]any{
 			"input_tokens": res.PromptTokens, "output_tokens": res.CompletionTokens,
-			"total_tokens": res.PromptTokens + res.CompletionTokens,
+			"total_tokens":         res.PromptTokens + res.CompletionTokens,
+			"input_tokens_details": map[string]int{"cached_tokens": res.CachedPromptTokens},
 		}
 	}
 	return obj

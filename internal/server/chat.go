@@ -271,17 +271,18 @@ func failoverable(err error) bool {
 		ue.Status == http.StatusForbidden
 }
 
-// streamWithFailover runs the chat on each usable account in turn until one
+// streamUpstream runs the chat on each usable account in turn until one
 // succeeds, fails after producing output, or fails with a non-retryable error.
 // Each account is tried on every configured endpoint in turn while the
 // failure is the endpoint's (see endpointFailure) and nothing was output.
-func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, onDelta func(devin.Delta) error) (*devin.ChatResult, error) {
+// Callers go through streamWithFailover (cache.go), which applies the global
+// system prompt and consults the response cache first.
+func (s *Server) streamUpstream(ctx context.Context, req devin.ChatRequest, onDelta func(devin.Delta) error) (*devin.ChatResult, error) {
 	model := devin.ResolveModel(req.Model)
 	accs := s.chatAccounts(model)
 	if len(accs) == 0 {
 		return nil, errNoAccount
 	}
-	req.System = s.settings.get().applySystemPrompt(req.System)
 	bases := s.upstreams()
 	tr := traceFrom(ctx)
 	var lastErr error
@@ -730,9 +731,13 @@ func usageOf(res *devin.ChatResult) *openai.Usage {
 	if res == nil || (res.PromptTokens == 0 && res.CompletionTokens == 0) {
 		return nil
 	}
-	return &openai.Usage{
+	u := &openai.Usage{
 		PromptTokens:     res.PromptTokens,
 		CompletionTokens: res.CompletionTokens,
 		TotalTokens:      res.PromptTokens + res.CompletionTokens,
 	}
+	if res.CachedPromptTokens > 0 {
+		u.PromptTokensDetails = &openai.PromptTokensDetails{CachedTokens: res.CachedPromptTokens}
+	}
+	return u
 }

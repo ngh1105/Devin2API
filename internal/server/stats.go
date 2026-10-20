@@ -22,6 +22,11 @@ type hourStat struct {
 	Failed       int64 `json:"failed"`
 	InputTokens  int64 `json:"input_tokens"`
 	OutputTokens int64 `json:"output_tokens"`
+	// Cached counts requests answered from the response cache; their tokens
+	// were not spent upstream and are counted here instead of above.
+	Cached            int64 `json:"cached,omitempty"`
+	SavedInputTokens  int64 `json:"saved_input_tokens,omitempty"`
+	SavedOutputTokens int64 `json:"saved_output_tokens,omitempty"`
 }
 
 // statsSaveDelay batches counter updates into one write: a save is
@@ -33,6 +38,9 @@ const statsSaveDelay = 2 * time.Second
 type chatStats struct {
 	requests, failed atomic.Int64
 	since            time.Time // when counting started (first run)
+	// cacheHits counts requests answered from the response cache; savedIn
+	// and savedOut total the tokens those answers cost when first made.
+	cacheHits, savedIn, savedOut atomic.Int64
 
 	path    string // "" disables persistence (tests)
 	mu      sync.Mutex
@@ -44,10 +52,13 @@ type chatStats struct {
 }
 
 type statsFile struct {
-	Requests int64      `json:"requests"`
-	Failed   int64      `json:"failed"`
-	Since    time.Time  `json:"since"`
-	Hours    []hourStat `json:"hours,omitempty"`
+	Requests          int64      `json:"requests"`
+	Failed            int64      `json:"failed"`
+	CacheHits         int64      `json:"cache_hits,omitempty"`
+	SavedInputTokens  int64      `json:"saved_input_tokens,omitempty"`
+	SavedOutputTokens int64      `json:"saved_output_tokens,omitempty"`
+	Since             time.Time  `json:"since"`
+	Hours             []hourStat `json:"hours,omitempty"`
 }
 
 // load restores counters from dataDir; a missing or unreadable file starts
@@ -68,6 +79,9 @@ func (c *chatStats) load(dataDir string) {
 	}
 	c.requests.Store(f.Requests)
 	c.failed.Store(f.Failed)
+	c.cacheHits.Store(f.CacheHits)
+	c.savedIn.Store(f.SavedInputTokens)
+	c.savedOut.Store(f.SavedOutputTokens)
 	c.hourMu.Lock()
 	c.hours = make(map[int64]*hourStat, len(f.Hours))
 	for _, h := range f.Hours {
@@ -103,6 +117,7 @@ func (c *chatStats) save() {
 	defer c.writeMu.Unlock()
 	b, _ := json.MarshalIndent(statsFile{
 		Requests: c.requests.Load(), Failed: c.failed.Load(), Since: c.since,
+		CacheHits: c.cacheHits.Load(), SavedInputTokens: c.savedIn.Load(), SavedOutputTokens: c.savedOut.Load(),
 		Hours: c.hourly(statsHours, time.Now(), true),
 	}, "", "  ")
 	if err := store.WriteFileAtomic(c.path, b, 0o600); err != nil {
@@ -136,6 +151,12 @@ func (c *chatStats) record(e LogEntry) {
 	h.Requests++
 	if e.Status != 200 {
 		h.Failed++
+	}
+	if e.Cached {
+		h.Cached++
+		h.SavedInputTokens += int64(e.InputTokens)
+		h.SavedOutputTokens += int64(e.OutputTokens)
+		return
 	}
 	h.InputTokens += int64(e.InputTokens)
 	h.OutputTokens += int64(e.OutputTokens)

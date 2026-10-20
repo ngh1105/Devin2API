@@ -135,6 +135,7 @@ type Server struct {
 	cooldown        cooldowns     // accounts parked per model after a 429
 	stats           chatStats     // chat request totals, persisted in the data dir
 	settings        settingsStore // panel-editable settings, persisted in the data dir
+	cache           responseCache // repeated requests answered without upstream
 }
 
 // New creates a new Server from config and stores.
@@ -151,6 +152,7 @@ func New(cfg config.Config, accounts *store.AccountStore, tokens *store.TokenSto
 	s.stats.load(cfg.DataDir)
 	s.reqLog.load(cfg.DataDir)
 	s.settings.load(cfg.DataDir)
+	s.cache.load(cfg.DataDir, s.settings.get().cacheTTL())
 	s.auth.password = cfg.AdminPassword
 	s.storedResponses.configure(cfg.ResponsesKeep, cfg.ResponsesTTL, cfg.ResponsesMB)
 	return s
@@ -232,6 +234,7 @@ func (s *Server) flush() {
 	if s.stats.path != "" {
 		s.stats.save()
 	}
+	s.cache.flush()
 }
 
 // adminRequestError guards the admin API against browser attacks from

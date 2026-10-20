@@ -8,11 +8,19 @@ import (
 	"strings"
 )
 
-// Usage is the token accounting block of a completion.
+// Usage is the token accounting block of a completion. As in the OpenAI
+// API, PromptTokens includes cached tokens, which are also reported in
+// PromptTokensDetails.CachedTokens.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int                  `json:"prompt_tokens"`
+	CompletionTokens    int                  `json:"completion_tokens"`
+	TotalTokens         int                  `json:"total_tokens"`
+	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// PromptTokensDetails breaks down the prompt tokens.
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
 }
 
 // ChatCompletion is a non-streaming /v1/chat/completions response.

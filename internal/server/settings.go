@@ -42,6 +42,39 @@ type runtimeSettings struct {
 	SystemPrompt        string `json:"system_prompt"`
 	SystemPromptEnabled bool   `json:"system_prompt_enabled"`
 	SystemPromptMode    string `json:"system_prompt_mode"`
+	// CacheEnabled turns on the response cache (see cache.go). The limits
+	// default when zero: CacheTTLMinutes 5 (counted from the last hit),
+	// CacheMaxEntries 1000, CacheMaxMB 64.
+	CacheEnabled    bool `json:"cache_enabled"`
+	CacheTTLMinutes int  `json:"cache_ttl_minutes"`
+	CacheMaxEntries int  `json:"cache_max_entries"`
+	CacheMaxMB      int  `json:"cache_max_mb"`
+}
+
+// defaultSettings are the settings of a fresh data dir.
+func defaultSettings() runtimeSettings {
+	return runtimeSettings{SystemPromptMode: systemPrepend, CacheEnabled: true}
+}
+
+func (v runtimeSettings) cacheTTL() time.Duration {
+	if v.CacheTTLMinutes <= 0 {
+		return defaultCacheTTL
+	}
+	return time.Duration(v.CacheTTLMinutes) * time.Minute
+}
+
+func (v runtimeSettings) cacheMaxEntries() int {
+	if v.CacheMaxEntries <= 0 {
+		return defaultCacheEntries
+	}
+	return v.CacheMaxEntries
+}
+
+func (v runtimeSettings) cacheMaxBytes() int {
+	if v.CacheMaxMB <= 0 {
+		return defaultCacheMB << 20
+	}
+	return v.CacheMaxMB << 20
 }
 
 // settingsStore holds the runtime settings and their file.
@@ -52,6 +85,7 @@ type settingsStore struct {
 }
 
 func (st *settingsStore) load(dataDir string) {
+	st.v = defaultSettings()
 	if dataDir == "" {
 		return
 	}
@@ -67,6 +101,14 @@ func (st *settingsStore) load(dataDir string) {
 	if err := json.Unmarshal(b, &v); err != nil {
 		slog.Warn("settings: invalid settings.json, using defaults", "err", err)
 		return
+	}
+	// A settings.json from before the response cache has no cache_enabled
+	// key; the cache is on by default, so only an explicit false turns it off.
+	var keys map[string]json.RawMessage
+	if json.Unmarshal(b, &keys) == nil {
+		if _, ok := keys["cache_enabled"]; !ok {
+			v.CacheEnabled = true
+		}
 	}
 	// An upstream the current rules refuse (e.g. a plain-http LAN address
 	// saved by an older version) is dropped on its own, so the rest of the
@@ -142,6 +184,14 @@ func normalizeSettings(v runtimeSettings) (runtimeSettings, error) {
 	case systemPrepend, systemAppend:
 	default:
 		return v, fmt.Errorf("system_prompt_mode must be %q or %q", systemPrepend, systemAppend)
+	}
+	switch {
+	case v.CacheTTLMinutes < 0 || v.CacheTTLMinutes > maxCacheTTLMinutes:
+		return v, fmt.Errorf("cache_ttl_minutes must be between 0 and %d", maxCacheTTLMinutes)
+	case v.CacheMaxEntries < 0 || v.CacheMaxEntries > maxCacheEntries:
+		return v, fmt.Errorf("cache_max_entries must be between 0 and %d", maxCacheEntries)
+	case v.CacheMaxMB < 0 || v.CacheMaxMB > maxCacheMB:
+		return v, fmt.Errorf("cache_max_mb must be between 0 and %d", maxCacheMB)
 	}
 	return v, nil
 }
