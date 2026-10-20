@@ -1,10 +1,14 @@
 package server
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -13,13 +17,14 @@ import (
 )
 
 // requestLogSize is how many recent chat requests the panel can show.
-const requestLogSize = 200
+const requestLogSize = 1000
 
 // LogEntry records one chat request. It holds metadata only: no prompt,
 // output or credential ever goes into the log.
 type LogEntry struct {
 	Time          time.Time `json:"time"`
 	Endpoint      string    `json:"endpoint"`
+	Key           string    `json:"key,omitempty"`  // API key name (or masked value) that made the request
 	Model         string    `json:"model"`          // as requested
 	UpstreamModel string    `json:"upstream_model"` // catalog UID sent upstream
 	Stream        bool      `json:"stream"`
@@ -36,17 +41,71 @@ type LogEntry struct {
 	Finish        string    `json:"finish,omitempty"`
 }
 
-// requestLog is a fixed-size ring of recent entries.
+// requestLog is a fixed-size ring of recent entries, also appended to
+// <data>/logs.jsonl so they survive restarts. The file is compacted to the
+// ring's contents once it holds twice as many lines.
 type requestLog struct {
 	mu      sync.Mutex
 	entries []LogEntry
 	next    int
 	full    bool
+	path    string // "" keeps the log in memory only (tests)
+	lines   int    // lines in the file
+}
+
+// load restores the newest entries from dataDir; a missing file starts
+// empty and unreadable lines are skipped.
+func (l *requestLog) load(dataDir string) {
+	if dataDir == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.path = filepath.Join(dataDir, "logs.jsonl")
+	f, err := os.Open(l.path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	for sc.Scan() {
+		l.lines++
+		var e LogEntry
+		if json.Unmarshal(sc.Bytes(), &e) == nil {
+			l.push(e)
+		}
+	}
+	if l.lines > 2*requestLogSize {
+		l.compact()
+	}
 }
 
 func (l *requestLog) add(e LogEntry) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.push(e)
+	if l.path == "" {
+		return
+	}
+	b, _ := json.Marshal(e)
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err == nil {
+		_, err = f.Write(append(b, '\n'))
+		f.Close()
+	}
+	if err != nil {
+		slog.Warn("write request log", "error", err)
+		return
+	}
+	l.lines++
+	if l.lines > 2*requestLogSize {
+		l.compact()
+	}
+}
+
+// push stores e in the ring. Caller must hold l.mu.
+func (l *requestLog) push(e LogEntry) {
 	if l.entries == nil {
 		l.entries = make([]LogEntry, requestLogSize)
 	}
@@ -57,10 +116,51 @@ func (l *requestLog) add(e LogEntry) {
 	}
 }
 
+// compact rewrites the file with the ring's entries, oldest first.
+// Caller must hold l.mu.
+func (l *requestLog) compact() {
+	recent := l.recentLocked(0)
+	var buf []byte
+	for i := len(recent) - 1; i >= 0; i-- {
+		b, _ := json.Marshal(recent[i])
+		buf = append(append(buf, b...), '\n')
+	}
+	tmp := l.path + ".tmp"
+	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
+		slog.Warn("compact request log", "error", err)
+		return
+	}
+	if err := os.Rename(tmp, l.path); err != nil {
+		os.Remove(tmp)
+		slog.Warn("compact request log", "error", err)
+		return
+	}
+	l.lines = len(recent)
+}
+
+// clear drops every entry, in memory and on disk.
+func (l *requestLog) clear() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries, l.next, l.full, l.lines = nil, 0, false, 0
+	if l.path == "" {
+		return nil
+	}
+	if err := os.Remove(l.path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // recent returns up to limit entries, newest first.
 func (l *requestLog) recent(limit int) []LogEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.recentLocked(limit)
+}
+
+// recentLocked is recent for callers holding l.mu.
+func (l *requestLog) recentLocked(limit int) []LogEntry {
 	n := l.next
 	if l.full {
 		n = requestLogSize
@@ -99,6 +199,9 @@ func (s *Server) startTrace(r *http.Request, endpoint, model string, dreq devin.
 	tr := &chatTrace{start: time.Now(), entry: LogEntry{
 		Endpoint: endpoint, Model: model, UpstreamModel: devin.ResolveModel(dreq.Model), Stream: stream,
 	}}
+	if k, ok := apiKeyFrom(r.Context()); ok {
+		tr.entry.Key = keyLabel(k)
+	}
 	return context.WithValue(r.Context(), traceKey{}, tr), tr
 }
 
@@ -145,6 +248,7 @@ func (s *Server) finishTrace(ctx context.Context, tr *chatTrace, res *devin.Chat
 	if e.Status != http.StatusOK {
 		s.stats.failed.Add(1)
 	}
+	s.stats.record(e)
 	s.reqLog.add(e)
 	s.stats.changed() // covers this request's count from startTrace too
 
@@ -164,12 +268,20 @@ func (s *Server) finishTrace(ctx context.Context, tr *chatTrace, res *devin.Chat
 	slog.Info("chat", append(attrs, "finish", e.Finish)...)
 }
 
-// handleLogs serves GET /admin/api/logs?limit=N (newest first).
+// handleLogs serves GET /admin/api/logs?limit=N (newest first) and
+// DELETE, which clears the log.
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		writeJSON(w, http.StatusOK, s.reqLog.recent(limit))
+	case http.MethodDelete:
+		if err := s.reqLog.clear(); err != nil {
+			writeErr(w, http.StatusInternalServerError, "unable to clear the request log")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
 	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	writeJSON(w, http.StatusOK, s.reqLog.recent(limit))
 }

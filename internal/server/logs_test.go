@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ngh1105/Devin2API/internal/config"
 )
 
 func TestRequestLogRing(t *testing.T) {
@@ -126,5 +128,72 @@ func TestStatsSaveIsBatched(t *testing.T) {
 	r.load(dir)
 	if r.requests.Load() != 50 {
 		t.Errorf("reloaded %d, want 50", r.requests.Load())
+	}
+}
+
+// TestRequestLogPersists: entries are appended to <data>/logs.jsonl, come
+// back after a restart, the file is compacted, and DELETE clears it.
+func TestRequestLogPersists(t *testing.T) {
+	dir := t.TempDir()
+	var l requestLog
+	l.load(dir)
+	for i := 0; i < 2*requestLogSize+3; i++ {
+		l.add(LogEntry{Status: i})
+	}
+	var r requestLog
+	r.load(dir)
+	got := r.recent(0)
+	if len(got) != requestLogSize || got[0].Status != 2*requestLogSize+2 {
+		t.Fatalf("reloaded %d entries, newest %d", len(got), got[0].Status)
+	}
+	if r.lines > 2*requestLogSize {
+		t.Errorf("file not compacted: %d lines", r.lines)
+	}
+
+	srv := chatTestServer(t, &fakeDevin{}, "eyJtok1")
+	srv.reqLog.load(t.TempDir())
+	postChat(srv, `{"messages":[{"role":"user","content":"hi"}]}`)
+	if rec := adminDo(srv, http.MethodDelete, "/admin/api/logs", "", nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("clear: %d", rec.Code)
+	}
+	if _, err := os.Stat(srv.reqLog.path); !os.IsNotExist(err) || len(srv.reqLog.recent(0)) != 0 {
+		t.Errorf("log not cleared: %v", err)
+	}
+}
+
+// TestHourlyStats: finished requests are bucketed per hour, persisted, and
+// served as 24 zero-filled hours.
+func TestHourlyStats(t *testing.T) {
+	dir := t.TempDir()
+	var c chatStats
+	c.load(dir)
+	now := time.Now()
+	c.record(LogEntry{Time: now, Status: 200, InputTokens: 10, OutputTokens: 3})
+	c.record(LogEntry{Time: now, Status: 502})
+	c.record(LogEntry{Time: now.Add(-2 * time.Hour), Status: 200})
+	c.record(LogEntry{Time: now.Add(-(statsHours + 5) * time.Hour), Status: 200}) // too old: ignored
+	c.record(LogEntry{Time: now, Status: 200})
+	c.save()
+
+	var r chatStats
+	r.load(dir)
+	h := r.hourly(24, now, false)
+	if len(h) != 24 {
+		t.Fatalf("got %d hours", len(h))
+	}
+	last := h[23]
+	if last.Requests != 3 || last.Failed != 1 || last.InputTokens != 10 || last.OutputTokens != 3 || h[21].Requests != 1 {
+		t.Errorf("hours = %+v / %+v", last, h[21])
+	}
+	if all := r.hourly(statsHours+10, now, true); len(all) != 2 {
+		t.Errorf("kept %d hours, want 2", len(all))
+	}
+
+	srv := New(config.Config{Listen: ":0"}, mustAccounts(t), mustTokens(t))
+	rec := adminDo(srv, http.MethodGet, "/admin/api/stats", "", nil)
+	var stats struct{ Hourly []hourStat }
+	json.Unmarshal(rec.Body.Bytes(), &stats)
+	if len(stats.Hourly) != 24 {
+		t.Errorf("stats hourly = %d entries", len(stats.Hourly))
 	}
 }

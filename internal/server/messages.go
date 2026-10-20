@@ -244,7 +244,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		anthropic.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if status, msg := s.checkModel(&dreq, req.Model); status != 0 {
+	if status, msg := s.checkModel(r.Context(), &dreq, req.Model); status != 0 {
 		anthropic.WriteError(w, status, msg)
 		return
 	}

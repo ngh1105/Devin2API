@@ -26,6 +26,7 @@ func mustTokenStore(t *testing.T) *TokenStore {
 	if err != nil {
 		t.Fatalf("NewTokenStore: %v", err)
 	}
+	t.Cleanup(func() { s.Flush() })
 	return s
 }
 

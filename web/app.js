@@ -46,6 +46,12 @@
       .then(parseJSON);
   }
 
+  function apiPut(path, body) {
+    return fetch(path, { method: "PUT", headers: { "Content-Type": "application/json", "X-Devin2API": "1" }, body: body })
+      .then(checkStatus)
+      .then(parseJSON);
+  }
+
   function parseJSON(r) {
     return r.json();
   }
@@ -142,6 +148,173 @@
     tbody.appendChild(tr);
   }
 
+  // ---- Dialogs ----
+
+  // The open dialog's close function, so Escape and a backdrop click can
+  // dismiss whichever dialog is on top.
+  var dialogClose = null;
+
+  function showDialog(id, onClose) {
+    document.getElementById(id).classList.remove("hidden");
+    dialogClose = function () {
+      document.getElementById(id).classList.add("hidden");
+      dialogClose = null;
+      if (onClose) onClose();
+    };
+  }
+
+  // confirmDialog asks a yes/no question in a styled dialog; it resolves
+  // true when the action is confirmed.
+  function confirmDialog(title, message, action) {
+    return new Promise(function (resolve) {
+      document.getElementById("confirm-title").textContent = title;
+      document.getElementById("confirm-msg").textContent = message;
+      var ok = document.getElementById("confirm-ok");
+      ok.textContent = action || "Delete";
+      var done = function (v) {
+        ok.onclick = null;
+        document.getElementById("confirm-cancel").onclick = null;
+        if (dialogClose) dialogClose();
+        resolve(v);
+      };
+      showDialog("confirm-overlay", function () { resolve(false); });
+      ok.onclick = function () { done(true); };
+      document.getElementById("confirm-cancel").onclick = function () { done(false); };
+      ok.focus();
+    });
+  }
+
+  function setupDialogs() {
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape" && dialogClose) dialogClose();
+    });
+    ["confirm-overlay", "key-overlay"].forEach(function (id) {
+      var el = document.getElementById(id);
+      el.addEventListener("mousedown", function (ev) {
+        if (ev.target === el && dialogClose) dialogClose();
+      });
+    });
+  }
+
+  // ---- Pager ----
+
+  // renderPager draws "1–25 of 120" with page buttons and a page-size
+  // picker; onChange(page, size) redraws the table.
+  function renderPager(el, total, page, size, onChange) {
+    el.innerHTML = "";
+    if (total <= 10) return;
+    var pages = Math.max(1, Math.ceil(total / size));
+    var info = document.createElement("span");
+    info.className = "pager-info";
+    var from = page * size + 1, to = Math.min(total, (page + 1) * size);
+    info.appendChild(textNode(from + "–" + to + " of " + total));
+    var sel = document.createElement("select");
+    [10, 25, 50, 100].forEach(function (n) {
+      var o = document.createElement("option");
+      o.value = n;
+      o.textContent = n + " per page";
+      if (n === size) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.onchange = function () { onChange(0, Number(sel.value)); };
+    var nav = document.createElement("div");
+    nav.className = "pager-nav";
+    var prev = iconButton("up", "Previous page", function () { onChange(page - 1, size); });
+    prev.classList.add("rot-left");
+    prev.disabled = page === 0;
+    var label = document.createElement("span");
+    label.className = "pager-page";
+    label.appendChild(textNode("Page " + (page + 1) + " / " + pages));
+    var next = iconButton("down", "Next page", function () { onChange(page + 1, size); });
+    next.classList.add("rot-left");
+    next.disabled = page >= pages - 1;
+    nav.appendChild(prev);
+    nav.appendChild(label);
+    nav.appendChild(next);
+    el.appendChild(info);
+    el.appendChild(sel);
+    el.appendChild(nav);
+  }
+
+  // clampPage keeps a page index inside the available pages.
+  function clampPage(page, total, size) {
+    return Math.max(0, Math.min(page, Math.ceil(total / size) - 1));
+  }
+
+  // savedNumber reads a per-browser number preference.
+  function savedNumber(key, def) {
+    try { var v = Number(localStorage.getItem(key)); return v > 0 ? v : def; } catch (e) { return def; }
+  }
+
+  function saveNumber(key, v) {
+    try { localStorage.setItem(key, String(v)); } catch (e) { /* storage unavailable */ }
+  }
+
+  // relTime says how long ago a time was: "just now", "5 min ago", "3 h ago",
+  // falling back to the date.
+  function relTime(iso) {
+    var t = new Date(iso).getTime();
+    if (!isFinite(t)) return "—";
+    var s = (Date.now() - t) / 1000;
+    if (s < 45) return "just now";
+    if (s < 3600) return Math.round(s / 60) + " min ago";
+    if (s < 86400) return Math.round(s / 3600) + " h ago";
+    if (s < 7 * 86400) return Math.round(s / 86400) + " d ago";
+    return new Date(t).toLocaleDateString();
+  }
+
+  function fmtNum(n) {
+    n = Number(n) || 0;
+    if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+    if (n >= 1e4) return Math.round(n / 1e3) + "k";
+    if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
+    return String(n);
+  }
+
+  // ---- Charts ----
+
+  // drawBars renders hourly counts as stacked CSS bars (succeeded under
+  // failed) with an hour axis; values are numbers, so no markup injection.
+  function drawBars(el, hourly, withAxis) {
+    el.innerHTML = "";
+    var max = 1;
+    hourly.forEach(function (h) { max = Math.max(max, h.requests); });
+    var bars = document.createElement("div");
+    bars.className = "bars";
+    hourly.forEach(function (h) {
+      var col = document.createElement("div");
+      col.className = "bar-col";
+      var when = new Date(h.hour * 1000);
+      col.title = when.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }) + "\n"
+        + h.requests + " requests, " + h.failed + " failed\n"
+        + fmtNum(h.input_tokens) + " in / " + fmtNum(h.output_tokens) + " out tokens";
+      var okH = (h.requests - h.failed) / max * 100, errH = h.failed / max * 100;
+      var err = document.createElement("div");
+      err.className = "bar-err";
+      err.style.height = errH + "%";
+      var ok = document.createElement("div");
+      ok.className = "bar-ok";
+      ok.style.height = okH + "%";
+      col.appendChild(err);
+      col.appendChild(ok);
+      bars.appendChild(col);
+    });
+    el.appendChild(bars);
+    if (!withAxis) return;
+    var axis = document.createElement("div");
+    axis.className = "bar-axis";
+    hourly.forEach(function (h, i) {
+      var t = document.createElement("span");
+      if (i % 6 === 0 || i === hourly.length - 1) {
+        t.appendChild(textNode(new Date(h.hour * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })));
+      }
+      axis.appendChild(t);
+    });
+    el.appendChild(axis);
+  }
+
+  var lastHourly = [];
+
   // ---- Stats grid ----
 
   function loadStats() {
@@ -155,9 +328,20 @@
         { label: "Requests", val: (d.requests != null ? d.requests : 0), sub: since },
         { label: "Failed", val: (d.failed != null ? d.failed : 0), sub: since }
       ];
+      lastHourly = d.hourly || [];
+      var day = lastHourly.reduce(function (n, h) { return n + h.requests; }, 0);
+      items[2].sub = day + " in the last 24 h";
+      items[2].spark = lastHourly;
       items.forEach(function (it) {
         var c = document.createElement("div");
         c.className = "stat-card";
+        if (it.spark) {
+          var sp = document.createElement("div");
+          sp.className = "spark";
+          drawBars(sp, it.spark, false);
+          c.appendChild(sp);
+          c.classList.add("has-spark");
+        }
         [["stat-val", String(it.val)], ["stat-label", it.label], ["stat-sub", it.sub]].forEach(function (p) {
           if (!p[1]) return;
           var span = document.createElement("span");
@@ -199,6 +383,8 @@
     settings: function () { loadSettings(); }
   };
 
+  var activeTab = "accounts";
+
   function setupTabs() {
     var tabs = document.querySelectorAll(".tab");
     var panels = document.querySelectorAll(".tab-panel");
@@ -211,6 +397,7 @@
             panels[k].className = panels[k].id === "tab-" + name ? "tab-panel active" : "tab-panel";
           }
           tab.className = "tab active";
+          activeTab = name;
           if (tabLoaders[name]) tabLoaders[name]();
         };
       })(tabs[i]);
@@ -224,42 +411,251 @@
     return ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(1) + " s";
   }
 
+  var logCache = [];
+  var logPage = 0;
+  var logPageSize = savedNumber("devin2api-log-page", 50);
+  var logOpen = {}; // expanded rows, by logKey
+  var logTimer = null;
+
+  function logKey(e) { return e.time + "|" + e.endpoint + "|" + e.account; }
+
   function loadLogs() {
-    apiGet("/admin/api/logs?limit=200").then(function (entries) {
-      var tbody = document.querySelector("#log-table tbody");
-      while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
-      if (!entries.length) {
-        emptyRow(tbody, 8, "No chat requests yet.");
-        return;
-      }
-      entries.forEach(function (e) {
-        var tr = document.createElement("tr");
-        var detail = [];
-        if (e.stream) detail.push("stream");
-        if (e.attempts > 1) detail.push(e.attempts + " attempts");
-        if (e.first_output_ms) detail.push("first output " + fmtMs(e.first_output_ms));
-        if (e.tool_calls) detail.push(e.tool_calls + " tool call" + (e.tool_calls > 1 ? "s" : ""));
-        if (e.finish && e.finish !== "stop") detail.push(e.finish);
-        if (e.error) detail.push(e.error);
-        var cells = [
-          new Date(e.time).toLocaleTimeString(),
-          e.endpoint,
-          e.model === e.upstream_model ? e.model : e.model + " → " + e.upstream_model,
-          e.account_label || e.account || "—",
-          String(e.status),
-          fmtMs(e.duration_ms),
-          (e.input_tokens || 0) + " / " + (e.output_tokens || 0),
-          detail.join(" · ")
-        ];
-        cells.forEach(function (c, i) {
-          var td = document.createElement("td");
-          td.appendChild(textNode(c));
-          if (i === 4) td.className = e.status === 200 ? "status-ok" : "status-err";
-          tr.appendChild(td);
-        });
-        tbody.appendChild(tr);
-      });
+    Promise.all([apiGet("/admin/api/logs?limit=1000"), apiGet("/admin/api/stats")]).then(function (r) {
+      logCache = r[0] || [];
+      lastHourly = r[1].hourly || [];
+      renderActivity();
+      fillEndpointFilter();
+      drawLogs();
     }).catch(function (err) { toast(err.message, "#f87171"); });
+  }
+
+  // renderActivity draws the 24-hour chart, its totals, and the top models,
+  // accounts and keys of the last 24 hours of the log.
+  function renderActivity() {
+    drawBars(document.getElementById("chart-24h"), lastHourly, true);
+    var tot = { requests: 0, failed: 0, input_tokens: 0, output_tokens: 0 };
+    lastHourly.forEach(function (h) { for (var k in tot) tot[k] += h[k] || 0; });
+    var totals = document.getElementById("chart-totals");
+    totals.innerHTML = "";
+    [["Requests", fmtNum(tot.requests)],
+     ["Failed", fmtNum(tot.failed) + (tot.requests ? " · " + Math.round(tot.failed / tot.requests * 100) + "%" : "")],
+     ["Tokens in", fmtNum(tot.input_tokens)],
+     ["Tokens out", fmtNum(tot.output_tokens)]].forEach(function (p) {
+      var d = document.createElement("div");
+      var b = document.createElement("strong");
+      b.appendChild(textNode(p[1]));
+      var l = document.createElement("span");
+      l.appendChild(textNode(p[0]));
+      d.appendChild(b);
+      d.appendChild(l);
+      totals.appendChild(d);
+    });
+    var since = Date.now() - 86400000;
+    var day = logCache.filter(function (e) { return new Date(e.time).getTime() >= since; });
+    drawTop("top-models", day, function (e) { return e.upstream_model || e.model; });
+    drawTop("top-accounts", day, function (e) { return e.account_label || e.account; });
+    drawTop("top-keys", day, function (e) { return e.key || (e.endpoint ? "no key (local)" : ""); });
+  }
+
+  function drawTop(id, entries, keyFn) {
+    var groups = {};
+    entries.forEach(function (e) {
+      var k = keyFn(e);
+      if (!k) return;
+      var g = groups[k] || (groups[k] = { name: k, n: 0, err: 0 });
+      g.n++;
+      if (e.status !== 200) g.err++;
+    });
+    var list = Object.keys(groups).map(function (k) { return groups[k]; })
+      .sort(function (a, b) { return b.n - a.n; }).slice(0, 5);
+    var ol = document.getElementById(id);
+    ol.innerHTML = "";
+    if (!list.length) {
+      var li = document.createElement("li");
+      li.className = "top-empty";
+      li.appendChild(textNode("No requests in the last 24 h"));
+      ol.appendChild(li);
+      return;
+    }
+    list.forEach(function (g) {
+      var li = document.createElement("li");
+      var row = document.createElement("div");
+      row.className = "top-row";
+      var name = document.createElement("span");
+      name.className = "top-name";
+      name.title = g.name;
+      name.appendChild(textNode(g.name));
+      var n = document.createElement("span");
+      n.className = "top-n";
+      n.appendChild(textNode(g.n + (g.err ? " · " + g.err + " failed" : "")));
+      row.appendChild(name);
+      row.appendChild(n);
+      var track = document.createElement("div");
+      track.className = "top-track";
+      var bar = document.createElement("div");
+      bar.className = "top-bar";
+      bar.style.width = (g.n / list[0].n * 100) + "%";
+      if (g.err) {
+        var eb = document.createElement("div");
+        eb.className = "top-bar-err";
+        eb.style.width = (g.err / g.n * 100) + "%";
+        bar.appendChild(eb);
+      }
+      track.appendChild(bar);
+      li.appendChild(row);
+      li.appendChild(track);
+      ol.appendChild(li);
+    });
+  }
+
+  function fillEndpointFilter() {
+    var sel = document.getElementById("log-endpoint");
+    var cur = sel.value;
+    var seen = {};
+    logCache.forEach(function (e) { seen[e.endpoint] = true; });
+    while (sel.options.length > 1) sel.remove(1);
+    Object.keys(seen).sort().forEach(function (ep) {
+      var o = document.createElement("option");
+      o.value = ep;
+      o.textContent = ep;
+      sel.appendChild(o);
+    });
+    sel.value = seen[cur] ? cur : "";
+  }
+
+  function visibleLogs() {
+    var q = document.getElementById("log-search").value.trim().toLowerCase();
+    var st = document.getElementById("log-status").value;
+    var ep = document.getElementById("log-endpoint").value;
+    return logCache.filter(function (e) {
+      if (st === "ok" && e.status !== 200) return false;
+      if (st === "err" && e.status === 200) return false;
+      if (ep && e.endpoint !== ep) return false;
+      if (!q) return true;
+      return [e.model, e.upstream_model, e.account_label, e.account, e.key, e.error, e.endpoint, e.finish].some(function (v) {
+        return v && String(v).toLowerCase().indexOf(q) !== -1;
+      });
+    });
+  }
+
+  function drawLogs() {
+    var rows = visibleLogs();
+    logPage = clampPage(logPage, rows.length, logPageSize);
+    var tbody = document.querySelector("#log-table tbody");
+    tbody.innerHTML = "";
+    if (!logCache.length) emptyRow(tbody, 8, "No chat requests yet.");
+    else if (!rows.length) emptyRow(tbody, 8, "No requests match the search or filter.");
+    rows.slice(logPage * logPageSize, (logPage + 1) * logPageSize).forEach(function (e) {
+      var key = logKey(e);
+      var tr = document.createElement("tr");
+      tr.className = "log-row" + (logOpen[key] ? " open" : "");
+      var t = new Date(e.time);
+      var cells = [
+        t.toLocaleDateString() === new Date().toLocaleDateString() ? t.toLocaleTimeString() : t.toLocaleString(),
+        e.endpoint,
+        e.model === e.upstream_model ? e.model : e.model + " → " + e.upstream_model,
+        e.account_label || e.account || "—",
+        e.key || "—",
+        String(e.status),
+        fmtMs(e.duration_ms),
+        (e.input_tokens || 0) + " / " + (e.output_tokens || 0)
+      ];
+      cells.forEach(function (c, i) {
+        var td = document.createElement("td");
+        if (i === 5) {
+          var b = document.createElement("span");
+          b.className = "badge " + (e.status === 200 ? "badge-active" : "badge-dead");
+          b.appendChild(textNode(c));
+          td.appendChild(b);
+          if (e.error) td.title = e.error;
+        } else {
+          td.appendChild(textNode(c));
+        }
+        tr.appendChild(td);
+      });
+      tr.onclick = function () {
+        if (logOpen[key]) delete logOpen[key]; else logOpen[key] = true;
+        drawLogs();
+      };
+      tbody.appendChild(tr);
+      if (logOpen[key]) tbody.appendChild(logDetailRow(e));
+    });
+    var count = document.getElementById("log-count");
+    count.textContent = rows.length === logCache.length
+      ? logCache.length + " request" + (logCache.length === 1 ? "" : "s")
+      : rows.length + " of " + logCache.length + " shown";
+    renderPager(document.getElementById("log-pager"), rows.length, logPage, logPageSize, function (p, size) {
+      logPage = p;
+      if (size !== logPageSize) { logPageSize = size; saveNumber("devin2api-log-page", size); }
+      drawLogs();
+    });
+  }
+
+  // logDetailRow lists every field of one request under its row.
+  function logDetailRow(e) {
+    var tr = document.createElement("tr");
+    tr.className = "log-detail";
+    var td = document.createElement("td");
+    td.colSpan = 8;
+    var dl = document.createElement("dl");
+    dl.className = "detail-grid";
+    [
+      ["Time", new Date(e.time).toLocaleString()],
+      ["Endpoint", e.endpoint + (e.stream ? " (stream)" : "")],
+      ["Model requested", e.model],
+      ["Upstream model", e.upstream_model],
+      ["Account", (e.account_label || "—") + (e.account && e.account !== e.account_label ? " · " + e.account : "")],
+      ["API key", e.key || "none (local client)"],
+      ["Attempts", String(e.attempts || 0) + (e.attempts > 1 ? " (failover)" : "")],
+      ["Status", String(e.status)],
+      ["Duration", fmtMs(e.duration_ms)],
+      ["First output", e.first_output_ms ? fmtMs(e.first_output_ms) : "—"],
+      ["Tokens in / out", (e.input_tokens || 0) + " / " + (e.output_tokens || 0)],
+      ["Tool calls", String(e.tool_calls || 0)],
+      ["Finish", e.finish || "—"],
+      ["Error", e.error || "—"]
+    ].forEach(function (p) {
+      var dt = document.createElement("dt");
+      dt.appendChild(textNode(p[0]));
+      var dd = document.createElement("dd");
+      dd.appendChild(textNode(p[1]));
+      var item = document.createElement("div");
+      item.className = "detail-item" + (p[0] === "Error" && e.error ? " detail-err" : "");
+      item.appendChild(dt);
+      item.appendChild(dd);
+      dl.appendChild(item);
+    });
+    td.appendChild(dl);
+    tr.appendChild(td);
+    return tr;
+  }
+
+  // setLogAuto turns the 5-second refresh on or off; it only fetches while
+  // the Logs tab is open.
+  function setLogAuto(on) {
+    if (logTimer) { clearInterval(logTimer); logTimer = null; }
+    if (on) logTimer = setInterval(function () { if (activeTab === "logs" && !document.hidden) loadLogs(); }, 5000);
+    try { localStorage.setItem("devin2api-log-auto", on ? "1" : ""); } catch (e) { /* storage unavailable */ }
+  }
+
+  function setupLogs() {
+    var redraw = function () { logPage = 0; drawLogs(); };
+    document.getElementById("log-search").oninput = redraw;
+    document.getElementById("log-status").onchange = redraw;
+    document.getElementById("log-endpoint").onchange = redraw;
+    document.getElementById("btn-refresh-logs").onclick = loadLogs;
+    var auto = document.getElementById("logs-auto");
+    try { auto.checked = localStorage.getItem("devin2api-log-auto") === "1"; } catch (e) { /* storage unavailable */ }
+    auto.onchange = function () { setLogAuto(auto.checked); };
+    setLogAuto(auto.checked);
+    document.getElementById("btn-clear-logs").onclick = function () {
+      confirmDialog("Clear the request log?", "All " + logCache.length + " logged requests are deleted. Totals and the hourly chart are kept.", "Clear log")
+        .then(function (yes) {
+          if (!yes) return;
+          apiDelete("/admin/api/logs").then(function () { logOpen = {}; loadLogs(); toast("Request log cleared", "#34d399"); })
+            .catch(function (e) { toast(e.message, "#f87171"); });
+        });
+    };
   }
 
   // ---- Escape plan-end date helper ----
@@ -305,6 +701,14 @@
 
   var acctCache = [];
   var selected = {}; // account id -> true, kept across reloads
+  var acctPage = 0;
+  var acctPageSize = savedNumber("devin2api-acct-page", 25);
+
+  // pageAccounts is the slice of visible accounts on the current page.
+  function pageAccounts(vis) {
+    acctPage = clampPage(acctPage, vis.length, acctPageSize);
+    return vis.slice(acctPage * acctPageSize, (acctPage + 1) * acctPageSize);
+  }
 
   function statusKey(a) {
     if (a.usage_error) return "dead";
@@ -340,11 +744,12 @@
   }
 
   function drawAccounts() {
-    var accs = visibleAccounts();
+    var vis = visibleAccounts();
+    var accs = pageAccounts(vis);
     var tbody = document.querySelector("#acct-table tbody");
     tbody.innerHTML = "";
     if (!acctCache.length) emptyRow(tbody, 8, "No accounts yet. Use \"Add account\" to log in or import one.");
-    else if (!accs.length) emptyRow(tbody, 8, "No accounts match the search or filter.");
+    else if (!vis.length) emptyRow(tbody, 8, "No accounts match the search or filter.");
     for (var i = 0; i < accs.length; i++) {
       var a = accs[i];
       var tr = document.createElement("tr");
@@ -455,10 +860,13 @@
       delBtn.textContent = "Delete";
       delBtn.onclick = (function (id, label) {
         return function () {
-          if (!confirm("Delete account " + label + "?")) return;
-          apiDelete("/admin/api/accounts/" + id)
-            .then(function () { loadAccounts(); loadStats(); })
-            .catch(function (e) { toast(e.message, "#f87171"); });
+          confirmDialog("Delete this account?", label + " is removed from the pool, with its session token. This cannot be undone.", "Delete account")
+            .then(function (yes) {
+              if (!yes) return;
+              apiDelete("/admin/api/accounts/" + id)
+                .then(function () { loadAccounts(); loadStats(); })
+                .catch(function (e) { toast(e.message, "#f87171"); });
+            });
         };
       })(a.id, a.nickname || identityCell(a));
       tdAct.appendChild(delBtn);
@@ -468,24 +876,35 @@
     }
 
     var count = document.getElementById("acct-count");
-    count.textContent = accs.length === acctCache.length
+    count.textContent = vis.length === acctCache.length
       ? acctCache.length + " account" + (acctCache.length === 1 ? "" : "s")
-      : accs.length + " of " + acctCache.length + " shown";
+      : vis.length + " of " + acctCache.length + " match";
+    renderPager(document.getElementById("acct-pager"), vis.length, acctPage, acctPageSize, function (p, size) {
+      acctPage = p;
+      if (size !== acctPageSize) { acctPageSize = size; saveNumber("devin2api-acct-page", size); }
+      drawAccounts();
+    });
     updateBulkBar();
   }
 
-  // updateBulkBar shows the bulk actions while anything is selected and
-  // keeps the header checkbox in step with the visible rows.
+  // updateBulkBar shows the bulk actions while anything is selected, offers
+  // to extend the selection to every matching account, and keeps the header
+  // checkbox in step with the rows on the page.
   function updateBulkBar() {
     var ids = selectedIDs();
     var bar = document.getElementById("bulk-bar");
     bar.classList.toggle("hidden", ids.length === 0);
     document.getElementById("bulk-count").textContent = ids.length + " selected";
     var vis = visibleAccounts();
-    var nSel = vis.filter(function (a) { return selected[a.id]; }).length;
+    var unselected = vis.filter(function (a) { return !selected[a.id]; }).length;
+    var more = document.getElementById("bulk-select-all");
+    more.classList.toggle("hidden", unselected === 0);
+    more.textContent = "Select all " + vis.length + " matching";
+    var page = pageAccounts(vis);
+    var nSel = page.filter(function (a) { return selected[a.id]; }).length;
     var all = document.getElementById("acct-check-all");
-    all.checked = vis.length > 0 && nSel === vis.length;
-    all.indeterminate = nSel > 0 && nSel < vis.length;
+    all.checked = page.length > 0 && nSel === page.length;
+    all.indeterminate = nSel > 0 && nSel < page.length;
   }
 
   function loadAccounts() {
@@ -543,13 +962,17 @@
   }
 
   function setupBulk() {
-    var search = document.getElementById("acct-search");
-    search.oninput = drawAccounts;
-    document.getElementById("acct-filter").onchange = drawAccounts;
+    var redraw = function () { acctPage = 0; drawAccounts(); };
+    document.getElementById("acct-search").oninput = redraw;
+    document.getElementById("acct-filter").onchange = redraw;
     document.getElementById("acct-check-all").onchange = function (ev) {
-      visibleAccounts().forEach(function (a) {
+      pageAccounts(visibleAccounts()).forEach(function (a) {
         if (ev.target.checked) selected[a.id] = true; else delete selected[a.id];
       });
+      drawAccounts();
+    };
+    document.getElementById("bulk-select-all").onclick = function () {
+      visibleAccounts().forEach(function (a) { selected[a.id] = true; });
       drawAccounts();
     };
     document.getElementById("bulk-clear").onclick = function () { selected = {}; drawAccounts(); };
@@ -564,53 +987,303 @@
     };
     document.getElementById("bulk-delete").onclick = function () {
       var ids = selectedIDs();
-      if (!ids.length || !confirm("Delete " + ids.length + " account" + (ids.length === 1 ? "" : "s") + "? This cannot be undone.")) return;
+      if (!ids.length) return;
       var btn = this;
-      bulkRun(btn, "Deleting", ids, function (id) {
-        return apiDelete("/admin/api/accounts/" + id).then(function () { delete selected[id]; });
-      });
+      var n = ids.length + " account" + (ids.length === 1 ? "" : "s");
+      confirmDialog("Delete " + n + "?", "The selected accounts are removed from the pool, with their session tokens. This cannot be undone.", "Delete " + n)
+        .then(function (yes) {
+          if (!yes) return;
+          bulkRun(btn, "Deleting", ids, function (id) {
+            return apiDelete("/admin/api/accounts/" + id).then(function () { delete selected[id]; });
+          });
+        });
     };
   }
 
   // ---- Tokens (API Keys) tab ----
 
+  // keyState is a key's status for the badge: disabled, expired or out of
+  // quota keys are refused by the server.
+  function keyState(t) {
+    if (t.disabled) return { label: "Disabled", cls: "badge badge-disabled" };
+    if (t.expires_at && new Date(t.expires_at).getTime() <= Date.now()) return { label: "Expired", cls: "badge badge-expired" };
+    if (t.quota && t.requests >= t.quota) return { label: "Quota used", cls: "badge badge-dead" };
+    return { label: "Active", cls: "badge badge-active" };
+  }
+
+  function td(child, cls) {
+    var c = document.createElement("td");
+    if (cls) c.className = cls;
+    if (child != null) c.appendChild(typeof child === "string" ? textNode(child) : child);
+    return c;
+  }
+
+  function span(cls, txt) {
+    var el = document.createElement("span");
+    el.className = cls;
+    el.appendChild(textNode(txt));
+    return el;
+  }
+
+  var tokCache = [];
+
   function renderTokens(toks) {
+    tokCache = toks;
     var tbody = document.querySelector("#tok-table tbody");
     tbody.innerHTML = "";
     setNavCount("nav-count-tokens", toks.length);
-    if (!toks.length) emptyRow(tbody, 4, "No API keys. Without keys, only local clients may call /v1.");
-    for (var i = 0; i < toks.length; i++) {
-      var t = toks[i];
+    if (!toks.length) emptyRow(tbody, 7, "No API keys. Without keys, only local clients may call /v1.");
+    toks.forEach(function (t) {
       var tr = document.createElement("tr");
-      var tdID = document.createElement("td");
-      tdID.appendChild(textNode(t.id));
-      tr.appendChild(tdID);
-      var tdC = document.createElement("td");
-      tdC.appendChild(textNode(t.created_at ? new Date(t.created_at).toLocaleString() : "—"));
-      tr.appendChild(tdC);
-      var tdLU = document.createElement("td");
-      tdLU.appendChild(textNode(t.last_used ? new Date(t.last_used).toLocaleString() : "never"));
-      tr.appendChild(tdLU);
-      var tdR = document.createElement("td");
-      var revBtn = document.createElement("button");
-      revBtn.className = "btn-sm btn-del";
-      revBtn.textContent = "Revoke";
-      revBtn.onclick = (function (id) {
-        return function () {
-          if (!confirm("Revoke token " + id + "?")) return;
-          apiDelete("/admin/api/tokens/" + id)
-            .then(loadTokens)
-            .catch(function (e) { toast(e.message, "#f87171"); });
-        };
-      })(t.id);
-      tdR.appendChild(revBtn);
-      tr.appendChild(tdR);
+
+      var ident = document.createElement("div");
+      ident.className = "ident-text";
+      var name = span("ident-main" + (t.name ? "" : " unnamed"), t.name || "Unnamed key");
+      ident.appendChild(name);
+      ident.appendChild(span("ident-sub", t.hint || t.id));
+      tr.appendChild(td(ident));
+
+      var st = keyState(t);
+      tr.appendChild(td(span(st.cls, st.label)));
+
+      var req = document.createElement("div");
+      req.className = "key-usage";
+      if (t.quota) {
+        var used = Math.min(100, t.requests / t.quota * 100);
+        var track = document.createElement("div");
+        track.className = "usage-bar-track";
+        var bar = document.createElement("div");
+        bar.className = "usage-bar" + (used >= 90 ? " critical" : used >= 70 ? " high" : "");
+        bar.style.width = used + "%";
+        track.appendChild(bar);
+        req.appendChild(track);
+        req.appendChild(span("key-usage-text", fmtNum(t.requests) + " / " + fmtNum(t.quota)));
+      } else {
+        req.appendChild(span("key-usage-text", fmtNum(t.requests || 0) + " · no limit"));
+      }
+      tr.appendChild(td(req));
+
+      var models = document.createElement("div");
+      models.className = "chips";
+      if (!t.models || !t.models.length) {
+        models.appendChild(span("muted", "All models"));
+      } else {
+        t.models.slice(0, 2).forEach(function (m) { models.appendChild(span("chip", m)); });
+        if (t.models.length > 2) {
+          var more = span("chip chip-more", "+" + (t.models.length - 2));
+          more.title = t.models.slice(2).join(", ");
+          models.appendChild(more);
+        }
+      }
+      tr.appendChild(td(models));
+
+      tr.appendChild(td(t.expires_at ? new Date(t.expires_at).toLocaleDateString() : "Never"));
+      var lu = td(t.last_used ? relTime(t.last_used) : "Never");
+      if (t.last_used) lu.title = new Date(t.last_used).toLocaleString();
+      tr.appendChild(lu);
+
+      var act = td(null);
+      var edit = document.createElement("button");
+      edit.className = "btn-sm";
+      edit.textContent = "Edit";
+      edit.onclick = function () { openKeyDialog(t); };
+      var toggle = document.createElement("button");
+      toggle.className = "btn-sm";
+      toggle.textContent = t.disabled ? "Enable" : "Disable";
+      toggle.onclick = function () {
+        var body = keyOptions(t);
+        body.disabled = !t.disabled;
+        apiPut("/admin/api/tokens/" + t.id, JSON.stringify(body)).then(loadTokens)
+          .catch(function (e) { toast(e.message, "#f87171"); });
+      };
+      var rev = document.createElement("button");
+      rev.className = "btn-sm btn-del";
+      rev.textContent = "Revoke";
+      rev.onclick = function () {
+        confirmDialog("Revoke this API key?", (t.name || t.hint || t.id) + " stops working immediately. Clients using it get 401 errors.", "Revoke key")
+          .then(function (yes) {
+            if (!yes) return;
+            apiDelete("/admin/api/tokens/" + t.id).then(loadTokens)
+              .catch(function (e) { toast(e.message, "#f87171"); });
+          });
+      };
+      act.appendChild(edit);
+      act.appendChild(toggle);
+      act.appendChild(rev);
+      tr.appendChild(act);
       tbody.appendChild(tr);
-    }
+    });
   }
 
   function loadTokens() {
     apiGet("/admin/api/tokens").then(renderTokens).catch(function (e) { toast(e.message, "#f87171"); });
+  }
+
+  // keyOptions is the editable part of a key, as PUT expects it.
+  function keyOptions(t) {
+    return { name: t.name || "", disabled: !!t.disabled, expires_at: t.expires_at || null, models: t.models || [], quota: t.quota || 0 };
+  }
+
+  var catalog = null; // admin model list, loaded on first use
+  var editingKey = null;
+
+  function dateInputValue(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    var p = function (n) { return (n < 10 ? "0" : "") + n; };
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+  }
+
+  // renderModelPicks lists the catalog as checkboxes, plus any model the
+  // key allows that the catalog no longer has.
+  function renderModelPicks(chosen) {
+    var box = document.getElementById("key-models");
+    box.innerHTML = "";
+    var list = (catalog && catalog.models || []).slice();
+    chosen.forEach(function (id) {
+      if (!list.some(function (m) { return m.id === id; })) list.push({ id: id, label: "" });
+    });
+    if (!list.length) {
+      box.appendChild(span("muted model-empty", "The model list loads once an account can reach Devin. Add model ids below."));
+      return;
+    }
+    list.forEach(function (m) {
+      var l = document.createElement("label");
+      l.className = "model-pick";
+      var c = document.createElement("input");
+      c.type = "checkbox";
+      c.value = m.id;
+      c.checked = chosen.indexOf(m.id) !== -1;
+      l.appendChild(c);
+      var txt = document.createElement("span");
+      txt.appendChild(span("mono", m.id));
+      if (m.label && m.label !== m.id) txt.appendChild(span("muted", m.label));
+      l.appendChild(txt);
+      box.appendChild(l);
+    });
+  }
+
+  function openKeyDialog(t) {
+    editingKey = t;
+    var editing = !!t;
+    document.getElementById("key-title").textContent = editing ? "Edit API key" : "Create API key";
+    document.getElementById("key-submit").textContent = editing ? "Save changes" : "Create key";
+    document.getElementById("key-name").value = editing ? t.name || "" : "";
+    document.getElementById("key-expires").value = editing ? dateInputValue(t.expires_at) : "";
+    document.getElementById("key-quota").value = editing && t.quota ? t.quota : "";
+    var chosen = editing && t.models ? t.models : [];
+    document.getElementById("key-all-models").checked = !chosen.length;
+    document.getElementById("key-models-wrap").classList.toggle("hidden", !chosen.length);
+    document.getElementById("key-disabled").checked = editing && !!t.disabled;
+    document.getElementById("key-reset").checked = false;
+    document.getElementById("key-reset-label").textContent = "Reset the request counter" + (editing ? " (" + (t.requests || 0) + " so far)" : "");
+    document.getElementById("key-status").textContent = "";
+    var edits = document.querySelectorAll("#key-form .edit-only");
+    for (var i = 0; i < edits.length; i++) edits[i].classList.toggle("hidden", !editing);
+    renderModelPicks(chosen);
+    showDialog("key-overlay");
+    document.getElementById("key-name").focus();
+    if (!catalog) {
+      apiGet("/admin/api/models").then(function (c) {
+        catalog = c;
+        renderModelPicks(checkedModels());
+      }).catch(function () { /* the list stays empty */ });
+    }
+  }
+
+  function checkedModels() {
+    var out = [];
+    var boxes = document.querySelectorAll("#key-models input");
+    for (var i = 0; i < boxes.length; i++) if (boxes[i].checked) out.push(boxes[i].value);
+    return out;
+  }
+
+  function submitKeyForm(ev) {
+    ev.preventDefault();
+    var status = document.getElementById("key-status");
+    var exp = document.getElementById("key-expires").value;
+    var quota = document.getElementById("key-quota").value;
+    var body = {
+      name: document.getElementById("key-name").value.trim(),
+      // A date means "through the end of that day", in local time.
+      expires_at: exp ? new Date(exp + "T23:59:59").toISOString() : null,
+      models: document.getElementById("key-all-models").checked ? [] : checkedModels(),
+      quota: quota ? Math.max(0, Math.floor(Number(quota))) : 0,
+      disabled: !!editingKey && document.getElementById("key-disabled").checked
+    };
+    if (!document.getElementById("key-all-models").checked && !body.models.length) {
+      status.textContent = "Pick at least one model, or allow every model.";
+      return;
+    }
+    var btn = document.getElementById("key-submit");
+    btn.disabled = true;
+    var req;
+    if (editingKey) {
+      body.reset_requests = document.getElementById("key-reset").checked;
+      req = apiPut("/admin/api/tokens/" + editingKey.id, JSON.stringify(body));
+    } else {
+      req = apiPost("/admin/api/tokens", JSON.stringify(body));
+    }
+    req.then(function (tok) {
+      var created = !editingKey;
+      if (dialogClose) dialogClose();
+      loadTokens();
+      if (created) revealKey(tok.token);
+      else toast("API key saved", "#34d399");
+    }).catch(function (e) {
+      status.textContent = e.message;
+    }).then(function () { btn.disabled = false; });
+  }
+
+  // revealKey shows a new key's value once, with a copy button.
+  function revealKey(value) {
+    document.getElementById("reveal-value").textContent = value;
+    showDialog("reveal-overlay", function () { document.getElementById("reveal-value").textContent = ""; });
+    document.getElementById("reveal-copy").focus();
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+    // Plain-HTTP pages (a LAN address) have no clipboard API.
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = document.execCommand("copy");
+    ta.remove();
+    return ok ? Promise.resolve() : Promise.reject(new Error("copy failed"));
+  }
+
+  function setupKeys() {
+    document.getElementById("btn-create-token").onclick = function () { openKeyDialog(null); };
+    document.getElementById("key-form").onsubmit = submitKeyForm;
+    document.getElementById("key-close").onclick = function () { if (dialogClose) dialogClose(); };
+    document.getElementById("key-cancel").onclick = function () { if (dialogClose) dialogClose(); };
+    document.getElementById("key-all-models").onchange = function (ev) {
+      document.getElementById("key-models-wrap").classList.toggle("hidden", ev.target.checked);
+    };
+    var addModel = function () {
+      var input = document.getElementById("key-model-add");
+      var id = input.value.trim();
+      if (!id) return;
+      var chosen = checkedModels();
+      if (chosen.indexOf(id) === -1) chosen.push(id);
+      renderModelPicks(chosen);
+      input.value = "";
+      input.focus();
+    };
+    document.getElementById("key-model-add-btn").onclick = addModel;
+    document.getElementById("key-model-add").onkeydown = function (ev) {
+      if (ev.key === "Enter") { ev.preventDefault(); addModel(); }
+    };
+    document.getElementById("reveal-copy").onclick = function () {
+      copyText(document.getElementById("reveal-value").textContent)
+        .then(function () { toast("Key copied", "#34d399"); })
+        .catch(function () { toast("Copy failed: select the key and copy it by hand", "#f87171"); });
+    };
+    document.getElementById("reveal-done").onclick = function () { if (dialogClose) dialogClose(); };
   }
 
   // ---- Settings tab ----
@@ -896,13 +1569,15 @@
       ["/v1/responses", "POST", "OpenAI Responses API (previous_response_id kept 1 h in memory)"],
       ["/v1/completions", "POST", "Legacy text completions, emulated on the chat models"],
       ["/admin/api/accounts", "GET / POST", "List or import accounts"],
-      ["/admin/api/stats", "GET", 'Returns {accounts,enabled,models,requests,failed,since}'],
-      ["/admin/api/logs", "GET", "Recent chat requests (metadata only), newest first"]
+      ["/admin/api/stats", "GET", "Totals plus request counts for each of the last 24 hours"],
+      ["/admin/api/logs", "GET / DELETE", "Last 1000 chat requests (metadata only), newest first; DELETE clears them"],
+      ["/admin/api/tokens", "GET / POST", "List API keys, or create one with a name, expiry, model list and quota"],
+      ["/admin/api/tokens/{id}", "PUT / DELETE", "Edit or revoke an API key"]
     ];
     for (var i = 0; i < entries.length; i++) {
       var dt = document.createElement("dt");
       var method = document.createElement("span");
-      method.className = entries[i][1].indexOf("POST") === 0 ? "method post" : "method";
+      method.className = entries[i][1] === "GET" ? "method" : "method post";
       method.appendChild(textNode(entries[i][1]));
       dt.appendChild(method);
       dt.appendChild(textNode(entries[i][0]));
@@ -934,6 +1609,9 @@
     setupTabs();
     setupBulk();
     setupSettings();
+    setupDialogs();
+    setupLogs();
+    setupKeys();
     renderTokens([]); // placeholder until tab clicked
     setupAdminLogin(loadInitialData).then(function (ready) {
       if (ready) loadInitialData();
@@ -956,37 +1634,6 @@
       }).catch(function (e) { document.getElementById("import-status").textContent = e.message; });
     };
     document.getElementById("btn-refresh-all").onclick = refreshAllUsage;
-    document.getElementById("btn-create-token").onclick = function () {
-      var box = document.getElementById("new-token-box");
-      // Build DOM elements (never innerHTML for security).
-      var header = document.createElement("strong");
-      header.className = "warn-once";
-      header.textContent = "⚠ Shown once — copy now!";
-      var valDiv = document.createElement("div");
-      valDiv.className = "token-value";
-      var codeEl = document.createElement("code");
-      codeEl.title = "Click to copy";
-      codeEl.onclick = function () {
-        // tok is scoped to the create callback below; copy what is displayed.
-        navigator.clipboard.writeText(codeEl.textContent).then(function () { toast("Copied!", "#34d399"); });
-      };
-      // Assemble fresh: clear any stale content first.
-      while (box.firstChild) { box.removeChild(box.firstChild); }
-      box.appendChild(header);
-      box.appendChild(valDiv);
-      box.appendChild(codeEl);
-      // Display the value.
-      apiPost("/admin/api/tokens", "").then(function (tok) {
-        codeEl.textContent = tok.token;
-        box.className = "new-token-box";
-        loadTokens(); // list the new key (masked)
-      }).catch(function (e) {
-        box.textContent = e.message;
-        box.className = "new-token-box err";
-      });
-      box.style.display = "";
-    };
-    document.getElementById("btn-refresh-logs").onclick = loadLogs;
     renderApiTab();
   }
 

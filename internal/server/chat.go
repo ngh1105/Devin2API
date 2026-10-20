@@ -194,13 +194,17 @@ func readBody(r *http.Request) ([]byte, int, string) {
 }
 
 // checkModel maps dreq.Model onto the cached catalog ("gpt-5-4" ->
-// "gpt-5-4-medium") and rejects unknown models and images sent to text-only
-// models. It uses the cache only, so a cold cache never delays a request;
+// "gpt-5-4-medium") and rejects models the API key may not use, unknown
+// models, and images sent to text-only models. It uses the cache only, so a
+// cold cache never delays a request;
 // requested is the client's model name for error messages. A zero status
 // means the request may proceed.
-func (s *Server) checkModel(dreq *devin.ChatRequest, requested string) (int, string) {
+func (s *Server) checkModel(ctx context.Context, dreq *devin.ChatRequest, requested string) (int, string) {
 	catalog := s.cachedModels()
 	dreq.Model = devin.MatchModel(dreq.Model, catalog)
+	if status, msg := s.keyModelCheck(ctx, requested, dreq.Model, devin.ResolveModel(dreq.Model)); status != 0 {
+		return status, msg
+	}
 	if len(catalog) == 0 {
 		return 0, ""
 	}
@@ -267,8 +271,13 @@ func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, 
 	for _, acc := range accs {
 		tr.attempt(acc.ID, accountLabel(acc))
 		started := false
+		outBytes := 0 // output forwarded to the client, for usage estimates
 		deliver := func(d devin.Delta) error {
 			tr.output()
+			outBytes += len(d.Text) + len(d.Thinking)
+			if d.ToolCall != nil {
+				outBytes += len(d.ToolCall.Name) + len(d.ToolCall.Arguments)
+			}
 			return onDelta(d)
 		}
 		var sw *stopWatcher
@@ -292,6 +301,14 @@ func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, 
 			switch {
 			case errors.Is(err, errStopSequence):
 				res.StopSequence = sw.hit
+				// Upstream reports usage only at the end of the stream, which
+				// was cut short, so estimate what is missing.
+				if res.PromptTokens == 0 {
+					res.PromptTokens = estimateTokens(promptBytes(req))
+				}
+				if res.CompletionTokens == 0 {
+					res.CompletionTokens = estimateTokens(outBytes)
+				}
 				return res, nil
 			case err == nil:
 				if err := sw.flush(); err != nil {
@@ -318,6 +335,25 @@ func (s *Server) streamWithFailover(ctx context.Context, req devin.ChatRequest, 
 		}
 	}
 	return nil, lastErr
+}
+
+// estimateTokens approximates a token count from a byte count, at the
+// usual four bytes per token.
+func estimateTokens(n int) int { return (n + 3) / 4 }
+
+// promptBytes is the size of the text a chat request sends upstream.
+func promptBytes(req devin.ChatRequest) int {
+	n := len(req.System)
+	for _, p := range req.Prompts {
+		n += len(p.Text)
+		for _, c := range p.ToolCalls {
+			n += len(c.Name) + len(c.Arguments)
+		}
+	}
+	for _, t := range req.Tools {
+		n += len(t.Name) + len(t.Description) + len(t.Parameters)
+	}
+	return n
 }
 
 // accountLabel names an account for logs: nickname, email, user name or id.
@@ -468,7 +504,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if status, msg := s.checkModel(&dreq, req.Model); status != 0 {
+	if status, msg := s.checkModel(r.Context(), &dreq, req.Model); status != 0 {
 		openai.WriteError(w, status, msg)
 		return
 	}

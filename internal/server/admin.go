@@ -61,6 +61,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.handleLogin(w, r)
 	case prefix == "/logout":
 		s.handleLogout(w, r)
+	case prefix == "/models":
+		s.handleAdminModels(w, r)
 	case prefix == "/logs":
 		s.handleLogs(w, r)
 	case prefix == "/login/start":
@@ -103,11 +105,14 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 	case strings.HasPrefix(prefix, "/tokens/"):
 		id := strings.TrimPrefix(prefix, "/tokens/")
-		if r.Method != http.MethodDelete {
+		switch r.Method {
+		case http.MethodDelete:
+			s.deleteToken(w, r, id)
+		case http.MethodPut:
+			s.updateToken(w, r, id)
+		default:
 			writeErr(w, http.StatusNotFound, "not found")
-			return
 		}
-		s.deleteToken(w, r, id)
 	default:
 		writeErr(w, http.StatusNotFound, "not found")
 	}
@@ -233,43 +238,6 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request, id string
 	}
 	if err := s.accounts.Delete(id); err != nil {
 		writeErr(w, http.StatusInternalServerError, "unable to delete account")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {
-	toks, err := s.tokens.List()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "unable to list tokens")
-		return
-	}
-	// The plaintext value is only returned once, by createToken.
-	for i := range toks {
-		toks[i].Token = store.MaskSecret(toks[i].Token)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(toks)
-}
-
-func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
-	tok, err := s.tokens.Create()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "unable to create token")
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(tok)
-}
-
-func (s *Server) deleteToken(w http.ResponseWriter, r *http.Request, id string) {
-	if err := s.tokens.Delete(id); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeErr(w, http.StatusNotFound, "token not found")
-			return
-		}
-		writeErr(w, http.StatusInternalServerError, "unable to delete token")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -486,6 +454,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"requests": s.stats.requests.Load(),
 		"failed":   s.stats.failed.Load(),
 		"since":    s.stats.since,
+		"hourly":   s.stats.hourly(24, time.Now(), false),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

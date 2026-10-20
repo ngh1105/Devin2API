@@ -4,12 +4,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/ngh1105/Devin2API/internal/anthropic"
 	"github.com/ngh1105/Devin2API/internal/devin"
 	"github.com/ngh1105/Devin2API/internal/openai"
+	"github.com/ngh1105/Devin2API/internal/store"
 )
 
 // healthz returns a simple readiness probe.
@@ -59,20 +61,28 @@ func (s *Server) v1Middleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		var id string
+		var key store.Token
 		authed := false
 		if scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " "); ok && strings.EqualFold(scheme, "Bearer") {
-			id, authed = s.tokens.Match(strings.TrimSpace(token))
+			key, authed = s.tokens.Match(strings.TrimSpace(token))
 		}
 		if !authed {
-			id, authed = s.tokens.Match(r.Header.Get("X-Api-Key"))
+			key, authed = s.tokens.Match(r.Header.Get("X-Api-Key"))
 		}
 		if !authed {
 			writeV1AuthError(w, r, "invalid or missing token")
 			return
 		}
-		s.tokens.Touch(id)
-		next.ServeHTTP(w, r)
+		key, err = s.tokens.Use(key.ID, counted(r))
+		switch {
+		case errors.Is(err, store.ErrKeyQuota):
+			writeV1Error(w, r, http.StatusTooManyRequests, err.Error())
+			return
+		case err != nil:
+			writeV1AuthError(w, r, err.Error())
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(withAPIKey(r.Context(), key)))
 	}
 }
 
@@ -88,8 +98,15 @@ func (s *Server) getModels(w http.ResponseWriter, r *http.Request) {
 		ContextLength int    `json:"context_length,omitempty"`
 		Multimodal    bool   `json:"multimodal,omitempty"`
 	}
-	data := []model{{ID: "devin", Object: "model", OwnedBy: "devin", DisplayName: "Default (" + devin.DefaultModel + ")"}}
+	// An API key limited to some models only sees those.
+	var data []model
+	if modelAllowed(r.Context(), "devin", devin.DefaultModel) {
+		data = append(data, model{ID: "devin", Object: "model", OwnedBy: "devin", DisplayName: "Default (" + devin.DefaultModel + ")"})
+	}
 	for _, m := range s.fetchModels(r.Context()) {
+		if !modelAllowed(r.Context(), m.UID) {
+			continue
+		}
 		data = append(data, model{
 			ID: m.UID, Object: "model", OwnedBy: "devin",
 			DisplayName: m.Label, ContextLength: m.ContextLength, Multimodal: m.Multimodal,
@@ -118,9 +135,14 @@ func randID() string {
 // caller's API format: Anthropic clients (Claude Code) expect
 // {"type":"error","error":{"type":"authentication_error",...}}.
 func writeV1AuthError(w http.ResponseWriter, r *http.Request, msg string) {
+	writeV1Error(w, r, http.StatusUnauthorized, msg)
+}
+
+// writeV1Error writes an error in the caller's API format.
+func writeV1Error(w http.ResponseWriter, r *http.Request, status int, msg string) {
 	if strings.HasPrefix(r.URL.Path, "/v1/messages") {
-		anthropic.WriteError(w, http.StatusUnauthorized, msg)
+		anthropic.WriteError(w, status, msg)
 		return
 	}
-	openai.WriteError(w, http.StatusUnauthorized, msg)
+	openai.WriteError(w, status, msg)
 }

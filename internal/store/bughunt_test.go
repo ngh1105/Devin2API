@@ -164,7 +164,7 @@ func TestTokenStoreNullFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ts.Create(); err != nil { // used to panic on a nil map
+	if _, err := ts.Create(TokenOptions{}); err != nil { // used to panic on a nil map
 		t.Fatal(err)
 	}
 }

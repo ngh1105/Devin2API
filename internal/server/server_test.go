@@ -103,7 +103,7 @@ func TestV1OpenWhenNoTokens(t *testing.T) {
 func TestV1RejectsBadToken(t *testing.T) {
 	tmp := t.TempDir()
 	srv := makeTestServer(t, tmp)
-	_, err := srv.tokens.Create()
+	_, err := srv.tokens.Create(store.TokenOptions{})
 	if err != nil {
 		t.Fatalf("create token: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestV1RejectsBadToken(t *testing.T) {
 func TestV1AcceptsCreatedToken(t *testing.T) {
 	tmp := t.TempDir()
 	srv := makeTestServer(t, tmp)
-	tok, err := srv.tokens.Create()
+	tok, err := srv.tokens.Create(store.TokenOptions{})
 	if err != nil {
 		t.Fatalf("create token: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestV1AcceptsCreatedToken(t *testing.T) {
 // bearer value never authenticates.
 func TestV1RejectsWrongScheme(t *testing.T) {
 	srv := makeTestServer(t, t.TempDir())
-	tok, _ := srv.tokens.Create()
+	tok, _ := srv.tokens.Create(store.TokenOptions{})
 	for _, h := range []string{"Basic " + tok.Token, "Bearer ", "Bearer", "XXXXXXX" + tok.Token} {
 		req := v1Request(http.MethodGet, "/v1/models", nil)
 		req.Header.Set("Authorization", h)
@@ -172,7 +172,7 @@ func TestV1RejectsWrongScheme(t *testing.T) {
 // TestV1TouchesToken ensures a successful request records last_used.
 func TestV1TouchesToken(t *testing.T) {
 	srv := makeTestServer(t, t.TempDir())
-	tok, _ := srv.tokens.Create()
+	tok, _ := srv.tokens.Create(store.TokenOptions{})
 	req := v1Request(http.MethodGet, "/v1/models", nil)
 	req.Header.Set("Authorization", "bearer "+tok.Token)
 	rec := httptest.NewRecorder()

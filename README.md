@@ -183,20 +183,24 @@ Single-page app at `/web/` with five tabs:
 
 | Tab          | Contents                                                        |
 |--------------|-----------------------------------------------------------------|
-| **Accounts** | Account list with usage bars, search and status filter; add (browser login, pasted session token or JSON import), enable/disable, delete, refresh usage. Tick rows (or the header box for all shown) to refresh, enable, disable or delete many at once. |
-| **API Keys** | Create, list (masked) and revoke proxy API keys                 |
-| **Logs**     | The last 200 chat requests: endpoint, model, account, status, duration, time to first output, tokens, failover attempts, upstream error |
+| **Accounts** | Account list with usage bars, search, status filter and pages of 10–100; add (browser login, pasted session token or JSON import), enable/disable, delete, refresh usage. Tick rows (or the header box for the page, then "Select all matching") to refresh, enable, disable or delete many at once. |
+| **API Keys** | Create keys with a name, expiry date, model allow list and request quota; edit, disable, reset the counter or revoke them. Shows each key's status, requests used and last use. |
+| **Logs**     | A chart of the last 24 hours (succeeded / failed requests per hour, tokens in and out), the top models, accounts and API keys, and the last 1000 chat requests with search, filters, pages and auto-refresh. Click a row for every detail: endpoint, models, account, API key, attempts, status, duration, time to first output, tokens, tool calls, finish reason and upstream error. |
 | **Settings** | Devin endpoints, global system prompt, and the listen address / data directory (read-only, set via environment variables) |
 | **API**      | Endpoint reference and a curl example                           |
 
-The panel follows the OS light/dark setting; the Theme button overrides it for that browser.
+The panel follows the OS light/dark setting; the Light / System / Dark switch in the sidebar overrides it for that browser. Destructive actions (deleting accounts, revoking keys, clearing the log) ask for confirmation first.
 
 Settings saved from the panel apply immediately and are kept in `<data>/settings.json`:
 
 - **Devin endpoints**: an ordered list of Devin server base URLs (default `https://server.codeium.com`). Chat, usage and model requests use the first one. On a network error or HTTP 502/503/504 before any output, the same account is retried on the next endpoint; other errors (a rejected token, a rate limit, a bad request) are not endpoint problems and go to account failover as before. **Test** checks that a URL answers without sending any account token. Account session tokens are sent to every listed endpoint, so only add hosts you trust.
 - **Global system prompt**: when switched on, added before (default) or after the client's own system prompt on every chat endpoint (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/completions`). It goes through the same cleaning as client prompts. Up to 32 KB.
 
-Stats grid at the top: Accounts, Models, Requests, Failed. Request and failure totals are saved to `<data>/stats.json` (within ~2 s of each request) and survive restarts; the date counting started is shown under them. Delete the file to reset.
+Stats grid at the top: Accounts, Models, Requests (with a 24-hour sparkline), Failed. Request and failure totals, and per-hour counts for the last 7 days, are saved to `<data>/stats.json` (within ~2 s of each request) and survive restarts; the date counting started is shown under them. Delete the file to reset.
+
+The request log keeps the last 1000 chat requests in memory and appends each one to `<data>/logs.jsonl`, so it survives restarts; the file is trimmed back to 1000 lines once it reaches 2000. **Clear** in the Logs tab (or `DELETE /admin/api/logs`) empties it.
+
+On Ctrl+C or SIGTERM the server stops accepting connections, gives open requests up to 5 s, and writes the counters it otherwise saves with a short delay.
 
 Every chat request is also logged to the console (stderr) as one line, for example:
 
@@ -204,16 +208,23 @@ Every chat request is also logged to the console (stderr) as one line, for examp
 INFO chat endpoint=/v1/messages model=claude-sonnet-4-6 stream=true account=acc_... attempts=1 status=200 ms=972 first_ms=889 in=418 out=5 finish=stop
 ```
 
-Logs hold metadata only; prompts, outputs and tokens are never recorded.
+Logs hold metadata only; prompts, outputs and credentials are never recorded.
 
 ---
 
 ## Downstream Tokens (Proxy Authentication)
 
-Use the **API Keys** tab (`/web/tokens.html`) in the panel to create tokens. Each call generates:
+Use the **API Keys** tab in the panel to create keys. Each key has:
 
 - **ID** — internal `t_XXXXXXXX`
-- **Value** — `d2sk_` + 32 hex characters (shown once on creation; store it securely)
+- **Value** — `d2sk_` + 32 hex characters, shown once on creation. Only its SHA-256 hash and a masked hint (`d2sk_…ab12`) are stored in `<data>/tokens/tokens.json`, so copy it when it is shown. Keys saved in plaintext by older versions are hashed on the first start and keep working.
+- **Name** (optional) — shown in the panel and in the request log.
+- **Expiry** (optional) — after the chosen day the key gets 401 `API key has expired`.
+- **Models** (optional) — an allow list; other models get 403, and `/v1/models` lists only the allowed ones.
+- **Request quota** (optional) — the number of generation requests (`POST`s other than `count_tokens`) the key may make in total; past it the key gets 429. The panel shows the count and can reset it.
+- **Disabled** — refuses every request (401) without deleting the key.
+
+Keys are managed with `GET/POST /admin/api/tokens` and `PUT/DELETE /admin/api/tokens/{id}`; `PUT` takes `{"name", "disabled", "expires_at", "models", "quota", "reset_requests"}`.
 
 Include the token value with any request to the `/v1/*` endpoints:
 
@@ -227,7 +238,7 @@ or equivalently:
 X-Api-Key: d2sk_xxxx...
 ```
 
-If the token store is **empty** (no tokens created), `/v1/*` accepts requests without a key, but only from local clients: the connection must come from a loopback address, the `Host` must be `localhost`, `127.0.0.1` or `[::1]`, and any `Origin` header must match it. This stops web pages and DNS-rebinding tricks from spending your Devin quota. As soon as one or more tokens exist, every `/v1/*` request must include a valid token. Token values are masked in list responses; the full value is only shown once, on creation.
+If the token store is **empty** (no tokens created), `/v1/*` accepts requests without a key, but only from local clients: the connection must come from a loopback address, the `Host` must be `localhost`, `127.0.0.1` or `[::1]`, and any `Origin` header must match it. This stops web pages and DNS-rebinding tricks from spending your Devin quota. As soon as one or more tokens exist, every `/v1/*` request must include a valid token. Key values are never returned after creation; lists show the masked hint.
 
 ---
 
@@ -255,7 +266,7 @@ How chat works:
 - If an account's token is rejected (401) or it hits a limit (429/403) before any output is sent, the next account is tried. A rejected token is flagged in the panel so you can re-login.
 - `model` accepts the ids from `/v1/models`. A `devin/` prefix is dropped and dots become dashes (`claude-sonnet-4.6` → `claude-sonnet-4-6`). A family name without an effort level picks one from the catalog, trying medium, then high, then low (`gpt-5-4` → `gpt-5-4-medium`).
 - `system`/`developer` messages become the system prompt; `user` and `assistant` messages become the conversation. `max_completion_tokens` (or the older `max_tokens`; default 32000), `temperature` and `top_p` are forwarded. Streams include usage only when `stream_options.include_usage` is set, in a final chunk with empty `choices`.
-- `stop` (a string or up to 4 strings) is applied by the proxy, since upstream has no stop option: the output is cut before the first match and the upstream stream is closed. `finish_reason` is `"stop"`. Only answer text is checked, not thinking or tool arguments.
+- `stop` (a string or up to 4 strings) is applied by the proxy, since upstream has no stop option: the output is cut before the first match and the upstream stream is closed. `finish_reason` is `"stop"`. Only answer text is checked, not thinking or tool arguments. Upstream sends token usage only at the end of its stream, so after a stop the usage is estimated (about 4 bytes per token).
 - System prompts are cleaned before going upstream: Devin rejects prompts that carry another agent's identity (e.g. "You are Claude Code, ...") with a misleading 403, so such lines, Claude Code billing headers and a few related lines are dropped. This applies to all three chat endpoints.
 - Thinking text, when the model produces it, is returned as `reasoning_content`.
 - Tool calling follows the OpenAI format: `tools` (function type) are forwarded with their JSON schema; the model's calls come back as `tool_calls` (streamed as indexed fragments) with `finish_reason: "tool_calls"`; send results back as `role: "tool"` messages with `tool_call_id`.
