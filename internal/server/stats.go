@@ -153,9 +153,13 @@ func (c *chatStats) record(e LogEntry) {
 		h.Failed++
 	}
 	if e.Cached {
-		h.Cached++
-		h.SavedInputTokens += int64(e.InputTokens)
-		h.SavedOutputTokens += int64(e.OutputTokens)
+		// A replay the client abandoned is a failure, not a hit; either
+		// way its tokens were not spent upstream.
+		if e.Status == 200 {
+			h.Cached++
+			h.SavedInputTokens += int64(e.InputTokens)
+			h.SavedOutputTokens += int64(e.OutputTokens)
+		}
 		return
 	}
 	h.InputTokens += int64(e.InputTokens)

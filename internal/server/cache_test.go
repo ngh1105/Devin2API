@@ -19,6 +19,7 @@ import (
 func TestCacheHitSkipsUpstream(t *testing.T) {
 	fake := &fakeDevin{}
 	srv := chatTestServer(t, fake, "eyJtok1")
+	enableCache(t, srv)
 	body := `{"model":"devin","messages":[{"role":"user","content":"ping"}]}`
 	var first, second openai.ChatCompletion
 	for i, out := range []*openai.ChatCompletion{&first, &second} {
@@ -61,6 +62,7 @@ func TestCacheHitSkipsUpstream(t *testing.T) {
 func TestCacheReplayStreams(t *testing.T) {
 	fake := &fakeDevin{}
 	srv := chatTestServer(t, fake, "eyJtok1")
+	enableCache(t, srv)
 	if rec := postChat(srv, `{"messages":[{"role":"user","content":"ping"}]}`); rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
@@ -99,6 +101,7 @@ func TestCacheReplayStreams(t *testing.T) {
 func TestCacheDisabledAndCleared(t *testing.T) {
 	fake := &fakeDevin{}
 	srv := chatTestServer(t, fake, "eyJtok1")
+	enableCache(t, srv)
 	body := `{"model":"devin","messages":[{"role":"user","content":"ping"}]}`
 	postChat(srv, body)
 	postChat(srv, body)
@@ -145,6 +148,7 @@ func TestCacheDisabledAndCleared(t *testing.T) {
 func TestCacheHitUsageFollowsAnthropic(t *testing.T) {
 	fake := &fakeDevin{}
 	srv := chatTestServer(t, fake, "eyJtok1")
+	enableCache(t, srv)
 	post := func(path, body string) map[string]any {
 		req := v1Request(http.MethodPost, path, strings.NewReader(body))
 		rec := httptest.NewRecorder()
@@ -271,14 +275,14 @@ func TestCacheEvictionAndTTL(t *testing.T) {
 func TestCachePersists(t *testing.T) {
 	dir := t.TempDir()
 	var c responseCache
-	c.load(dir, time.Hour)
+	c.load(dir, time.Hour, 10, 1<<20)
 	c.put(&cacheEntry{Key: "k", Deltas: []devin.Delta{{Text: "pong"}}, Result: devin.ChatResult{PromptTokens: 3}, Size: 4}, time.Hour, 10, 1<<20)
 	c.put(&cacheEntry{Key: "stale", Deltas: []devin.Delta{{Text: "old"}}, Size: 3}, time.Hour, 10, 1<<20)
 	c.entries["stale"].Created = time.Now().Add(-2 * time.Hour)
 	c.entries["stale"].LastHit = c.entries["stale"].Created
 	c.flush()
 	var again responseCache
-	again.load(dir, time.Hour)
+	again.load(dir, time.Hour, 10, 1<<20)
 	e, ok := again.get("k", time.Hour)
 	if !ok || e.Deltas[0].Text != "pong" || e.Result.PromptTokens != 3 {
 		t.Fatalf("reloaded entry = %+v ok %v", e, ok)
@@ -339,7 +343,7 @@ func TestAppendDeltaMerges(t *testing.T) {
 	rec = appendDelta(rec, devin.Delta{ToolCall: &devin.ToolCallDelta{ID: "c1", Name: "t"}})
 	rec = appendDelta(rec, devin.Delta{ToolCall: &devin.ToolCallDelta{Arguments: "{}"}})
 	rec = appendDelta(rec, devin.Delta{Text: "end"})
-	if len(rec) != 5 || rec[1].Thinking != "hmm" || rec[2].ToolCall.ID != "c1" || rec[4].Text != "end" {
+	if len(rec) != 4 || rec[1].Thinking != "hmm" || rec[2].ToolCall.ID != "c1" || rec[2].ToolCall.Arguments != "{}" || rec[3].Text != "end" {
 		t.Errorf("mixed deltas = %+v", rec)
 	}
 	big := appendDelta(nil, devin.Delta{Text: strings.Repeat("x", cacheChunk)})
