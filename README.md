@@ -35,7 +35,7 @@ docker run -d --name devin2api -p 127.0.0.1:8080:8080 -v devin2api-data:/data \
 go build ./cmd/devin2api
 ```
 
-Requires **Go 1.26.9 or newer** (an older 1.26 toolchain fetches it automatically). Windows users get a `.exe` binary. To build an image locally: `docker build --build-arg VERSION=dev -t devin2api .`
+Requires **Go 1.26.10 or newer** (an older 1.26 toolchain fetches it automatically). Windows users get a `.exe` binary. To build an image locally: `docker build --build-arg VERSION=dev -t devin2api .`
 
 **Releasing** (maintainers): push a tag such as `v0.1.0`. The Release workflow tests, builds the archives, creates the GitHub release and pushes the multi-arch image. Running the workflow by hand is a dry run: it only uploads the archives as a workflow artifact.
 
