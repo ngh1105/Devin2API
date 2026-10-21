@@ -35,7 +35,7 @@ docker run -d --name devin2api -p 127.0.0.1:8080:8080 -v devin2api-data:/data \
 go build ./cmd/devin2api
 ```
 
-Requires **Go 1.26 or newer**. Windows users get a `.exe` binary. To build an image locally: `docker build --build-arg VERSION=dev -t devin2api .`
+Requires **Go 1.26.10 or newer** (an older 1.26 toolchain fetches it automatically). Windows users get a `.exe` binary. To build an image locally: `docker build --build-arg VERSION=dev -t devin2api .`
 
 **Releasing** (maintainers): push a tag such as `v0.1.0`. The Release workflow tests, builds the archives, creates the GitHub release and pushes the multi-arch image. Running the workflow by hand is a dry run: it only uploads the archives as a workflow artifact.
 
@@ -71,24 +71,19 @@ The server exposes:
 >   - The admin API is then served on any host, so you can bind `0.0.0.0` and use the panel from the LAN.
 >   - Keyless `/v1` access stays loopback-only, so create API keys for other machines.
 >   - Traffic is plain HTTP: put a TLS reverse proxy in front before exposing it beyond a trusted network.
+> - **Behind a reverse proxy** (even one on the same machine) always set `DEVIN2API_ADMIN_PASSWORD` and create API keys: the proxy's connections come from a loopback address, and one that rewrites `Host` to `127.0.0.1` (nginx's default) would make every request look local. Pass the client's `Host` through (nginx: `proxy_set_header Host $host`), since admin writes are refused when the browser's `Origin` does not match it.
+> - The response cache (on by default, see [Panel](#panel)) keeps model answers in `<data>/cache.json`; turn it off if outputs must not be written to disk.
 
 ---
 
 ## Login
 
-### Panel — browser login (any IdP)
-
-1. Open the Accounts tab → **Add account** → **Login with browser**.
-2. A link to `auth.devin.ai` opens in your default browser.
-3. Log in with **any** Devin auth method — email+password, Google, GitHub, SAML, etc.
-4. After successful auth you're redirected back to the local server; the account appears with usage data.
-
-### Panel — Login with browser (preferred)
+### Panel — browser login (preferred, any IdP)
 
 1. Open the panel at <http://127.0.0.1:8080/web/>, switch to the **Accounts** tab.
 2. Click **Add account**, then **Login with browser**.
-3. A link opens in your default browser pointing to `auth.devin.ai` — click it to authorize.
-4. After auth you're redirected back to the local server; the account appears with usage data.
+3. A link to `auth.devin.ai` opens in your default browser. Log in with **any** Devin auth method — email+password, Google, GitHub, SAML, etc.
+4. After successful auth you're redirected back to the local server; the account appears with usage data.
 
 ### Panel — Manual token import
 
@@ -198,7 +193,7 @@ Settings saved from the panel apply immediately and are kept in `<data>/settings
 
 - **Devin endpoints**: an ordered list of Devin server base URLs (default `https://server.codeium.com`). Chat, usage and model requests use the first one. On a network error or HTTP 502/503/504 before any output, the same account is retried on the next endpoint; other errors (a rejected token, a rate limit, a bad request) are not endpoint problems and go to account failover as before. **Test** checks that a URL answers without sending any account token. Account session tokens are sent to every listed endpoint, so only add hosts you trust.
 - **Global system prompt**: when switched on, added before (default) or after the client's own system prompt on every chat endpoint (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/completions`). It goes through the same cleaning as client prompts. Up to 32 KB.
-- **Response cache** (on by default): a chat request identical to an earlier successful one is answered from memory and spends no account usage. The key covers everything that shapes the answer: the resolved model, the system prompt (with the global one applied), every message including images and tool results, the tool definitions, `max_tokens`, `temperature`, `top_p` and stop sequences; `cache_control` markers are ignored, so a request with and without them is the same entry. A hit replays the recorded output, so it works for every endpoint, streamed or not. It follows the Anthropic prompt cache conventions: an answer lives for 5 minutes after its last use (every hit extends it, like the ephemeral cache; set 60 for the 1-hour behaviour), and the hit's `usage` reports the prompt as read from the cache: on `/v1/messages`, `input_tokens` is 0 and `cache_read_input_tokens` holds the count; on the OpenAI endpoints `prompt_tokens` is unchanged and `prompt_tokens_details.cached_tokens` (`input_tokens_details.cached_tokens` on `/v1/responses`) holds it, so clients and cost trackers see what was not spent. Up to 1000 answers and 64 MB are kept (least recently used evicted first); all three limits are editable, and `0` or an empty field means the default. The cache is saved to `<data>/cache.json` within ~2 s of a change and survives restarts. **Clear cache** (or `DELETE /admin/api/cache`) drops it; `GET /admin/api/cache` reports its size and the totals. Cached requests still count against an API key's request quota, since the key did make a request. Failed requests are never cached. Devin has no prompt cache the proxy can use, so a request that merely shares a prefix with an earlier one (the usual agent turn) still costs its full prompt upstream; only whole repeated requests are saved.
+- **Response cache** (on by default): a chat request identical to an earlier successful one is answered from memory and spends no account usage. The key covers everything that shapes the answer: the resolved model, the system prompt (with the global one applied), every message including images and tool results, the tool definitions, `max_tokens`, `temperature`, `top_p` and stop sequences; `cache_control` markers are ignored, so a request with and without them is the same entry. A hit replays the recorded output, so it works for every endpoint, streamed or not. Unlike a provider's prompt cache, which only speeds up the prompt and still samples a fresh answer, this replays the earlier answer: an identical request within the window gets the same text even at `temperature` 1, so turn the cache off if clients resend a prompt to get a different sample ("regenerate", best-of-N). The cache is shared by all API keys. It borrows the Anthropic prompt cache conventions for lifetime and usage: an answer lives for 5 minutes after its last use (every hit extends it, like the ephemeral cache; set 60 for the 1-hour behaviour), and the hit's `usage` reports the prompt as read from the cache: on `/v1/messages`, `input_tokens` is 0 and `cache_read_input_tokens` holds the count; on the OpenAI endpoints `prompt_tokens` is unchanged and `prompt_tokens_details.cached_tokens` (`input_tokens_details.cached_tokens` on `/v1/responses`) holds it, so clients and cost trackers see what was not spent. Up to 1000 answers and 64 MB are kept (least recently used evicted first; lowering a limit also trims the saved file on the next start); all three limits are editable, and `0` or an empty field means the default. The cache is saved to `<data>/cache.json` (the full answers, in plain text) within ~2 s of a new answer and within a minute of a hit, and survives restarts. **Clear cache** (or `DELETE /admin/api/cache`) drops it; `GET /admin/api/cache` reports its size and the totals. Cached requests still count against an API key's request quota, since the key did make a request. Failed requests, empty answers and refusals (`content_filter`) are never cached, so a retry reaches upstream. Devin has no prompt cache the proxy can use, so a request that merely shares a prefix with an earlier one (the usual agent turn) still costs its full prompt upstream; only whole repeated requests are saved.
 
 Stats grid at the top: Accounts, Models, Requests (with a 24-hour sparkline), Failed, Cache hits (share of all requests, with hits and tokens saved). Request, failure and cache-hit totals (with the tokens the hits saved), and per-hour counts for the last 7 days, are saved to `<data>/stats.json` (within ~2 s of each request) and survive restarts; the date counting started is shown under them. Delete the file to reset. In the hourly counts, a cached request's tokens go to `saved_input_tokens` / `saved_output_tokens` instead of `input_tokens` / `output_tokens`, so the token totals show what was spent upstream.
 
@@ -217,7 +212,7 @@ INFO chat endpoint=/v1/messages model=claude-sonnet-4-6 stream=true account="" a
 
 The second line is a cache hit: no account was tried and the tokens shown were saved, not spent. In the panel's log such a request shows **cache** in the account column.
 
-Logs hold metadata only; prompts, outputs and credentials are never recorded.
+Logs hold metadata only; prompts, outputs and credentials are never recorded. (The response cache, when on, does keep answers in `cache.json`; see above.)
 
 ---
 

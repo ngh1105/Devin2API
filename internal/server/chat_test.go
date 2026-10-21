@@ -134,6 +134,9 @@ func chatTestServer(t *testing.T, fake *fakeDevin, sessionTokens ...string) *Ser
 	}
 	srv := New(config.Config{Listen: ":0"}, accs, mustTokens(t))
 	srv.loginServerBase = up.URL
+	// The response cache is off here, so a repeated request exercises
+	// routing; cache tests turn it on with enableCache.
+	setCache(t, srv, false)
 	return srv
 }
 

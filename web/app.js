@@ -1602,7 +1602,9 @@
     cacheFields.forEach(function (f) {
       document.getElementById(f[0]).oninput = function (ev) {
         if (!draft) return;
-        var n = parseInt(ev.target.value, 10);
+        // Number, not parseInt: a number input accepts "1e3", which parseInt
+        // would read as 1.
+        var n = Math.floor(Number(ev.target.value));
         draft[f[1]] = isNaN(n) || n < 0 ? 0 : n;
         markDirty();
       };

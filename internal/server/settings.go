@@ -1,12 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -74,7 +76,13 @@ func (v runtimeSettings) cacheMaxBytes() int {
 	if v.CacheMaxMB <= 0 {
 		return defaultCacheMB << 20
 	}
-	return v.CacheMaxMB << 20
+	return mbToBytes(v.CacheMaxMB, math.MaxInt)
+}
+
+// mbToBytes converts megabytes to bytes, capped at limit so the result fits
+// the platform int (on a 32-bit build 2048 MB would wrap).
+func mbToBytes(mb int, limit int64) int {
+	return int(min(int64(mb)<<20, limit))
 }
 
 // settingsStore holds the runtime settings and their file.
@@ -97,22 +105,14 @@ func (st *settingsStore) load(dataDir string) {
 		}
 		return
 	}
-	var v runtimeSettings
-	if err := json.Unmarshal(b, &v); err != nil {
+	v, err := decodeSettings(b, false)
+	if err != nil {
 		slog.Warn("settings: invalid settings.json, using defaults", "err", err)
 		return
 	}
-	// A settings.json from before the response cache has no cache_enabled
-	// key; the cache is on by default, so only an explicit false turns it off.
-	var keys map[string]json.RawMessage
-	if json.Unmarshal(b, &keys) == nil {
-		if _, ok := keys["cache_enabled"]; !ok {
-			v.CacheEnabled = true
-		}
-	}
-	// An upstream the current rules refuse (e.g. a plain-http LAN address
-	// saved by an older version) is dropped on its own, so the rest of the
-	// settings survive.
+	// A value the current rules refuse (a plain-http LAN upstream saved by
+	// an older version, a cache limit above the cap) is dropped or clamped
+	// on its own, so the rest of the settings survive.
 	kept := v.Upstreams[:0]
 	for _, raw := range v.Upstreams {
 		if _, err := normalizeUpstream(raw); err != nil {
@@ -122,12 +122,53 @@ func (st *settingsStore) load(dataDir string) {
 		kept = append(kept, raw)
 	}
 	v.Upstreams = kept
+	v = clampSettings(v)
 	if v, err = normalizeSettings(v); err != nil {
 		slog.Warn("settings: invalid settings.json, using defaults", "err", err)
 		return
 	}
 	st.v = v
 }
+
+// decodeSettings parses a settings document. A document from before the
+// response cache carries no cache_enabled key; the cache is on unless the
+// document says otherwise. strict refuses unknown keys (the admin API).
+func decodeSettings(b []byte, strict bool) (runtimeSettings, error) {
+	v := runtimeSettings{CacheEnabled: true}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if strict {
+		dec.DisallowUnknownFields()
+	}
+	if err := dec.Decode(&v); err != nil {
+		return v, err
+	}
+	return v, nil
+}
+
+// clampSettings brings out-of-range values from a saved file into range,
+// logging each change, so one bad number does not discard the whole file.
+func clampSettings(v runtimeSettings) runtimeSettings {
+	clamp := func(name string, p *int, max int) {
+		if *p < 0 || *p > max {
+			slog.Warn("settings: value out of range, clamped", "setting", name, "value", *p, "max", max)
+			*p = min(max, max0(*p))
+		}
+	}
+	clamp("cache_ttl_minutes", &v.CacheTTLMinutes, maxCacheTTLMinutes)
+	clamp("cache_max_entries", &v.CacheMaxEntries, maxCacheEntries)
+	clamp("cache_max_mb", &v.CacheMaxMB, maxCacheMB)
+	if len(v.SystemPrompt) > maxSystemPrompt {
+		slog.Warn("settings: system prompt too long, truncated", "bytes", len(v.SystemPrompt), "max", maxSystemPrompt)
+		v.SystemPrompt = v.SystemPrompt[:maxSystemPrompt]
+	}
+	if v.SystemPromptMode != "" && v.SystemPromptMode != systemPrepend && v.SystemPromptMode != systemAppend {
+		slog.Warn("settings: unknown system_prompt_mode, using prepend", "mode", v.SystemPromptMode)
+		v.SystemPromptMode = systemPrepend
+	}
+	return v
+}
+
+func max0(n int) int { return max(n, 0) }
 
 func (st *settingsStore) get() runtimeSettings {
 	st.mu.RLock()
@@ -245,7 +286,8 @@ func (s *Server) upstreams() []string {
 // the account or request: a transport error or a 502/503/504. Another
 // endpoint may then succeed with the same account.
 func endpointFailure(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	// A stop sequence ended the answer: the request is finished, not failed.
+	if err == nil || errors.Is(err, errStopSequence) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 	var ue *devin.UpstreamError
@@ -316,10 +358,13 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeAdminJSON(w, http.StatusOK, s.settingsView())
 	case http.MethodPut:
-		var v runtimeSettings
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&v); err != nil {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "unable to read body")
+			return
+		}
+		v, err := decodeSettings(b, true)
+		if err != nil {
 			writeErr(w, http.StatusBadRequest, "invalid settings JSON: "+err.Error())
 			return
 		}
@@ -337,8 +382,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// upstreamTestClient is short: the check only proves reachability.
-var upstreamTestClient = &http.Client{Timeout: 10 * time.Second}
+// upstreamTestClient is short: the check only proves reachability. It does
+// not follow redirects, which could lead the check onto another host.
+var upstreamTestClient = &http.Client{
+	Timeout:       10 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
 
 // handleUpstreamTest checks that an endpoint answers the Devin API path.
 // It sends no account token, so testing an unknown URL leaks nothing; any

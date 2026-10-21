@@ -21,6 +21,7 @@ import (
 func TestQuotaOnlyForUpstreamRequests(t *testing.T) {
 	fake := &fakeDevin{}
 	srv := chatTestServer(t, fake, "eyJtok1")
+	enableCache(t, srv)
 	srv.fetchModels(t.Context())
 	key, _ := srv.tokens.Create(store.TokenOptions{Quota: 10})
 	cases := []struct{ path, body string }{
@@ -64,6 +65,14 @@ func TestQuotaOnlyForUpstreamRequests(t *testing.T) {
 	}
 	if m, _ := srv.tokens.Match(key.Token); m.Requests != 2 {
 		t.Errorf("no-account request used quota: %d", m.Requests)
+	}
+	// The identical chat is still answered from the cache with no account,
+	// and counts: the key got an answer.
+	if rec := keyPost(srv, key.Token, "/v1/chat/completions", gptChat); rec.Code != 200 {
+		t.Errorf("cached chat without accounts: %d %s", rec.Code, rec.Body)
+	}
+	if m, _ := srv.tokens.Match(key.Token); m.Requests != 3 {
+		t.Errorf("cached request without accounts counted %d, want 3", m.Requests)
 	}
 }
 
